@@ -3841,6 +3841,7 @@ dependencies = [
  "toml",
  "toml_edit",
  "tron-config",
+ "unicode-width",
 ]
 
 [[package]]

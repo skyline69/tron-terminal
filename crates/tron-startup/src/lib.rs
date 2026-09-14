@@ -9,6 +9,7 @@ mod motion;
 mod pickers;
 mod settings;
 mod splash;
+mod tour;
 mod ui;
 
 use std::io;
@@ -26,8 +27,10 @@ pub const TOKEN_ENV: &str = "TRON_STARTUP_TOKEN";
 pub const CONFIG_DIR_ENV: &str = "TRON_STARTUP_CONFIG_DIR";
 /// Debug aid: skip the splash and open this tab (by title) directly.
 const DEBUG_TAB_ENV: &str = "TRON_STARTUP_DEBUG_TAB";
+/// Debug aid: open this tour page, by number from 1.
+pub(crate) const DEBUG_PAGE_ENV: &str = "TRON_STARTUP_DEBUG_PAGE";
 /// Variables for the startup screen only, removed before the shell starts.
-const ENV: [&str; 5] = [MARKER_ENV, ANIMATIONS_ENV, TOKEN_ENV, CONFIG_DIR_ENV, DEBUG_TAB_ENV];
+const ENV: [&str; 6] = [MARKER_ENV, ANIMATIONS_ENV, TOKEN_ENV, CONFIG_DIR_ENV, DEBUG_TAB_ENV, DEBUG_PAGE_ENV];
 
 /// How the splash ended.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

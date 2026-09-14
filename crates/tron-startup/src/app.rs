@@ -23,6 +23,7 @@ use crate::motion::{lerp, pulse, smooth};
 use crate::pickers::{self, Item, Picker};
 use crate::settings::{self, Choices, Setting};
 use crate::splash;
+use crate::tour::{self, Page};
 use crate::ui::{CYAN, DARK, DIM, MAGENTA, TEXT};
 
 const FRAME: Duration = Duration::from_millis(16);
@@ -188,6 +189,16 @@ pub struct App {
     toast: Option<(Instant, String)>,
     /// A save finished; tron must stop previewing and reload the file.
     commit_pending: bool,
+    tour: Picker,
+    /// Where the tour page draws its demo, as of the last frame.
+    tour_demo: Option<Rect>,
+    /// The screen must be cleared, removing a painted tour page.
+    tour_clear: bool,
+    /// When to paint the tour page, once transition effects are done.
+    tour_paint_at: Option<Instant>,
+    tour_image_sent: bool,
+    /// Screen size of the last frame, to repaint the tour after a resize.
+    last_screen: Rect,
 }
 
 impl App {
@@ -207,6 +218,12 @@ impl App {
             dialog_fresh: false,
             toast: None,
             commit_pending: false,
+            tour: Picker::new(0),
+            tour_demo: None,
+            tour_clear: false,
+            tour_paint_at: None,
+            tour_image_sent: false,
+            last_screen: Rect::default(),
             themes: Picker::new(theme_index),
             shaders: Picker::new(0),
             choices: saved.clone(),
@@ -244,6 +261,9 @@ impl App {
         }
         let lists = [Tab::Themes, Tab::Shaders];
         let preview_changes = lists.contains(&tab) || lists.contains(&self.tab);
+        if tab == Tab::Tour || self.tab == Tab::Tour {
+            self.repaint_tour();
+        }
         self.tab = tab;
         self.hover = None;
         if preview_changes {
@@ -262,6 +282,9 @@ impl App {
     fn start_exit(&mut self) {
         if self.exit.is_some() {
             return;
+        }
+        if self.tab == Tab::Tour {
+            self.repaint_tour();
         }
         self.exit = Some(Instant::now());
         if self.animations {
@@ -289,12 +312,23 @@ impl App {
                         self.settings_picker.move_by(delta, self.settings.len());
                         false
                     }
+                    Tab::Tour => {
+                        if self.tour.move_by(delta, Page::ALL.len()) {
+                            self.repaint_tour();
+                        }
+                        false
+                    }
                     Tab::Themes => self.themes.move_by(delta, self.catalog.themes.len()),
                     Tab::Shaders => self.shaders.move_by(delta, self.catalog.shaders.len()),
                     _ => false,
                 };
                 if moved {
                     self.schedule_preview();
+                }
+            }
+            Command::Pick(index) if self.tab == Tab::Tour => {
+                if self.tour.set(index, Page::ALL.len()) {
+                    self.repaint_tour();
                 }
             }
             Command::Pick(index) if self.tab == Tab::Settings => {
@@ -380,6 +414,25 @@ impl App {
             shaders.push(shader.file.clone());
         }
         self.choices.overlay(theme, &shaders)
+    }
+
+    /// Clears the tour page from the screen and paints the current one after the
+    /// transition, when effects no longer touch the demo area.
+    fn repaint_tour(&mut self) {
+        self.tour_clear = true;
+        let delay = if self.animations { Duration::from_millis(SWITCH_MS as u64 + 80) } else { Duration::ZERO };
+        let intro = if self.animations { self.started + INTRO + Duration::from_millis(100) } else { self.started };
+        self.tour_paint_at = Some((Instant::now() + delay).max(intro));
+    }
+
+    /// The tour page to paint now, with its area.
+    fn tour_paint(&mut self, now: Instant) -> Option<(Page, Rect)> {
+        let due = self.tour_paint_at.is_some_and(|at| at <= now);
+        if !due || self.tab != Tab::Tour || self.exit.is_some() || self.dialog.is_some() {
+            return None;
+        }
+        self.tour_paint_at = None;
+        Some((Page::ALL[self.tour.selected], self.tour_demo?))
     }
 
     fn open_dialog(&mut self, dialog: Dialog) {
@@ -474,6 +527,13 @@ impl App {
         }
         if ctrl && key.code == KeyCode::Char('s') {
             return Command::OpenSave;
+        }
+        if self.tab == Tab::Tour {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => return Command::Move(-1),
+                KeyCode::Down | KeyCode::Char('j') => return Command::Move(1),
+                _ => {}
+            }
         }
         if self.tab == Tab::Settings {
             match key.code {
@@ -578,6 +638,12 @@ impl App {
     pub fn draw(&mut self, frame: &mut Frame, elapsed: Duration) {
         self.poll_fonts();
         let screen = frame.area();
+        if screen != self.last_screen {
+            self.last_screen = screen;
+            if self.tab == Tab::Tour {
+                self.repaint_tour();
+            }
+        }
         let areas = Areas::new(screen);
         self.hits.clear();
         self.draw_header(frame, areas.header);
@@ -595,7 +661,7 @@ impl App {
             Tab::Shaders => self.draw_shaders(frame, inner),
             Tab::Keys => draw_keys(frame, inner),
             Tab::About => draw_about(frame, inner),
-            Tab::Tour => draw_upcoming(frame, inner),
+            Tab::Tour => self.draw_tour(frame, inner),
         }
         self.draw_status(frame, areas.status);
         if let Some(dialog) = self.dialog {
@@ -668,6 +734,9 @@ impl App {
             Tab::Settings => {
                 vec![key("↑/↓"), label(" select  "), key("←/→"), label(" change  "), key("Tab"), label(" tabs")]
             }
+            Tab::Tour => {
+                vec![key("↑/↓"), label(" pages  "), key("←/→"), label(" tabs  "), key("click"), label(" select")]
+            }
             _ => vec![key("←/→"), label(" switch  "), key("1-7"), label(" jump  "), key("click"), label(" select")],
         };
         frame.render_widget(Paragraph::new(Line::from(hints)), area);
@@ -707,6 +776,37 @@ impl App {
         let start_area = Rect::new(area.right().saturating_sub(width), area.y, width, 1).intersection(area);
         self.hits.push((start_area, Target::StartTerminal));
         frame.render_widget(Paragraph::new(start), start_area);
+    }
+
+    fn draw_tour(&mut self, frame: &mut Frame, area: Rect) {
+        let [list_area, _, page_area] =
+            Layout::horizontal([Constraint::Length(24), Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+        let items: Vec<Item> =
+            Page::ALL.iter().map(|page| Item { name: page.title(), tag: "", chosen: false }).collect();
+        let hover = match self.hover {
+            Some(Target::Item(index)) => Some(index),
+            _ => None,
+        };
+        let rows = pickers::draw_list(frame, list_area, &items, &mut self.tour, hover, true);
+        self.hits.extend(rows.into_iter().map(|(rect, index)| (rect, Target::Item(index))));
+        let page = Page::ALL[self.tour.selected];
+        let [title_area, description_area, _, demo_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(page_area);
+        frame.render_widget(
+            Paragraph::new(Line::styled(page.title(), Style::new().fg(CYAN).add_modifier(Modifier::BOLD))),
+            title_area,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(page.description(), Style::new().fg(DIM))).wrap(Wrap { trim: true }),
+            description_area,
+        );
+        // Left blank: the page is written into this area directly.
+        self.tour_demo = Some(demo_area);
     }
 
     fn draw_settings(&mut self, frame: &mut Frame, area: Rect) {
@@ -1011,16 +1111,6 @@ fn draw_about(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
-fn draw_upcoming(frame: &mut Frame, area: Rect) {
-    let text = "Ligatures, emoji, right-to-left text, images and scaled text.";
-    let lines = vec![
-        Line::styled(text, Style::new().fg(TEXT)),
-        Line::raw(""),
-        Line::styled("Coming soon.", Style::new().fg(DIM)),
-    ];
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
 /// `ctrl+shift+c` style text for a key combination.
 fn combo_text(combo: &tron_config::KeyCombo) -> String {
     let mut parts = Vec::new();
@@ -1068,6 +1158,12 @@ pub fn run<W: Write>(
     if matches!(app.tab, Tab::Themes | Tab::Shaders) {
         app.schedule_preview();
     }
+    if app.tab == Tab::Tour {
+        if let Some(page) = std::env::var(crate::DEBUG_PAGE_ENV).ok().and_then(|p| p.parse::<usize>().ok()) {
+            app.tour.set(page.saturating_sub(1), Page::ALL.len());
+        }
+        app.repaint_tour();
+    }
     ratatui::crossterm::execute!(io::stdout(), EnableMouseCapture)?;
     link.scene(SCENE);
     let mut last = Instant::now();
@@ -1077,8 +1173,17 @@ pub fn run<W: Write>(
         let now = Instant::now();
         let elapsed = now - last;
         last = now;
+        if std::mem::take(&mut app.tour_clear) {
+            tour::clear(&mut io::stdout());
+            if let Err(error) = terminal.clear() {
+                break Err(error);
+            }
+        }
         if let Err(error) = terminal.draw(|frame| app.draw(frame, elapsed)) {
             break Err(error);
+        }
+        if let Some((page, area)) = app.tour_paint(now) {
+            tour::paint(page, area, &mut io::stdout(), &mut app.tour_image_sent);
         }
         link.params(app.shader_params(now));
         if app.exit_done(now) {
@@ -1310,6 +1415,30 @@ mod tests {
         assert!(app.exit.is_some(), "discard starts the terminal");
         assert_eq!(tron_config::Config::load(&paths).unwrap().theme.as_deref(), Some("nord"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tour_pages_repaint_after_transitions() {
+        let mut app = App::new(false, catalog(), &[]);
+        app.apply(Command::Select(Tab::Tour), Rect::default());
+        assert!(app.tour_clear, "entering clears the screen");
+        let text = screen(&mut app);
+        assert!(text.contains("Text and styles") && text.contains("Ligatures from your font"), "{text}");
+        let (page, _) = app.tour_paint(Instant::now()).expect("paint without animations");
+        assert_eq!(page, Page::Text);
+        assert_eq!(app.tour_paint(Instant::now()), None, "painted once");
+        assert_eq!(app.on_key(key(KeyCode::Down)), Command::Move(1));
+        app.apply(Command::Move(1), Rect::default());
+        assert_eq!(app.tour_paint(Instant::now()).map(|(page, _)| page), Some(Page::Unicode));
+        app.apply(Command::Select(Tab::About), Rect::default());
+        assert!(app.tour_clear, "leaving clears the painted page");
+        assert_eq!(app.tour_paint(Instant::now()), None);
+
+        let mut animated = App::new(true, catalog(), &[]);
+        animated.apply(Command::Select(Tab::Tour), Rect::default());
+        screen(&mut animated);
+        assert_eq!(animated.tour_paint(Instant::now()), None, "waits for the transition");
+        assert!(animated.tour_paint(Instant::now() + Duration::from_secs(2)).is_some());
     }
 
     #[test]
