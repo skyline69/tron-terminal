@@ -1081,7 +1081,32 @@ impl Terminal {
         Cell::erased(&self.cursor.pen)
     }
 
+    /// Removes Sixel and inline images under cells that are written or erased,
+    /// as xterm does. tmux relies on it when it redraws a window over an image.
+    #[inline]
+    fn erase_images(&mut self, rows: std::ops::Range<usize>, cols: std::ops::Range<usize>) {
+        if !self.graphics.placements().is_empty() {
+            self.erase_images_slow(rows, cols);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn erase_images_slow(&mut self, rows: std::ops::Range<usize>, cols: std::ops::Range<usize>) {
+        let top = self.grids[self.active].screen_line(0);
+        let lines = top + rows.start as i64..top + rows.end as i64;
+        self.graphics.erase_cells(lines, cols, self.active == ALTERNATE);
+    }
+
+    /// Scrolling part of the screen moves text past images, which stay put.
+    fn erase_images_in_scroll_region(&mut self) {
+        if self.scroll_top > 0 || self.scroll_bottom + 1 < self.rows() {
+            self.erase_images(self.scroll_top..self.scroll_bottom + 1, 0..self.cols());
+        }
+    }
+
     fn scroll_up(&mut self, n: usize) {
+        self.erase_images_in_scroll_region();
         let blank = self.blank();
         let save = self.active == PRIMARY;
         let grid = &mut self.grids[self.active];
@@ -1096,6 +1121,7 @@ impl Terminal {
     }
 
     fn scroll_down(&mut self, n: usize) {
+        self.erase_images_in_scroll_region();
         let blank = self.blank();
         self.grids[self.active].scroll_down(self.scroll_top, self.scroll_bottom, n, blank);
     }
@@ -1231,6 +1257,7 @@ impl Terminal {
         }
 
         let (row, col) = (self.cursor.row, self.cursor.col);
+        self.erase_images(row..row + 1, col..col + width);
         if self.modes.contains(Modes::INSERT) {
             self.insert_blanks(width);
         }
@@ -1403,6 +1430,7 @@ impl Terminal {
 
     fn insert_blanks(&mut self, n: usize) {
         let (row, col) = (self.cursor.row, self.cursor.col);
+        self.erase_images(row..row + 1, col..self.cols());
         let blank = self.blank();
         self.clear_wide_overlap(row, col, 1);
         self.grids[self.active].row_mut(row).insert_cells(col, n, blank);
@@ -1413,6 +1441,7 @@ impl Terminal {
         let (row, col) = (self.cursor.row, self.cursor.col);
         let blank = self.blank();
         let width = self.cols();
+        self.erase_images(row..row + 1, col..width);
         self.clear_wide_overlap(row, col, (col + n).min(width) - col);
         self.grids[self.active].row_mut(row).delete_cells(col, n, blank);
         self.cursor.pending_wrap = false;
@@ -1422,6 +1451,17 @@ impl Terminal {
         let blank = self.blank();
         let (rows, cols) = (self.rows(), self.cols());
         let (row, col) = (self.cursor.row, self.cursor.col);
+        match mode {
+            0 => {
+                self.erase_images(row..row + 1, col..cols);
+                self.erase_images(row + 1..rows, 0..cols);
+            }
+            1 => {
+                self.erase_images(0..row, 0..cols);
+                self.erase_images(row..row + 1, 0..col + 1);
+            }
+            _ => {}
+        }
         let grid = &mut self.grids[self.active];
         match mode {
             0 => {
@@ -1463,6 +1503,7 @@ impl Terminal {
             2 => 0..cols,
             _ => return,
         };
+        self.erase_images(row..row + 1, range.clone());
         self.grids[self.active].erase(row, range, blank);
     }
 
@@ -1476,6 +1517,7 @@ impl Terminal {
         }
         let blank = self.blank();
         let (row, bottom) = (self.cursor.row, self.scroll_bottom);
+        self.erase_images(row..bottom + 1, 0..self.cols());
         self.grids[self.active].scroll_down(row, bottom, n, blank);
         self.cursor.col = 0;
         self.cursor.pending_wrap = false;
@@ -1487,6 +1529,7 @@ impl Terminal {
         }
         let blank = self.blank();
         let (row, bottom) = (self.cursor.row, self.scroll_bottom);
+        self.erase_images(row..bottom + 1, 0..self.cols());
         self.grids[self.active].scroll_up(row, bottom, n, blank, false);
         self.cursor.col = 0;
         self.cursor.pending_wrap = false;
@@ -1947,6 +1990,7 @@ impl Perform for Terminal {
             if self.multicell {
                 self.clear_multicells(row, col, n);
             }
+            self.erase_images(row..row + 1, col..end);
             let pen = self.cursor.pen;
             let line = self.grids[self.active].row_mut(row);
             repair_wide(line, col, n);
@@ -2016,6 +2060,7 @@ impl Perform for Terminal {
                 }
                 if let Some((c, cluster_col)) = last {
                     line.touch(start, col);
+                    self.erase_images(row..row + 1, start..col);
                     self.last_cluster = Some((row, cluster_col));
                     self.last_char = Some(c);
                     self.last_was_zwj = false;
@@ -2109,6 +2154,7 @@ impl Perform for Terminal {
             ([], b'T') if params.len() <= 1 => self.scroll_down(n(0)),
             ([], b'X') => {
                 let (row, col) = (self.cursor.row, self.cursor.col);
+                self.erase_images(row..row + 1, col..col + n(0));
                 let blank = self.blank();
                 self.grids[self.active].erase(row, col..col + n(0), blank);
             }
@@ -2289,6 +2335,7 @@ impl Perform for Terminal {
                 for r in 0..rows {
                     self.grids[self.active].erase_row(r, fill);
                 }
+                self.erase_images(0..rows, 0..self.cols());
             }
             ([b'#'], size @ (b'3' | b'4' | b'5' | b'6')) => {
                 let row = self.cursor.row;
@@ -3147,6 +3194,37 @@ mod tests {
         assert_eq!((placement.line, placement.col, placement.rows), (0, 2, 1));
         assert_eq!(t.graphics().images()[&placement.image_id].width, 10);
         assert_eq!((t.cursor().row, t.cursor().col), (1, 3));
+    }
+
+    #[test]
+    fn writing_or_erasing_over_a_sixel_image_removes_it() {
+        const SIXEL: &[u8] = b"\x1bPq#1;2;100;0;0#1!10~-!10~\x1b\\";
+        let mut t = Terminal::new(20, 10, 100);
+        t.set_cell_pixels(10, 20);
+        let mut parser = Parser::new();
+        // One cell at row 0, column 2. Text beside it keeps it.
+        parser.advance(&mut t, b"ab");
+        parser.advance(&mut t, SIXEL);
+        parser.advance(&mut t, b"\x1b[1;1Hab\x1b[1;4Hxy\x1b[2;1H\x1b[K");
+        assert_eq!(t.graphics().placements().len(), 1);
+        // A window redrawn over it, as tmux does, removes it and frees the image.
+        parser.advance(&mut t, b"\x1b[1;3Hz");
+        assert!(t.graphics().placements().is_empty());
+        assert!(t.graphics().images().is_empty());
+
+        for erase in [&b"\x1b[1;1H\x1b[K"[..], b"\x1b[1;3H\x1b[X", b"\x1b[1;1H\x1b[P", b"\x1b[1;1H\x1b[J"] {
+            parser.advance(&mut t, b"\x1b[1;3H");
+            parser.advance(&mut t, SIXEL);
+            assert_eq!(t.graphics().placements().len(), 1);
+            parser.advance(&mut t, erase);
+            assert!(t.graphics().placements().is_empty(), "{erase:?}");
+        }
+    }
+
+    #[test]
+    fn writing_over_a_kitty_image_keeps_it() {
+        let t = term(10, 5, b"\x1b[2;3H\x1b_Ga=T,f=24,s=1,v=1,i=5;AAAA\x1b\\\x1b[2;3Hxyz\x1b[2K");
+        assert_eq!(t.graphics().placements().len(), 1);
     }
 
     #[test]

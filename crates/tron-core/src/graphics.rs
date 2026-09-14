@@ -112,6 +112,9 @@ pub struct Placement {
     pub parent: Option<(u32, u32)>,
     /// Drawn at this size in pixels instead of the natural or cell size.
     pub pixel_size: Option<[u32; 2]>,
+    /// Part of the cells it covers, like text: Sixel and iTerm2 inline images.
+    /// Writing or erasing any of those cells removes it.
+    pub cell_bound: bool,
 }
 
 /// A cell that shows part of an image through the placeholder character.
@@ -520,7 +523,11 @@ impl Graphics {
     pub fn add_image(&mut self, width: u32, height: u32, rgba: Vec<u8>, ctx: &Context) -> (u32, u32) {
         let id = self.internal_id();
         self.store(id, Decoded { width, height, rgba, opaque: false }, true);
-        self.place(id, &Control::default(), ctx).ok().flatten().unwrap_or((1, 1))
+        let advance = self.place(id, &Control::default(), ctx).ok().flatten();
+        if let Some(placement) = self.placements.last_mut().filter(|p| p.image_id == id) {
+            placement.cell_bound = true;
+        }
+        advance.unwrap_or((1, 1))
     }
 
     /// Shows an image file (PNG, JPEG or animated GIF) at the cursor, sized as in
@@ -575,6 +582,7 @@ impl Graphics {
         if let Some(placement) = self.placements.last_mut() {
             placement.scaled = false;
             placement.pixel_size = Some(draw);
+            placement.cell_bound = true;
         }
         Ok((control.cols, control.rows))
     }
@@ -679,6 +687,7 @@ impl Graphics {
             virtual_placement: control.placeholder,
             parent,
             pixel_size: None,
+            cell_bound: false,
         });
         // Placements relative to a moved one move with it.
         if let Some((old_line, old_col)) = moved_from {
@@ -1021,6 +1030,34 @@ impl Graphics {
             self.remove_orphans();
             self.generation += 1;
         }
+    }
+
+    /// Removes cell bound placements that overlap the given lines and columns,
+    /// freeing their images.
+    pub fn erase_cells(&mut self, lines: std::ops::Range<i64>, cols: std::ops::Range<usize>, alt_screen: bool) {
+        let mut erased = Vec::new();
+        self.placements.retain(|p| {
+            let hit = p.cell_bound
+                && p.alt_screen == alt_screen
+                && p.line < lines.end
+                && p.line + i64::from(p.rows) > lines.start
+                && p.col < cols.end
+                && p.col + p.cols as usize > cols.start;
+            if hit {
+                erased.push(p.image_id);
+            }
+            !hit
+        });
+        if erased.is_empty() {
+            return;
+        }
+        for id in erased {
+            if !self.placements.iter().any(|p| p.image_id == id) {
+                self.remove_image(id);
+            }
+        }
+        self.remove_orphans();
+        self.generation += 1;
     }
 
     /// Removes placements visible on the given screen (screen clear).
