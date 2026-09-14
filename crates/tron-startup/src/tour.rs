@@ -183,19 +183,63 @@ pub fn paint(page: Page, area: Rect, out: &mut impl Write, image_sent: &mut bool
             at(out, area, 7, "\x1b[2mprintf '\\e]66;s=2;Hello\\a'");
         }
         Page::Links => {
-            at(
-                out,
-                area,
-                0,
-                "\x1b]8;;https://github.com/skyline69/tron-terminal\x1b\\\x1b[38;2;79;214;255mtron on GitHub\x1b]8;;\x1b\\\x1b[0m  \x1b[2ma hyperlink from a program",
-            );
-            at(out, area, 1, "https://sw.kovidgoyal.net/kitty/  \x1b[2ma URL in plain output");
+            paint_links(out, area, None);
             at(out, area, 3, "\x1b[2mHold Ctrl and hover to underline, Ctrl+click to open.");
             at(out, area, 5, "Ctrl+Shift+Z / X  \x1b[2mprevious or next prompt");
             at(out, area, 6, "Ctrl+Shift+G      \x1b[2mselect the last output");
             at(out, area, 8, "\x1b[2mDesktop notification:");
             at(out, area, 9, "printf '\\e]777;notify;Done;Tests passed\\e\\\\'");
         }
+    }
+    let _ = out.flush();
+}
+
+/// The Links page's links: target, label and a note after it. The first is an
+/// OSC 8 hyperlink, the second a plain URL.
+const LINKS: [(&str, &str, &str); 2] = [
+    ("https://github.com/skyline69/tron-terminal", "tron on GitHub", "a hyperlink from a program"),
+    ("https://sw.kovidgoyal.net/kitty/", "https://sw.kovidgoyal.net/kitty/", "a URL in plain output"),
+];
+
+fn link_line(index: usize, underlined: bool) -> String {
+    let (url, label, note) = LINKS[index];
+    let underline = if underlined { "\x1b[4m" } else { "" };
+    if index == 0 {
+        format!("\x1b]8;;{url}\x1b\\\x1b[38;2;79;214;255m{underline}{label}\x1b[0m\x1b]8;;\x1b\\  \x1b[2m{note}")
+    } else {
+        format!("{underline}{label}\x1b[0m  \x1b[2m{note}")
+    }
+}
+
+/// Screen areas of the links on `page` and where they point.
+pub fn links(page: Page, area: Rect) -> Vec<(Rect, &'static str)> {
+    if page != Page::Links {
+        return Vec::new();
+    }
+    LINKS
+        .iter()
+        .enumerate()
+        .filter(|(row, _)| (*row as u16) < area.height)
+        .map(|(row, (url, label, _))| {
+            let width = (label.chars().count() as u16).min(area.width);
+            (Rect::new(area.x, area.y + row as u16, width, 1), *url)
+        })
+        .collect()
+}
+
+/// Draws the Links page's links, underlining the hovered one.
+pub fn paint_links(out: &mut impl Write, area: Rect, hovered: Option<usize>) {
+    for index in 0..LINKS.len() {
+        at(out, area, index as u16, &link_line(index, hovered == Some(index)));
+    }
+    let _ = out.flush();
+}
+
+/// Blanks `area` and removes the demo image, quicker than redrawing the screen.
+pub fn erase(out: &mut impl Write, area: Rect) {
+    clear(out);
+    for row in 0..area.height {
+        let _ = write!(out, "\x1b[{};{}H\x1b[0m\x1b[{}X", area.y + row + 1, area.x + 1, area.width);
     }
     let _ = out.flush();
 }
@@ -231,15 +275,17 @@ fn frame(index: u32) -> Vec<u8> {
     rgba
 }
 
-/// Sends `keys` with `data` base64 encoded in chunks, as the protocol requires.
+/// Sends `keys` with `data` zlib compressed and base64 encoded in chunks, as the
+/// protocol requires. Compressed, the frames are a small fraction of their pixels.
 fn send_chunked(out: &mut impl Write, keys: &str, data: &[u8]) {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(data, 1);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(compressed);
     let chunks: Vec<&[u8]> = encoded.as_bytes().chunks(4096).collect();
     for (index, chunk) in chunks.iter().enumerate() {
         let more = u8::from(index + 1 < chunks.len());
         let chunk = std::str::from_utf8(chunk).unwrap_or_default();
         if index == 0 {
-            let _ = write!(out, "\x1b_G{keys},q=2,m={more};{chunk}\x1b\\");
+            let _ = write!(out, "\x1b_G{keys},o=z,q=2,m={more};{chunk}\x1b\\");
         } else {
             let _ = write!(out, "\x1b_Gm={more};{chunk}\x1b\\");
         }
@@ -282,6 +328,19 @@ mod tests {
         );
         assert_eq!(clip("ab\x1b]66;s=3;HUGE\x07cd", 13), "ab", "HUGE needs 12 cells");
         assert_eq!(clip("ab\x1b]66;s=3;HUGE\x07cd", 14), "ab\x1b]66;s=3;HUGE\x07");
+    }
+
+    #[test]
+    fn links_page_links_are_found_and_underlined() {
+        let area = Rect::new(20, 8, 60, 10);
+        let links = links(Page::Links, area);
+        assert_eq!(links[0], (Rect::new(20, 8, 14, 1), "https://github.com/skyline69/tron-terminal"));
+        assert_eq!(links[1].0.y, 9);
+        assert!(super::links(Page::Text, area).is_empty());
+        let mut out = Vec::new();
+        paint_links(&mut out, area, Some(1));
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("\x1b[4mhttps://sw.kovidgoyal.net/kitty/") && !text.contains("\x1b[4mtron"), "{text}");
     }
 
     #[test]

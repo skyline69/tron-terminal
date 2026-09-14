@@ -199,6 +199,12 @@ pub struct App {
     tour_image_sent: bool,
     /// Screen size of the last frame, to repaint the tour after a resize.
     last_screen: Rect,
+    /// A painted tour page to blank before the next frame.
+    tour_erase: Option<Rect>,
+    tour_painted: bool,
+    /// The tour link underlined because Ctrl is held over it.
+    tour_link: Option<usize>,
+    tour_link_dirty: bool,
 }
 
 impl App {
@@ -224,6 +230,10 @@ impl App {
             tour_paint_at: None,
             tour_image_sent: false,
             last_screen: Rect::default(),
+            tour_erase: None,
+            tour_painted: false,
+            tour_link: None,
+            tour_link_dirty: false,
             themes: Picker::new(theme_index),
             shaders: Picker::new(0),
             choices: saved.clone(),
@@ -262,7 +272,7 @@ impl App {
         let lists = [Tab::Themes, Tab::Shaders];
         let preview_changes = lists.contains(&tab) || lists.contains(&self.tab);
         if tab == Tab::Tour || self.tab == Tab::Tour {
-            self.repaint_tour();
+            self.repaint_tour(true);
         }
         self.tab = tab;
         self.hover = None;
@@ -284,7 +294,7 @@ impl App {
             return;
         }
         if self.tab == Tab::Tour {
-            self.repaint_tour();
+            self.repaint_tour(true);
         }
         self.exit = Some(Instant::now());
         if self.animations {
@@ -314,7 +324,7 @@ impl App {
                     }
                     Tab::Tour => {
                         if self.tour.move_by(delta, Page::ALL.len()) {
-                            self.repaint_tour();
+                            self.repaint_tour(false);
                         }
                         false
                     }
@@ -328,7 +338,7 @@ impl App {
             }
             Command::Pick(index) if self.tab == Tab::Tour => {
                 if self.tour.set(index, Page::ALL.len()) {
-                    self.repaint_tour();
+                    self.repaint_tour(false);
                 }
             }
             Command::Pick(index) if self.tab == Tab::Settings => {
@@ -416,13 +426,22 @@ impl App {
         self.choices.overlay(theme, &shaders)
     }
 
-    /// Clears the tour page from the screen and paints the current one after the
-    /// transition, when effects no longer touch the demo area.
-    fn repaint_tour(&mut self) {
-        self.tour_clear = true;
-        let delay = if self.animations { Duration::from_millis(SWITCH_MS as u64 + 80) } else { Duration::ZERO };
+    /// Removes the painted tour page and paints the current one: right away for a
+    /// page change, or `after_transition` once a tab switch effect is done.
+    fn repaint_tour(&mut self, after_transition: bool) {
+        if std::mem::take(&mut self.tour_painted) {
+            self.tour_erase = self.tour_demo;
+        }
+        self.tour_link = None;
+        let delay = if self.animations && after_transition {
+            Duration::from_millis(SWITCH_MS as u64 + 80)
+        } else {
+            Duration::ZERO
+        };
         let intro = if self.animations { self.started + INTRO + Duration::from_millis(100) } else { self.started };
-        self.tour_paint_at = Some((Instant::now() + delay).max(intro));
+        // A pending transition still covers the demo area.
+        let at = (Instant::now() + delay).max(intro).max(self.tour_paint_at.unwrap_or(self.started));
+        self.tour_paint_at = Some(at);
     }
 
     /// The tour page to paint now, with its area.
@@ -432,7 +451,31 @@ impl App {
             return None;
         }
         self.tour_paint_at = None;
-        Some((Page::ALL[self.tour.selected], self.tour_demo?))
+        let area = self.tour_demo?;
+        self.tour_painted = true;
+        Some((Page::ALL[self.tour.selected], area))
+    }
+
+    /// The link under the pointer on the painted tour page.
+    fn tour_link_at(&self, column: u16, row: u16) -> Option<(usize, &'static str)> {
+        if self.tab != Tab::Tour || !self.tour_painted || self.dialog.is_some() {
+            return None;
+        }
+        let point = ratatui::layout::Position::new(column, row);
+        tour::links(Page::ALL[self.tour.selected], self.tour_demo?)
+            .into_iter()
+            .enumerate()
+            .find(|(_, (area, _))| area.contains(point))
+            .map(|(index, (_, url))| (index, url))
+    }
+
+    /// Underlines a tour link while Ctrl is held over it, like tron does for output.
+    fn hover_tour_link(&mut self, column: u16, row: u16, ctrl: bool) {
+        let link = if ctrl { self.tour_link_at(column, row).map(|(index, _)| index) } else { None };
+        if link != self.tour_link {
+            self.tour_link = link;
+            self.tour_link_dirty = true;
+        }
     }
 
     fn open_dialog(&mut self, dialog: Dialog) {
@@ -641,7 +684,8 @@ impl App {
         if screen != self.last_screen {
             self.last_screen = screen;
             if self.tab == Tab::Tour {
-                self.repaint_tour();
+                self.tour_clear = true;
+                self.repaint_tour(false);
             }
         }
         let areas = Areas::new(screen);
@@ -1162,7 +1206,7 @@ pub fn run<W: Write>(
         if let Some(page) = std::env::var(crate::DEBUG_PAGE_ENV).ok().and_then(|p| p.parse::<usize>().ok()) {
             app.tour.set(page.saturating_sub(1), Page::ALL.len());
         }
-        app.repaint_tour();
+        app.repaint_tour(true);
     }
     ratatui::crossterm::execute!(io::stdout(), EnableMouseCapture)?;
     link.scene(SCENE);
@@ -1173,6 +1217,9 @@ pub fn run<W: Write>(
         let now = Instant::now();
         let elapsed = now - last;
         last = now;
+        if let Some(area) = app.tour_erase.take() {
+            tour::erase(&mut io::stdout(), area);
+        }
         if std::mem::take(&mut app.tour_clear) {
             tour::clear(&mut io::stdout());
             if let Err(error) = terminal.clear() {
@@ -1185,6 +1232,12 @@ pub fn run<W: Write>(
         if let Some((page, area)) = app.tour_paint(now) {
             tour::paint(page, area, &mut io::stdout(), &mut app.tour_image_sent);
         }
+        if std::mem::take(&mut app.tour_link_dirty)
+            && app.tour_painted
+            && let Some(area) = app.tour_demo
+        {
+            tour::paint_links(&mut io::stdout(), area, app.tour_link);
+        }
         link.params(app.shader_params(now));
         if app.exit_done(now) {
             break Ok(());
@@ -1195,11 +1248,22 @@ pub fn run<W: Write>(
                 let command = match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
                     Event::Mouse(mouse) => match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Left) => app.on_click(mouse.column, mouse.row),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let ctrl = mouse.modifiers.contains(KeyModifiers::CONTROL);
+                            match app.tour_link_at(mouse.column, mouse.row) {
+                                Some((_, url)) if ctrl => {
+                                    open_link(&app.catalog.config.links.open_command, url);
+                                    Command::None
+                                }
+                                _ => app.on_click(mouse.column, mouse.row),
+                            }
+                        }
                         MouseEventKind::ScrollUp => Command::Move(-1),
                         MouseEventKind::ScrollDown => Command::Move(1),
                         MouseEventKind::Moved | MouseEventKind::Drag(_) => {
                             app.on_move(mouse.column, mouse.row);
+                            let ctrl = mouse.modifiers.contains(KeyModifiers::CONTROL);
+                            app.hover_tour_link(mouse.column, mouse.row, ctrl);
                             Command::None
                         }
                         _ => Command::None,
@@ -1207,7 +1271,7 @@ pub fn run<W: Write>(
                     _ => Command::None,
                 };
                 // A hand pointer over clickable things (OSC 22, supported by tron and xterm).
-                let hand = app.hover.is_some();
+                let hand = app.hover.is_some() || app.tour_link.is_some();
                 if hand != pointer_hand {
                     pointer_hand = hand;
                     set_pointer(if hand { "pointer" } else { "default" });
@@ -1238,6 +1302,21 @@ pub fn run<W: Write>(
     }
     let _ = ratatui::crossterm::execute!(io::stdout(), DisableMouseCapture);
     result
+}
+
+/// Opens a link with the configured program, without waiting for it.
+fn open_link(program: &str, url: &str) {
+    let spawned = std::process::Command::new(program)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Ok(mut child) = spawned {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 /// Asks the terminal for a mouse pointer shape by CSS name, or the default for "".
@@ -1421,7 +1500,6 @@ mod tests {
     fn tour_pages_repaint_after_transitions() {
         let mut app = App::new(false, catalog(), &[]);
         app.apply(Command::Select(Tab::Tour), Rect::default());
-        assert!(app.tour_clear, "entering clears the screen");
         let text = screen(&mut app);
         assert!(text.contains("Text and styles") && text.contains("Ligatures from your font"), "{text}");
         let (page, _) = app.tour_paint(Instant::now()).expect("paint without animations");
@@ -1429,16 +1507,34 @@ mod tests {
         assert_eq!(app.tour_paint(Instant::now()), None, "painted once");
         assert_eq!(app.on_key(key(KeyCode::Down)), Command::Move(1));
         app.apply(Command::Move(1), Rect::default());
+        assert!(app.tour_erase.is_some(), "the old page is blanked");
         assert_eq!(app.tour_paint(Instant::now()).map(|(page, _)| page), Some(Page::Unicode));
+
+        // Ctrl over a link on the Links page underlines it.
+        app.apply(Command::Move(10), Rect::default());
+        app.tour_paint(Instant::now()).unwrap();
+        let demo = app.tour_demo.unwrap();
+        app.hover_tour_link(demo.x + 2, demo.y, false);
+        assert_eq!(app.tour_link, None, "no underline without Ctrl");
+        app.hover_tour_link(demo.x + 2, demo.y, true);
+        assert!(app.tour_link == Some(0) && app.tour_link_dirty);
+        assert_eq!(
+            app.tour_link_at(demo.x + 2, demo.y).map(|(_, url)| url),
+            Some("https://github.com/skyline69/tron-terminal")
+        );
+
         app.apply(Command::Select(Tab::About), Rect::default());
-        assert!(app.tour_clear, "leaving clears the painted page");
+        assert!(app.tour_erase.is_some(), "leaving blanks the painted page");
         assert_eq!(app.tour_paint(Instant::now()), None);
 
         let mut animated = App::new(true, catalog(), &[]);
+        animated.started -= Duration::from_secs(5);
         animated.apply(Command::Select(Tab::Tour), Rect::default());
         screen(&mut animated);
-        assert_eq!(animated.tour_paint(Instant::now()), None, "waits for the transition");
-        assert!(animated.tour_paint(Instant::now() + Duration::from_secs(2)).is_some());
+        assert_eq!(animated.tour_paint(Instant::now()), None, "waits for the tab transition");
+        assert!(animated.tour_paint(Instant::now() + Duration::from_secs(1)).is_some());
+        animated.apply(Command::Move(1), Rect::default());
+        assert!(animated.tour_paint(Instant::now()).is_some(), "page changes paint right away");
     }
 
     #[test]
