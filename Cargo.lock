@@ -3837,6 +3837,7 @@ dependencies = [
  "log",
  "ratatui",
  "tachyonfx",
+ "toml",
  "tron-config",
 ]
 

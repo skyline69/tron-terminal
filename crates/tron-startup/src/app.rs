@@ -19,6 +19,7 @@ use tachyonfx::{Effect, Interpolation, fx};
 use crate::catalog::Catalog;
 use crate::link::Link;
 use crate::motion::{lerp, pulse, smooth};
+use crate::pickers::{self, Choices, Item, Picker};
 use crate::splash;
 use crate::ui::{CYAN, DARK, DIM, MAGENTA, TEXT};
 
@@ -99,7 +100,12 @@ impl Areas {
 enum Target {
     Tab(Tab),
     StartTerminal,
+    /// A row of the Themes or Shaders list, by index.
+    Item(usize),
 }
+
+/// Wait before previewing, so holding an arrow key does not reload the config for every row.
+const PREVIEW_DELAY: Duration = Duration::from_millis(90);
 
 /// Length of the hover fade in and out.
 const HOVER_MS: u32 = 160;
@@ -109,6 +115,12 @@ const HOVER_MS: u32 = 160;
 enum Command {
     None,
     Select(Tab),
+    /// Move the list selection.
+    Move(isize),
+    /// A list row was clicked.
+    Pick(usize),
+    /// Choose the highlighted theme, or turn the highlighted shader on or off.
+    Activate,
     /// Leave the startup screen and start the shell.
     StartTerminal,
 }
@@ -128,11 +140,31 @@ pub struct App {
     hover: Option<Target>,
     switched: Option<Instant>,
     exit: Option<Instant>,
+    themes: Picker,
+    shaders: Picker,
+    /// What the user picked so far, and what the saved configuration has.
+    choices: Choices,
+    saved: Choices,
+    /// Preview to send once its delay passed, and the last one sent.
+    preview_due: Option<(Instant, String)>,
+    previewed: String,
 }
 
 impl App {
     pub fn new(animations: bool, catalog: Catalog, shell: &[String]) -> Self {
+        let saved = Choices {
+            theme: catalog.config.theme.clone().unwrap_or_else(|| "tron".to_owned()),
+            shaders: catalog.config.shader.files.clone(),
+        };
+        let theme_index = catalog.themes.iter().position(|t| t.name == saved.theme).unwrap_or(0);
+        let previewed = pickers::overlay(&saved.theme, &saved.shaders);
         Self {
+            themes: Picker::new(theme_index),
+            shaders: Picker::new(0),
+            choices: saved.clone(),
+            saved,
+            preview_due: None,
+            previewed,
             animations,
             started: Instant::now(),
             tab: Tab::Overview,
@@ -162,7 +194,13 @@ impl App {
         if tab == self.tab {
             return;
         }
+        let lists = [Tab::Themes, Tab::Shaders];
+        let preview_changes = lists.contains(&tab) || lists.contains(&self.tab);
         self.tab = tab;
+        self.hover = None;
+        if preview_changes {
+            self.schedule_preview();
+        }
         self.switched = Some(Instant::now());
         if self.animations {
             let effect = fx::parallel(&[
@@ -187,12 +225,113 @@ impl App {
         }
     }
 
+    /// Carries out a command. `content` is the tab content area, for effects.
+    fn apply(&mut self, command: Command, content: Rect) {
+        match command {
+            Command::None => {}
+            Command::Select(tab) => self.select(tab, content),
+            Command::StartTerminal => self.start_exit(),
+            Command::Move(delta) => {
+                let moved = match self.tab {
+                    Tab::Themes => self.themes.move_by(delta, self.catalog.themes.len()),
+                    Tab::Shaders => self.shaders.move_by(delta, self.catalog.shaders.len()),
+                    _ => false,
+                };
+                if moved {
+                    self.schedule_preview();
+                }
+            }
+            Command::Pick(index) => {
+                let picker = if self.tab == Tab::Themes { &mut self.themes } else { &mut self.shaders };
+                if picker.selected == index {
+                    self.apply(Command::Activate, content);
+                } else {
+                    let len =
+                        if self.tab == Tab::Themes { self.catalog.themes.len() } else { self.catalog.shaders.len() };
+                    picker.set(index, len);
+                    self.schedule_preview();
+                }
+            }
+            Command::Activate => match self.tab {
+                Tab::Themes => {
+                    if let Some(theme) = self.catalog.themes.get(self.themes.selected) {
+                        self.choices.theme = theme.name.clone();
+                    }
+                }
+                Tab::Shaders => {
+                    if let Some(shader) = self.catalog.shaders.get(self.shaders.selected) {
+                        match self.choices.shaders.iter().position(|file| *file == shader.file) {
+                            Some(index) => {
+                                self.choices.shaders.remove(index);
+                            }
+                            None => self.choices.shaders.push(shader.file.clone()),
+                        }
+                        self.schedule_preview();
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    /// The configuration to show: the choices, plus the highlighted entry on its tab.
+    fn preview_overlay(&self) -> String {
+        let theme = match self.tab {
+            Tab::Themes => self.catalog.themes.get(self.themes.selected).map_or(&self.choices.theme, |t| &t.name),
+            _ => &self.choices.theme,
+        };
+        let mut shaders = self.choices.shaders.clone();
+        if self.tab == Tab::Shaders
+            && let Some(shader) = self.catalog.shaders.get(self.shaders.selected)
+            && !shaders.contains(&shader.file)
+        {
+            shaders.push(shader.file.clone());
+        }
+        pickers::overlay(theme, &shaders)
+    }
+
+    fn schedule_preview(&mut self) {
+        self.preview_due = Some((Instant::now() + PREVIEW_DELAY, self.preview_overlay()));
+    }
+
+    /// A preview to send now, when one is due and differs from the last.
+    fn take_preview(&mut self, now: Instant) -> Option<String> {
+        match &self.preview_due {
+            Some((due, _)) if *due <= now => {
+                let (_, overlay) = self.preview_due.take()?;
+                (overlay != self.previewed).then(|| {
+                    self.previewed = overlay.clone();
+                    overlay
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// The startup effects pause on the Shaders tab so shaders show on their own,
+    /// and come back for the goodbye animation.
+    fn wants_startup_shader(&self) -> bool {
+        self.tab != Tab::Shaders || self.exit.is_some()
+    }
+
     fn exit_done(&self, now: Instant) -> bool {
         self.exit.is_some_and(|since| !self.animations || now.saturating_duration_since(since) >= EXIT)
     }
 
     fn on_key(&self, key: KeyEvent) -> Command {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if matches!(self.tab, Tab::Themes | Tab::Shaders) {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => return Command::Move(-1),
+                KeyCode::Down | KeyCode::Char('j') => return Command::Move(1),
+                KeyCode::PageUp => return Command::Move(-10),
+                KeyCode::PageDown => return Command::Move(10),
+                KeyCode::Home => return Command::Move(isize::MIN / 2),
+                KeyCode::End => return Command::Move(isize::MAX / 2),
+                KeyCode::Enter | KeyCode::Char(' ') => return Command::Activate,
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Esc => Command::StartTerminal,
             KeyCode::Char('c' | 'q') if ctrl => Command::StartTerminal,
@@ -213,6 +352,7 @@ impl App {
         match self.target_at(column, row) {
             Some(Target::Tab(tab)) => Command::Select(tab),
             Some(Target::StartTerminal) => Command::StartTerminal,
+            Some(Target::Item(index)) => Command::Pick(index),
             None => Command::None,
         }
     }
@@ -271,6 +411,8 @@ impl App {
         frame.render_widget(block, areas.content);
         match self.tab {
             Tab::Overview => self.draw_overview(frame, inner),
+            Tab::Themes => self.draw_themes(frame, inner),
+            Tab::Shaders => self.draw_shaders(frame, inner),
             Tab::Keys => draw_keys(frame, inner),
             Tab::About => draw_about(frame, inner),
             tab => draw_upcoming(frame, inner, tab),
@@ -333,15 +475,20 @@ impl App {
     fn draw_status(&mut self, frame: &mut Frame, area: Rect) {
         let key = |text: &'static str| Span::styled(text, Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD));
         let label = |text: &'static str| Span::styled(text, Style::new().fg(DIM));
-        let hints = Line::from(vec![
-            key("←/→"),
-            label(" switch  "),
-            key("1-7"),
-            label(" jump  "),
-            key("click"),
-            label(" select"),
-        ]);
-        frame.render_widget(Paragraph::new(hints), area);
+        let hints = match self.tab {
+            Tab::Themes => {
+                vec![key("↑/↓"), label(" browse  "), key("Enter"), label(" choose  "), key("←/→"), label(" tabs")]
+            }
+            Tab::Shaders => {
+                vec![key("↑/↓"), label(" browse  "), key("Space"), label(" on/off  "), key("←/→"), label(" tabs")]
+            }
+            _ => vec![key("←/→"), label(" switch  "), key("1-7"), label(" jump  "), key("click"), label(" select")],
+        };
+        frame.render_widget(Paragraph::new(Line::from(hints)), area);
+        if self.choices != self.saved {
+            let changed = Line::styled("● changed, not saved yet", Style::new().fg(MAGENTA));
+            frame.render_widget(Paragraph::new(changed).centered(), area);
+        }
         let hovered = self.hover == Some(Target::StartTerminal);
         let start_label = if hovered {
             Span::styled(" start terminal", Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED))
@@ -353,6 +500,55 @@ impl App {
         let start_area = Rect::new(area.right().saturating_sub(width), area.y, width, 1).intersection(area);
         self.hits.push((start_area, Target::StartTerminal));
         frame.render_widget(Paragraph::new(start), start_area);
+    }
+
+    fn draw_themes(&mut self, frame: &mut Frame, area: Rect) {
+        let [list_area, _, preview_area] =
+            Layout::horizontal([Constraint::Length(28), Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+        let items: Vec<Item> = self
+            .catalog
+            .themes
+            .iter()
+            .map(|theme| Item {
+                name: &theme.name,
+                tag: if theme.builtin { "" } else { "custom" },
+                chosen: theme.name == self.choices.theme,
+            })
+            .collect();
+        let hover = match self.hover {
+            Some(Target::Item(index)) => Some(index),
+            _ => None,
+        };
+        let rows = pickers::draw_list(frame, list_area, &items, &mut self.themes, hover, true);
+        self.hits.extend(rows.into_iter().map(|(rect, index)| (rect, Target::Item(index))));
+        if let Some(theme) = self.catalog.themes.get(self.themes.selected) {
+            pickers::draw_theme_preview(frame, preview_area, theme, theme.name == self.choices.theme);
+        }
+    }
+
+    fn draw_shaders(&mut self, frame: &mut Frame, area: Rect) {
+        let [list_area, _, details_area] =
+            Layout::horizontal([Constraint::Length(28), Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+        let items: Vec<Item> = self
+            .catalog
+            .shaders
+            .iter()
+            .map(|shader| Item {
+                name: &shader.file,
+                tag: if shader.builtin { "" } else { "custom" },
+                chosen: self.choices.shaders.contains(&shader.file),
+            })
+            .collect();
+        let hover = match self.hover {
+            Some(Target::Item(index)) => Some(index),
+            _ => None,
+        };
+        let rows = pickers::draw_list(frame, list_area, &items, &mut self.shaders, hover, true);
+        self.hits.extend(rows.into_iter().map(|(rect, index)| (rect, Target::Item(index))));
+        if let Some(shader) = self.catalog.shaders.get(self.shaders.selected) {
+            let position = self.choices.shaders.iter().position(|file| *file == shader.file);
+            pickers::draw_shader_details(frame, details_area, shader, position, &self.choices.shaders);
+        }
     }
 
     fn draw_overview(&mut self, frame: &mut Frame, area: Rect) {
@@ -478,8 +674,6 @@ fn draw_about(frame: &mut Frame, area: Rect) {
 fn draw_upcoming(frame: &mut Frame, area: Rect, tab: Tab) {
     let text = match tab {
         Tab::Settings => "Font, size, opacity, cursor and more, previewed live.",
-        Tab::Themes => "Browse the themes; the window previews each one as you move.",
-        Tab::Shaders => "Try the shaders live on this window.",
         _ => "Ligatures, emoji, right-to-left text, images and scaled text.",
     };
     let lines = vec![
@@ -534,10 +728,14 @@ pub fn run<W: Write>(
 ) -> io::Result<()> {
     let mut app = App::new(animations, Catalog::load(), shell);
     app.tab = tab.unwrap_or(Tab::Overview);
+    if matches!(app.tab, Tab::Themes | Tab::Shaders) {
+        app.schedule_preview();
+    }
     ratatui::crossterm::execute!(io::stdout(), EnableMouseCapture)?;
     link.scene(SCENE);
     let mut last = Instant::now();
     let mut pointer_hand = false;
+    let mut shader_running = true;
     let result = loop {
         let now = Instant::now();
         let elapsed = now - last;
@@ -556,6 +754,8 @@ pub fn run<W: Write>(
                     Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
                     Event::Mouse(mouse) => match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => app.on_click(mouse.column, mouse.row),
+                        MouseEventKind::ScrollUp => Command::Move(-1),
+                        MouseEventKind::ScrollDown => Command::Move(1),
                         MouseEventKind::Moved | MouseEventKind::Drag(_) => {
                             app.on_move(mouse.column, mouse.row);
                             Command::None
@@ -570,14 +770,22 @@ pub fn run<W: Write>(
                     pointer_hand = hand;
                     set_pointer(if hand { "pointer" } else { "default" });
                 }
-                match command {
-                    Command::Select(tab) => app.select(tab, content),
-                    Command::StartTerminal => app.start_exit(),
-                    Command::None => {}
-                }
+                app.apply(command, content);
             }
             Ok(_) => {}
             Err(error) => break Err(error),
+        }
+        if let Some(overlay) = app.take_preview(Instant::now()) {
+            link.preview(&overlay);
+        }
+        let wants_shader = app.wants_startup_shader();
+        if wants_shader != shader_running {
+            shader_running = wants_shader;
+            if wants_shader {
+                link.shader_on(SCENE);
+            } else {
+                link.shader_off();
+            }
         }
     };
     if pointer_hand {
@@ -662,6 +870,52 @@ mod tests {
         app.on_move(0, 0);
         assert_eq!(app.hover, None);
         assert_eq!(app.effects.len(), effects + 2, "fade out");
+    }
+
+    fn catalog() -> Catalog {
+        Catalog::for_paths(None)
+    }
+
+    #[test]
+    fn themes_preview_while_browsing_and_enter_chooses() {
+        let mut app = App::new(true, catalog(), &[]);
+        app.apply(Command::Select(Tab::Themes), Rect::default());
+        assert_eq!(app.themes.selected, 0, "starts at the saved theme");
+        assert_eq!(app.on_key(key(KeyCode::Down)), Command::Move(1));
+        app.apply(Command::Move(1), Rect::default());
+        let later = Instant::now() + PREVIEW_DELAY;
+        let overlay = app.take_preview(later).expect("a preview is due");
+        let name = app.catalog.themes[1].name.clone();
+        assert!(overlay.contains(&format!("theme = \"{name}\"")), "{overlay}");
+        assert_eq!(app.take_preview(later), None, "sent once");
+        assert_eq!(app.choices, app.saved, "browsing alone changes nothing");
+        app.apply(Command::Activate, Rect::default());
+        assert_eq!(app.choices.theme, name);
+        let text = screen(&mut app);
+        assert!(text.contains("● chosen") && text.contains("cargo build"), "{text}");
+        assert!(text.contains("changed, not saved yet"), "{text}");
+    }
+
+    #[test]
+    fn shaders_toggle_and_pause_the_startup_effects() {
+        let mut app = App::new(true, catalog(), &[]);
+        assert!(app.wants_startup_shader());
+        app.apply(Command::Select(Tab::Shaders), Rect::default());
+        assert!(!app.wants_startup_shader());
+        let first = app.catalog.shaders[0].file.clone();
+        let preview = app.take_preview(Instant::now() + PREVIEW_DELAY).unwrap();
+        assert!(preview.contains(&first), "the highlighted shader is previewed: {preview}");
+        app.apply(Command::Pick(0), Rect::default());
+        assert_eq!(app.choices.shaders, vec![first.clone()]);
+        app.apply(Command::Move(1), Rect::default());
+        app.apply(Command::Activate, Rect::default());
+        assert_eq!(app.choices.shaders.len(), 2);
+        let text = screen(&mut app);
+        assert!(text.contains("runs 2nd"), "{text}");
+        app.apply(Command::Select(Tab::Keys), Rect::default());
+        assert!(app.wants_startup_shader());
+        let back = app.take_preview(Instant::now() + PREVIEW_DELAY).unwrap();
+        assert!(!back.contains(&app.catalog.shaders[2].file), "leaving drops the highlight: {back}");
     }
 
     #[test]

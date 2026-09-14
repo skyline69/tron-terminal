@@ -6,6 +6,7 @@ mod app;
 pub mod catalog;
 pub mod link;
 mod motion;
+mod pickers;
 mod splash;
 mod ui;
 

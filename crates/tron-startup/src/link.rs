@@ -34,6 +34,8 @@ impl<W: Write> Link<W> {
 
     pub fn shader_on(&mut self, scene: u32) {
         self.shader_on = true;
+        // Parameters were reset when the shader went off; send them again.
+        self.last_params.clear();
         self.send(&format!("shader=on,scene={scene}"));
     }
 

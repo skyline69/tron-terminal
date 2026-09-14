@@ -16,10 +16,24 @@ pub struct Shader {
     /// First comment line of the source.
     pub description: String,
     pub builtin: bool,
+    pub motion: Motion,
+}
+
+/// When a shader makes tron redraw.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Motion {
+    /// It reads `tron.time` or `tron.frame`.
+    EveryFrame,
+    /// It reads the cursor change uniforms.
+    AfterCursorMoves,
+    /// Only when the terminal content changes.
+    OnChanges,
 }
 
 pub struct Catalog {
     pub paths: Option<Paths>,
+    /// The saved configuration, or the defaults when it cannot be read.
+    pub config: Config,
     pub themes: Vec<Theme>,
     pub shaders: Vec<Shader>,
 }
@@ -53,6 +67,13 @@ impl Catalog {
                     ..Config::default()
                 };
                 let source = config.shader_sources(paths.as_ref()).pop().and_then(Result::ok).map(|s| s.source);
+                let motion = match source.as_deref() {
+                    Some(s) if s.contains("tron.cursor_change_time") || s.contains("tron.previous_cursor") => {
+                        Motion::AfterCursorMoves
+                    }
+                    Some(s) if s.contains("tron.time") || s.contains("tron.frame") => Motion::EveryFrame,
+                    _ => Motion::OnChanges,
+                };
                 let description = source
                     .as_deref()
                     .and_then(|s| s.lines().find_map(|line| line.trim().strip_prefix("//")))
@@ -60,10 +81,11 @@ impl Catalog {
                     .unwrap_or_default();
                 let builtin = BUILTIN_SHADERS.iter().any(|(name, _)| *name == file)
                     && paths.as_ref().is_none_or(|p| !p.shaders_dir.join(&file).exists());
-                Shader { file, description, builtin }
+                Shader { file, description, builtin, motion }
             })
             .collect();
-        Self { paths, themes, shaders }
+        let config = paths.as_ref().and_then(|p| Config::load(p).ok()).unwrap_or_default();
+        Self { paths, config, themes, shaders }
     }
 }
 
