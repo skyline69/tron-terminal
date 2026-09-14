@@ -50,7 +50,8 @@ const MULTI_CLICK: Duration = Duration::from_millis(400);
 /// Debug aid: a token accepted for startup screen commands in any session.
 const DEBUG_STARTUP_TOKEN_ENV: &str = "TRON_DEBUG_STARTUP_TOKEN";
 /// Longest the startup screen's shader may run without being turned off.
-const STARTUP_SHADER_LIMIT: Duration = Duration::from_secs(60);
+/// The startup screen sends a keepalive every second; this long without one ends its shader.
+const STARTUP_SHADER_IDLE: Duration = Duration::from_secs(5);
 /// How long configuration errors stay on screen.
 const CONFIG_ERROR_TIME: Duration = Duration::from_secs(15);
 /// Duration of the visual bell flash.
@@ -250,7 +251,8 @@ struct Session {
     settings: Settings,
     /// Token accepted for startup screen commands, until the shell's first prompt.
     startup_token: Option<String>,
-    /// When the startup shader was turned on and how many prompt marks existed then.
+    /// When the startup screen last sent a command while its shader runs, and how
+    /// many prompt marks existed when the shader was turned on.
     startup_shader: Option<(Instant, usize)>,
     /// A config preview change from the startup screen, carried out by the `App`.
     preview_request: Option<PreviewRequest>,
@@ -843,8 +845,12 @@ impl Session {
             return;
         }
         let (mut scene, mut params) = self.renderer.startup_params();
+        if let Some((last, _)) = &mut self.startup_shader {
+            *last = Instant::now();
+        }
         for command in payload.split(',') {
             match command {
+                "alive" => continue,
                 "restore" => {
                     self.preview_request = Some(PreviewRequest::Restore);
                     continue;
@@ -985,9 +991,9 @@ impl Session {
             }
             term.snapshot(&mut self.snapshot);
             // The startup screen's shader ends when the shell shows its first prompt,
-            // or after a time limit if the screen never turned it off.
+            // or when the screen stopped sending commands without turning it off.
             if let Some((since, marks)) = self.startup_shader
-                && (since.elapsed() > STARTUP_SHADER_LIMIT || term.command_marks().count() > marks)
+                && (since.elapsed() > STARTUP_SHADER_IDLE || term.command_marks().count() > marks)
             {
                 self.startup_shader = None;
                 self.startup_token = None;

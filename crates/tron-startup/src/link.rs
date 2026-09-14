@@ -3,12 +3,18 @@
 //! ignored by tron without the token it passed in the environment.
 
 use std::io::Write;
+use std::time::Duration;
+
+/// Longest gap between commands while the shader runs.
+const KEEPALIVE: Duration = Duration::from_secs(1);
 
 pub struct Link<W: Write> {
     token: Option<String>,
     out: W,
     shader_on: bool,
     last_params: String,
+    /// When anything was last sent, for keepalives.
+    last_sent: std::time::Instant,
     /// A preview was sent and not yet restored or committed.
     previewing: bool,
 }
@@ -22,6 +28,7 @@ impl<W: Write> Link<W> {
             shader_on: false,
             last_params: String::new(),
             previewing: false,
+            last_sent: std::time::Instant::now(),
         }
     }
 
@@ -43,12 +50,16 @@ impl<W: Write> Link<W> {
         }
     }
 
-    /// Sends shader parameters when they changed since the last call.
+    /// Sends shader parameters when they changed since the last call. Call every
+    /// frame: without changes it sends a keepalive once a second, because tron
+    /// turns the shader off when the screen goes quiet (for example after a crash).
     pub fn params(&mut self, params: [f32; 4]) {
         let payload = format!("params={:.3}:{:.3}:{:.3}:{:.3}", params[0], params[1], params[2], params[3]);
         if self.shader_on && payload != self.last_params {
             self.send(&payload);
             self.last_params = payload;
+        } else if self.shader_on && self.last_sent.elapsed() >= KEEPALIVE {
+            self.send("alive");
         }
     }
 
@@ -76,6 +87,7 @@ impl<W: Write> Link<W> {
         let Some(token) = &self.token else { return };
         let _ = write!(self.out, "\x1b]7777;{token};{payload}\x07");
         let _ = self.out.flush();
+        self.last_sent = std::time::Instant::now();
     }
 }
 
@@ -113,6 +125,15 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "\x1b]7777;t;preview=dGhlbWUgPSAibm9yZCI=\x07\x1b]7777;t;restore\x07"
         );
+        let mut out = Vec::new();
+        {
+            let mut link = Link::new(Some("t".into()), &mut out);
+            link.shader_on(2);
+            link.params([1.0; 4]);
+            link.last_sent -= KEEPALIVE;
+            link.params([1.0; 4]);
+        }
+        assert!(String::from_utf8(out).unwrap().contains("\x1b]7777;t;alive\x07"), "keepalive without changes");
         let mut silent = Vec::new();
         Link::new(None, &mut silent).shader_on(1);
         assert!(silent.is_empty());
