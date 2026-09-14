@@ -6,7 +6,9 @@ use std::mem::size_of;
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
-use tron_core::{Cell, Color, ColorKind, CursorShape, Flags, Modes, Palette, Row, SelectionRange, Snapshot};
+use tron_core::{
+    Cell, Color, ColorKind, CursorShape, Flags, Modes, PLACEHOLDER, Palette, Row, SelectionRange, Snapshot,
+};
 use tron_font::{CellMetrics, FontSystem, GlyphFormat, GlyphKey, ShapedGlyph, Style};
 use unicode_width::UnicodeWidthChar;
 
@@ -170,6 +172,9 @@ pub struct CellPipeline {
     cursor_rect: [f32; 4],
     cursor_hidden: bool,
     link_highlight: Option<LinkHighlight>,
+    /// Instances of recently built rows, keyed by row content, reused when content scrolls.
+    row_cache: HashMap<u64, RowInstances>,
+    clear_row_cache: bool,
     overlays: Vec<Overlay>,
     overlay_instances: RowInstances,
     flash: f32,
@@ -281,6 +286,8 @@ impl CellPipeline {
             cursor_rect: [0.0; 4],
             cursor_hidden: false,
             link_highlight: None,
+            row_cache: HashMap::default(),
+            clear_row_cache: false,
             overlays: Vec::new(),
             overlay_instances: RowInstances::default(),
             flash: 0.0,
@@ -314,10 +321,12 @@ impl CellPipeline {
         self.color_atlas.reset(device, color);
         self.rebind(device);
         self.full_rebuild = true;
+        self.clear_row_cache = true;
     }
 
     pub fn invalidate(&mut self) {
         self.full_rebuild = true;
+        self.clear_row_cache = true;
     }
 
     pub fn set_cursor_hidden(&mut self, hidden: bool) {
@@ -381,6 +390,7 @@ impl CellPipeline {
         self.glyphs.retain(|_, entry| entry.is_none_or(|e| e.format != format));
         self.rebind(device);
         self.full_rebuild = true;
+        self.clear_row_cache = true;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -402,6 +412,7 @@ impl CellPipeline {
         if snapshot.palette_generation != self.palette_generation {
             self.palette_generation = snapshot.palette_generation;
             self.full_rebuild = true;
+            self.clear_row_cache = true;
         }
         if snapshot.selection != self.selection {
             self.selection = snapshot.selection;
@@ -411,6 +422,7 @@ impl CellPipeline {
         if reverse != self.reverse {
             self.reverse = reverse;
             self.full_rebuild = true;
+            self.clear_row_cache = true;
         }
         let cursor = snapshot.cursor();
         let cursor_cell = (cursor.visible && snapshot.display_offset == 0).then_some((cursor.row, cursor.col));
@@ -418,53 +430,81 @@ impl CellPipeline {
         let (old_row, new_row) = (self.last_cursor.map(|c| c.0), cursor_cell.map(|c| c.0));
 
         let colors = ColorContext { palette: &snapshot.palette, theme, reverse, srgb, selection: snapshot.selection };
+        if self.clear_row_cache || self.row_cache.len() > rows * 4 + 64 {
+            self.row_cache.clear();
+            self.clear_row_cache = false;
+        }
         for y in 0..rows {
             let cursor_row = moved && (Some(y) == old_row || Some(y) == new_row);
-            if self.full_rebuild || snapshot.damaged[y] || cursor_row {
-                let mut instances = std::mem::take(&mut self.rows[y]);
+            if !(self.full_rebuild || snapshot.damaged[y] || cursor_row) {
+                continue;
+            }
+            let row = &snapshot.rows[y];
+            let line = snapshot.line(y);
+            let cursor_col = cursor_cell.filter(|c| c.0 == y).map(|c| c.1);
+            // Rows touched by a selection or link highlight depend on more than their cells.
+            let highlighted = snapshot.selection.is_some_and(|s| (s.start.line..=s.end.line).contains(&line))
+                || self
+                    .link_highlight
+                    .as_ref()
+                    .is_some_and(|h| h.id.is_some() || (h.start.line..=h.end.line).contains(&line));
+            let key = (!highlighted).then(|| row_key(row, cursor_col));
+            let mut instances = std::mem::take(&mut self.rows[y]);
+            if let Some(cached) = key.and_then(|k| self.row_cache.get(&k)) {
+                // Scrolled content: same cells as a row built earlier, reuse its instances.
+                instances.background.clone_from(&cached.background);
+                instances.foreground.clone_from(&cached.foreground);
+            } else {
                 instances.background.clear();
                 instances.foreground.clear();
-                let cursor_col = cursor_cell.filter(|c| c.0 == y).map(|c| c.1);
-                self.build_row(
-                    &snapshot.rows[y],
-                    y,
-                    snapshot.line(y),
-                    cursor_col,
-                    &colors,
-                    fonts,
-                    queue,
-                    &mut instances,
-                );
-                self.rows[y] = instances;
+                self.build_row(row, line, cursor_col, &colors, fonts, queue, &mut instances);
+                if let Some(key) = key {
+                    let copy = RowInstances {
+                        background: instances.background.clone(),
+                        foreground: instances.foreground.clone(),
+                    };
+                    self.row_cache.insert(key, copy);
+                }
             }
+            self.rows[y] = instances;
         }
         self.full_rebuild = false;
         self.last_cursor = cursor_cell;
 
+        // Row instances are relative to the row top; place them now.
+        let cell_h = self.metrics.height as f32;
+        let padding_top = self.padding[1];
+        let shifted = |instance: &Instance, offset: f32| Instance {
+            pos: [instance.pos[0], instance.pos[1] + offset],
+            ..*instance
+        };
         self.frame.clear();
-        for row in &self.rows {
-            self.frame.extend_from_slice(&row.background);
+        for (y, row) in self.rows.iter().enumerate() {
+            let offset = padding_top + y as f32 * cell_h;
+            self.frame.extend(row.background.iter().map(|i| shifted(i, offset)));
         }
         let cursor_rect = self.push_cursor(snapshot, &colors, focused);
         self.split = self.frame.len();
-        for row in &self.rows {
-            self.frame.extend_from_slice(&row.foreground);
+        for (y, row) in self.rows.iter().enumerate() {
+            let offset = padding_top + y as f32 * cell_h;
+            self.frame.extend(row.foreground.iter().map(|i| shifted(i, offset)));
         }
 
         // Overlays (search bar, IME preedit) are drawn above the terminal text.
         if !self.overlays.is_empty() {
             let overlays = std::mem::take(&mut self.overlays);
             let mut instances = std::mem::take(&mut self.overlay_instances);
-            instances.background.clear();
-            instances.foreground.clear();
             for overlay in &overlays {
-                if overlay.row < rows {
-                    let row = overlay_row(overlay, snapshot.cols);
-                    self.build_row(&row, overlay.row, i64::MIN, None, &colors, fonts, queue, &mut instances);
+                if overlay.row >= rows {
+                    continue;
                 }
+                instances.background.clear();
+                instances.foreground.clear();
+                let row = overlay_row(overlay, snapshot.cols);
+                self.build_row(&row, i64::MIN, None, &colors, fonts, queue, &mut instances);
+                let offset = padding_top + overlay.row as f32 * cell_h;
+                self.frame.extend(instances.background.iter().chain(&instances.foreground).map(|i| shifted(i, offset)));
             }
-            self.frame.extend_from_slice(&instances.background);
-            self.frame.extend_from_slice(&instances.foreground);
             self.overlay_instances = instances;
             self.overlays = overlays;
         }
@@ -484,7 +524,6 @@ impl CellPipeline {
     fn build_row(
         &mut self,
         row: &Row,
-        y: usize,
         line: i64,
         cursor_col: Option<usize>,
         colors: &ColorContext<'_>,
@@ -494,7 +533,8 @@ impl CellPipeline {
     ) {
         let m = self.metrics;
         let (cell_w, cell_h) = (m.width as f32, m.height as f32);
-        let top = self.padding[1] + y as f32 * cell_h;
+        // Positions are relative to the row top.
+        let top = 0.0;
         let cols = row.cells.len();
 
         // Backgrounds, decorations and per-cell text colors.
@@ -536,7 +576,10 @@ impl CellPipeline {
             let cell = &row.cells[x];
             let width = if cell.flags.contains(Flags::WIDE) { 2 } else { 1 };
             let has_extra = cell.flags.contains(Flags::GRAPHEME);
-            if cell.flags.intersects(Flags::WIDE_SPACER | Flags::HIDDEN) || (cell.is_empty() && !has_extra) {
+            if cell.flags.intersects(Flags::WIDE_SPACER | Flags::HIDDEN)
+                || (cell.is_empty() && !has_extra)
+                || cell.ch == PLACEHOLDER
+            {
                 self.flush_run(&mut run, top, &foreground, fonts, queue, out);
                 x += 1;
                 continue;
@@ -817,6 +860,21 @@ impl CellPipeline {
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         pass.draw(0..4, range);
     }
+}
+
+/// Hash of everything a row's instances depend on besides colors and fonts.
+fn row_key(row: &Row, cursor_col: Option<usize>) -> u64 {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let mut hasher = foldhash::fast::FixedState::with_seed(0x7472_6f6e).build_hasher();
+    row.cells.hash(&mut hasher);
+    for (col, cell) in row.cells.iter().enumerate() {
+        if cell.flags.contains(Flags::GRAPHEME) {
+            col.hash(&mut hasher);
+            row.combining(col).hash(&mut hasher);
+        }
+    }
+    cursor_col.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Lays out overlay text as a row of cells with explicit colors.

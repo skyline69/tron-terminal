@@ -192,11 +192,39 @@ pub struct FontConfig {
     pub features: Vec<String>,
     /// Programming ligatures. `false` disables `calt`, `liga` and `dlig`.
     pub ligatures: bool,
+    /// Families for bold, italic and bold italic text. Default: `family`.
+    pub bold_family: Option<String>,
+    pub italic_family: Option<String>,
+    pub bold_italic_family: Option<String>,
+    /// Variable font axes, for example `{ wght = 450, wdth = 90 }`.
+    pub variations: BTreeMap<String, f32>,
+    pub hinting: Hinting,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Hinting {
+    /// Hint on low density displays (scale below 1.5), not on high density ones.
+    #[default]
+    Auto,
+    On,
+    Off,
 }
 
 impl Default for FontConfig {
     fn default() -> Self {
-        Self { family: "monospace".into(), size: 12.0, fallback: Vec::new(), features: Vec::new(), ligatures: true }
+        Self {
+            family: "monospace".into(),
+            size: 12.0,
+            fallback: Vec::new(),
+            features: Vec::new(),
+            ligatures: true,
+            bold_family: None,
+            italic_family: None,
+            bold_italic_family: None,
+            variations: BTreeMap::new(),
+            hinting: Hinting::Auto,
+        }
     }
 }
 
@@ -219,8 +247,10 @@ pub struct WindowConfig {
     pub padding_x: u16,
     /// Vertical padding in logical pixels.
     pub padding_y: u16,
-    /// Background opacity from 0.0 to 1.0. Changing it needs a restart.
+    /// Background opacity from 0.0 to 1.0.
     pub opacity: f32,
+    /// Blur what is behind a translucent window, where the compositor supports it (KDE).
+    pub blur: bool,
     pub decorations: bool,
     pub columns: u16,
     pub rows: u16,
@@ -235,6 +265,7 @@ impl Default for WindowConfig {
             padding_x: 10,
             padding_y: 8,
             opacity: 1.0,
+            blur: false,
             decorations: true,
             columns: 100,
             rows: 30,

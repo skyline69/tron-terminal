@@ -10,12 +10,13 @@ pub mod grid;
 pub mod palette;
 pub mod parser;
 pub mod selection;
+pub mod sixel;
 pub mod snapshot;
 pub mod term;
 pub mod text;
 
 pub use cell::{Cell, Color, ColorKind, Flags};
-pub use graphics::{Graphics, Image, Placement};
+pub use graphics::{Graphics, Image, PLACEHOLDER, PlaceholderCell, Placement, placeholder_cell};
 pub use grid::{Grid, Row};
 pub use palette::Palette;
 pub use parser::{Params, Parser, Perform};

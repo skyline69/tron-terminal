@@ -10,8 +10,11 @@ A GPU accelerated terminal emulator written in Rust. Fast first, then beautiful.
   block and Powerline glyphs drawn to fit every cell exactly.
 - **Customizable.** WGSL post-processing shaders, themes, hot reloaded
   configuration and key bindings.
-- **Modern protocols.** Kitty graphics and keyboard protocols, synchronized
-  output, OSC 8 hyperlinks, OSC 52 clipboard, styled underlines, true color.
+- **Modern protocols.** Kitty graphics (including animation, shared memory
+  and Unicode placeholders) and keyboard protocols, Sixel, synchronized output,
+  OSC 8 hyperlinks, OSC 52 clipboard, styled underlines, true color.
+- **Images and video.** `chafa`, `kitten icat`-style tools, `yazi` previews and
+  `mpv --vo=kitty` work out of the box.
 
 Linux and Wayland are the primary platform. Tabs and splits are out of scope:
 use your window manager or a multiplexer.
@@ -82,7 +85,7 @@ Key bindings override the defaults:
 "ctrl+shift+c" = "none"            # remove a default
 "alt+enter" = "new_window"
 "ctrl+shift+k" = "clear_scrollback"
-"super+u" = "text:"          # send text to the application
+"super+u" = "text:\u0015"    # send Ctrl+U to the application
 ```
 
 Actions: `copy`, `paste`, `paste_selection`, `increase_font_size`,

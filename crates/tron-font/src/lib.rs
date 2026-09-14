@@ -25,6 +25,16 @@ pub enum FontError {
     NotFound(String),
 }
 
+/// When glyph outlines are hinted to the pixel grid.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum Hinting {
+    /// Hint when the scale factor is below 1.5.
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Style {
     Regular = 0,
@@ -103,6 +113,16 @@ pub struct ShapedGlyph {
     pub x_advance: f32,
 }
 
+/// Identity of a loaded face, including synthesis and variations.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FaceId {
+    blob: u64,
+    index: u32,
+    embolden: bool,
+    skew: u32,
+    variations: Vec<([u8; 4], u32)>,
+}
+
 struct Face {
     blob: Blob<u8>,
     index: u32,
@@ -110,7 +130,10 @@ struct Face {
     key: CacheKey,
     embolden: bool,
     skew: Option<f32>,
+    /// Variable font axis values: matcher choices merged with user settings.
+    variations: Vec<([u8; 4], f32)>,
     shaper: Option<harfrust::ShaperData>,
+    instance: Option<harfrust::ShaperInstance>,
 }
 
 impl Face {
@@ -124,11 +147,16 @@ pub struct FontSystem {
     source_cache: SourceCache,
     family: String,
     faces: Vec<Face>,
-    face_ids: HashMap<(u64, u32, bool, u32), u32>,
+    face_ids: HashMap<FaceId, u32>,
     primary: [u32; 4],
     glyphs: HashMap<(char, Style), Option<GlyphKey>>,
     emoji_faces: HashMap<char, Option<u32>>,
     fallback: Vec<String>,
+    style_families: [Option<String>; 4],
+    variations: Vec<([u8; 4], f32)>,
+    hinting: Hinting,
+    size_pt: f32,
+    scale_factor: f64,
     features: Vec<harfrust::Feature>,
     buffer: Option<harfrust::UnicodeBuffer>,
     scaler: ScaleContext,
@@ -150,6 +178,11 @@ impl FontSystem {
             glyphs: HashMap::default(),
             emoji_faces: HashMap::default(),
             fallback: Vec::new(),
+            style_families: [None, None, None, None],
+            variations: Vec::new(),
+            hinting: Hinting::Auto,
+            size_pt,
+            scale_factor,
             features: Vec::new(),
             buffer: None,
             scaler: ScaleContext::new(),
@@ -164,11 +197,7 @@ impl FontSystem {
                 strikeout_position: 1,
             },
         };
-        for style in [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic] {
-            let families = system.families();
-            let face = system.query(&families, style, None).ok_or_else(|| FontError::NotFound(family.to_owned()))?;
-            system.primary[style as usize] = face;
-        }
+        system.reload_faces()?;
         system.set_size(size_pt, scale_factor);
         log::info!("font `{family}` at {size_pt}pt, cell {}x{} px", system.metrics.width, system.metrics.height);
         Ok(system)
@@ -197,6 +226,64 @@ impl FontSystem {
         families
     }
 
+    /// Resolves the primary face of each style from the configured families.
+    fn reload_faces(&mut self) -> Result<(), FontError> {
+        for style in [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic] {
+            let mut families = Vec::new();
+            if let Some(name) = self.style_families[style as usize].clone() {
+                match self.collection.family_id(&name) {
+                    Some(id) => families.push(QueryFamily::Id(id)),
+                    None => log::warn!("font family `{name}` not found"),
+                }
+            }
+            families.extend(self.families());
+            let face = self.query(&families, style, None).ok_or_else(|| FontError::NotFound(self.family.clone()))?;
+            self.primary[style as usize] = face;
+        }
+        self.glyphs.clear();
+        self.emoji_faces.clear();
+        Ok(())
+    }
+
+    /// Families for bold, italic and bold italic. `None` uses the main family.
+    pub fn set_style_families(&mut self, bold: Option<&str>, italic: Option<&str>, bold_italic: Option<&str>) {
+        let families = [None, bold.map(String::from), italic.map(String::from), bold_italic.map(String::from)];
+        if families != self.style_families {
+            self.style_families = families;
+            if let Err(error) = self.reload_faces() {
+                log::error!("{error}");
+            }
+        }
+    }
+
+    /// Variable font axis values such as `("wght", 450.0)`. Invalid tags are skipped.
+    pub fn set_variations(&mut self, variations: &[(String, f32)]) {
+        let parsed: Vec<([u8; 4], f32)> = variations
+            .iter()
+            .filter_map(|(tag, value)| match <[u8; 4]>::try_from(tag.as_bytes()) {
+                Ok(tag) => Some((tag, *value)),
+                Err(_) => {
+                    log::warn!("invalid font variation axis `{tag}`");
+                    None
+                }
+            })
+            .collect();
+        if parsed != self.variations {
+            self.variations = parsed;
+            if let Err(error) = self.reload_faces() {
+                log::error!("{error}");
+            }
+            self.set_size(self.size_pt, self.scale_factor);
+        }
+    }
+
+    pub fn set_hinting(&mut self, hinting: Hinting) {
+        if hinting != self.hinting {
+            self.hinting = hinting;
+            self.set_size(self.size_pt, self.scale_factor);
+        }
+    }
+
     /// Families tried before system fallback for characters the main font lacks.
     pub fn set_fallback(&mut self, families: &[String]) {
         self.fallback = families.to_vec();
@@ -219,8 +306,14 @@ impl FontSystem {
 
     pub fn set_size(&mut self, size_pt: f32, scale_factor: f64) {
         // Points at 96 DPI, scaled for the output.
+        self.size_pt = size_pt;
+        self.scale_factor = scale_factor;
         self.size_px = size_pt * scale_factor as f32 * 96.0 / 72.0;
-        self.hint = scale_factor < 1.5;
+        self.hint = match self.hinting {
+            Hinting::Auto => scale_factor < 1.5,
+            Hinting::On => true,
+            Hinting::Off => false,
+        };
         self.metrics = compute_metrics(&self.faces[self.primary[0] as usize], self.size_px);
     }
 
@@ -287,10 +380,18 @@ impl FontSystem {
     pub fn shape(&mut self, face: u32, text: &str, out: &mut Vec<ShapedGlyph>) {
         out.clear();
         let size_px = self.size_px;
-        let Face { blob, index, shaper, .. } = &mut self.faces[face as usize];
+        let Face { blob, index, shaper, instance, variations, .. } = &mut self.faces[face as usize];
         let Ok(font) = harfrust::FontRef::from_index(blob.data(), *index) else { return };
         let data = shaper.get_or_insert_with(|| harfrust::ShaperData::new(&font));
-        let shaper = data.shaper(&font).build();
+        let instance = instance.get_or_insert_with(|| {
+            harfrust::ShaperInstance::from_variations(
+                &font,
+                variations
+                    .iter()
+                    .map(|(tag, value)| harfrust::Variation { tag: harfrust::Tag::new(tag), value: *value }),
+            )
+        });
+        let shaper = data.shaper(&font).instance(Some(instance)).build();
         let mut buffer = self.buffer.take().unwrap_or_default();
         buffer.push_str(text);
         buffer.set_direction(harfrust::Direction::LeftToRight);
@@ -342,21 +443,41 @@ impl FontSystem {
     fn intern_face(&mut self, blob: Blob<u8>, index: u32, synthesis: Synthesis) -> Option<u32> {
         let embolden = synthesis.embolden();
         let skew = synthesis.skew();
-        let id = (blob.id(), index, embolden, skew.unwrap_or(0.0).to_bits());
+        // Axes chosen by the font matcher (for example wght for bold) win over user settings.
+        let mut variations: Vec<([u8; 4], f32)> =
+            synthesis.variation_settings().iter().map(|(tag, value)| (tag.to_be_bytes(), *value)).collect();
+        for (tag, value) in &self.variations {
+            if !variations.iter().any(|(t, _)| t == tag) {
+                variations.push((*tag, *value));
+            }
+        }
+        let id = FaceId {
+            blob: blob.id(),
+            index,
+            embolden,
+            skew: skew.unwrap_or(0.0).to_bits(),
+            variations: variations.iter().map(|(tag, value)| (*tag, value.to_bits())).collect(),
+        };
         if let Some(&face) = self.face_ids.get(&id) {
             return Some(face);
         }
         let font = FontRef::from_index(blob.data(), index as usize)?;
         let (offset, key) = (font.offset, font.key);
         let face = self.faces.len() as u32;
-        self.faces.push(Face { blob, index, offset, key, embolden, skew, shaper: None });
+        self.faces.push(Face { blob, index, offset, key, embolden, skew, variations, shaper: None, instance: None });
         self.face_ids.insert(id, face);
         Some(face)
     }
 
     pub fn rasterize(&mut self, key: GlyphKey) -> Option<RasterizedGlyph> {
         let face = &self.faces[key.face as usize];
-        let mut scaler = self.scaler.builder(face.font_ref()).size(self.size_px).hint(self.hint).build();
+        let mut scaler = self
+            .scaler
+            .builder(face.font_ref())
+            .size(self.size_px)
+            .hint(self.hint)
+            .variations(face.variations.iter().map(|(tag, value)| (swash::tag_from_bytes(tag), *value)))
+            .build();
         let mut render = Render::new(&[
             Source::ColorOutline(0),
             Source::ColorBitmap(StrikeWith::BestFit),

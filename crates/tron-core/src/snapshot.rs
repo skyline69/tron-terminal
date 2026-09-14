@@ -31,6 +31,8 @@ pub struct Snapshot {
     pub graphics_generation: u64,
     pub placements: Vec<Placement>,
     pub images: HashMap<u32, Image>,
+    /// When the next animation frame is due, if an image is animating.
+    pub next_frame_due: Option<std::time::Instant>,
 }
 
 impl Snapshot {

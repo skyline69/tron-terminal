@@ -90,7 +90,7 @@ bitflags! {
 }
 
 /// One grid cell. 20 bytes.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Cell {
     pub ch: char,
     pub fg: Color,

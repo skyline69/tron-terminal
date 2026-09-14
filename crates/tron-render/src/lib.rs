@@ -208,14 +208,15 @@ impl Renderer {
         } else {
             wgpu::PresentMode::Fifo
         };
-        config.alpha_mode =
-            if theme.opacity < 1.0 && caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-                wgpu::CompositeAlphaMode::PreMultiplied
-            } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
-                wgpu::CompositeAlphaMode::Opaque
-            } else {
-                caps.alpha_modes[0]
-            };
+        // Premultiplied output whenever possible, so opacity can change at runtime.
+        config.alpha_mode = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
+            wgpu::CompositeAlphaMode::Opaque
+        } else {
+            caps.alpha_modes[0]
+        };
+        let _ = theme.opacity;
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
 
@@ -242,6 +243,11 @@ impl Renderer {
             capture: None,
             device_lost,
         })
+    }
+
+    /// Whether the surface can show a translucent background.
+    pub fn supports_transparency(&self) -> bool {
+        self.config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied
     }
 
     /// True after the GPU device was lost. The renderer must be recreated.

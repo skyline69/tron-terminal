@@ -86,10 +86,10 @@ pub struct LinkMatch {
     pub id: Option<u16>,
 }
 
-#[derive(Debug)]
 enum DcsRequest {
     Decrqss(Vec<u8>),
     Xtgettcap(Vec<u8>),
+    Sixel(Box<crate::sixel::SixelDecoder>),
 }
 
 /// Something the application embedding the terminal must act on.
@@ -304,6 +304,7 @@ impl Terminal {
         snapshot.palette = self.palette;
         snapshot.palette_generation = self.palette_generation;
         snapshot.selection = selection;
+        snapshot.next_frame_due = self.graphics.tick(Instant::now());
         if snapshot.graphics_generation != self.graphics.generation() {
             snapshot.graphics_generation = self.graphics.generation();
             snapshot.placements.clone_from(&self.graphics.placements().to_vec());
@@ -365,6 +366,20 @@ impl Terminal {
     /// Scrolls the viewport to show absolute line `line`.
     pub fn scroll_to_line(&mut self, line: i64) {
         self.grids[self.active].scroll_to_line(line);
+    }
+
+    fn graphics_context(&self) -> graphics::Context {
+        let grid = &self.grids[self.active];
+        graphics::Context {
+            cursor_line: grid.screen_line(self.cursor.row),
+            cursor_col: self.cursor.col,
+            screen_top: grid.screen_line(0),
+            rows: grid.rows(),
+            cols: grid.cols(),
+            cell_width: self.cell_pixels.0,
+            cell_height: self.cell_pixels.1,
+            alt_screen: self.active == ALTERNATE,
+        }
     }
 
     /// Whether the background color counts as dark, for color scheme reports.
@@ -1046,6 +1061,14 @@ impl Terminal {
     fn set_dec_mode(&mut self, mode: u16, on: bool) {
         match mode {
             1 => self.modes.set(Modes::APP_CURSOR, on),
+            // DECCOLM: the window keeps its width, but like xterm the screen is
+            // cleared, margins reset and the cursor homed.
+            3 => {
+                self.erase_display(2);
+                self.scroll_top = 0;
+                self.scroll_bottom = self.rows() - 1;
+                self.goto(0, 0);
+            }
             5 => {
                 self.modes.set(Modes::REVERSE_VIDEO, on);
                 self.grids[self.active].damage_all();
@@ -1511,7 +1534,22 @@ impl Perform for Terminal {
                     }
                 }
             }
-            ([], b'c') if mode(0) == 0 => self.respond(b"\x1b[?62;22c"),
+            // VT220 with Sixel graphics (4) and ANSI color (22).
+            ([], b'c') if mode(0) == 0 => self.respond(b"\x1b[?62;4;22c"),
+            ([b'?'], b'S') => {
+                let item = mode(0);
+                let reply = match (item, params.raw(1).unwrap_or(0)) {
+                    (1, 1 | 4) => "\x1b[?1;0;256S".to_string(),
+                    (2, 1 | 4) => {
+                        let (cell_w, cell_h) = self.cell_pixels;
+                        let width = (self.cols() as u32 * cell_w).min(4096);
+                        let height = (self.rows() as u32 * cell_h).min(4096);
+                        format!("\x1b[?2;0;{width};{height}S")
+                    }
+                    _ => format!("\x1b[?{item};3;0S"),
+                };
+                self.respond(reply.as_bytes());
+            }
             ([b'>'], b'c') => self.respond(b"\x1b[>1;10;0c"),
             ([], b'd') => {
                 let col = self.cursor.col;
@@ -1790,19 +1828,22 @@ impl Perform for Terminal {
         }
     }
 
-    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: u8) {
+    fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: u8) {
         self.dcs = match (intermediates, action, ignore) {
             ([b'$'], b'q', false) => Some(DcsRequest::Decrqss(Vec::new())),
             ([b'+'], b'q', false) => Some(DcsRequest::Xtgettcap(Vec::new())),
+            ([], b'q', false) => Some(DcsRequest::Sixel(Box::new(crate::sixel::SixelDecoder::new(params)))),
             _ => None,
         };
     }
 
     fn put(&mut self, byte: u8) {
-        if let Some(DcsRequest::Decrqss(buffer) | DcsRequest::Xtgettcap(buffer)) = &mut self.dcs
-            && buffer.len() < 4096
-        {
-            buffer.push(byte);
+        match &mut self.dcs {
+            Some(DcsRequest::Decrqss(buffer) | DcsRequest::Xtgettcap(buffer)) if buffer.len() < 4096 => {
+                buffer.push(byte)
+            }
+            Some(DcsRequest::Sixel(decoder)) => decoder.put(byte),
+            _ => {}
         }
     }
 
@@ -1810,23 +1851,25 @@ impl Perform for Terminal {
         match self.dcs.take() {
             Some(DcsRequest::Decrqss(request)) => self.decrqss(&request),
             Some(DcsRequest::Xtgettcap(request)) => self.xtgettcap(&request),
+            Some(DcsRequest::Sixel(decoder)) => {
+                if let Some((width, height, rgba)) = decoder.finish(self.palette.background) {
+                    let ctx = self.graphics_context();
+                    let (_, rows) = self.graphics.add_image(width, height, rgba, &ctx);
+                    // Leave the cursor on the line below the image, in the same column.
+                    let col = self.cursor.col;
+                    for _ in 0..rows {
+                        self.linefeed();
+                    }
+                    self.cursor.col = col;
+                }
+            }
             None => {}
         }
     }
 
     fn apc_dispatch(&mut self, data: &[u8]) {
         let Some(payload) = data.strip_prefix(b"G") else { return };
-        let grid = &self.grids[self.active];
-        let ctx = graphics::Context {
-            cursor_line: grid.screen_line(self.cursor.row),
-            cursor_col: self.cursor.col,
-            screen_top: grid.screen_line(0),
-            rows: grid.rows(),
-            cols: grid.cols(),
-            cell_width: self.cell_pixels.0,
-            cell_height: self.cell_pixels.1,
-            alt_screen: self.active == ALTERNATE,
-        };
+        let ctx = self.graphics_context();
         let outcome = self.graphics.handle(payload, &ctx);
         if let Some(response) = outcome.response {
             self.respond(&response);
@@ -1940,7 +1983,7 @@ mod tests {
     #[test]
     fn device_status_report() {
         let mut t = term(10, 5, b"\x1b[3;4H\x1b[6n\x1b[c");
-        assert_eq!(t.take_responses().unwrap(), b"\x1b[3;4R\x1b[?62;22c");
+        assert_eq!(t.take_responses().unwrap(), b"\x1b[3;4R\x1b[?62;4;22c");
     }
 
     #[test]
@@ -2198,6 +2241,26 @@ mod tests {
         let found = plain.link_at(plain.viewport_point(0, 10)).unwrap();
         assert_eq!(found.uri, "https://a.b/c");
         assert_eq!(found.id, None);
+    }
+
+    #[test]
+    fn sixel_image_is_placed_and_cursor_moves_below() {
+        let mut t = Terminal::new(20, 10, 100);
+        t.set_cell_pixels(10, 20);
+        // 12 pixels tall: one cell row of 20 px.
+        Parser::new().advance(&mut t, b"ab\x1bPq#1;2;100;0;0#1!10~-!10~\x1b\\x");
+        let placement = &t.graphics().placements()[0];
+        assert_eq!((placement.line, placement.col, placement.rows), (0, 2, 1));
+        assert_eq!(t.graphics().images()[&placement.image_id].width, 10);
+        assert_eq!((t.cursor().row, t.cursor().col), (1, 3));
+    }
+
+    #[test]
+    fn column_mode_switch_clears_and_homes() {
+        let t = term(10, 3, b"abc\r\ndef\x1b[2;3r\x1b[?3h");
+        assert_eq!(line(&t, 0), "");
+        assert_eq!(line(&t, 1), "");
+        assert_eq!((t.cursor().row, t.cursor().col), (0, 0));
     }
 
     #[test]

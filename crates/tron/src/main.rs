@@ -243,6 +243,9 @@ struct Session {
     /// The shell exited but the window stays open.
     exited: bool,
     ime_area: Option<[f32; 4]>,
+    /// `TRON_TRACE_LATENCY`: log the time from a key press to the frame showing its effect.
+    trace_latency: bool,
+    pending_key: Option<Instant>,
     focused: bool,
     scale_factor: f64,
     font_size: f32,
@@ -358,6 +361,8 @@ impl App {
             flash_until: None,
             exited: false,
             ime_area: None,
+            trace_latency: std::env::var_os("TRON_TRACE_LATENCY").is_some(),
+            pending_key: None,
             focused: true,
             scale_factor,
             font_size: config.font.size,
@@ -507,6 +512,9 @@ impl ApplicationHandler for App {
                         return;
                     }
                     session.blink_epoch = Instant::now();
+                    if session.trace_latency && session.pending_key.is_none() {
+                        session.pending_key = Some(session.blink_epoch);
+                    }
                     let action = session.binding_for(&event);
                     if action == Some(Action::ReloadConfig) {
                         self.reload_config();
@@ -605,6 +613,19 @@ impl Session {
         }
         self.fonts.set_fallback(&config.font.fallback);
         self.fonts.set_features(&config.font.shaping_features());
+        self.fonts.set_style_families(
+            config.font.bold_family.as_deref(),
+            config.font.italic_family.as_deref(),
+            config.font.bold_italic_family.as_deref(),
+        );
+        let variations: Vec<(String, f32)> =
+            config.font.variations.iter().map(|(tag, value)| (tag.clone(), *value)).collect();
+        self.fonts.set_variations(&variations);
+        self.fonts.set_hinting(match config.font.hinting {
+            tron_config::Hinting::Auto => tron_font::Hinting::Auto,
+            tron_config::Hinting::On => tron_font::Hinting::On,
+            tron_config::Hinting::Off => tron_font::Hinting::Off,
+        });
         self.set_font_size(config.font.size);
 
         match config.colors(paths) {
@@ -626,6 +647,10 @@ impl Session {
             }
             Err(error) => log::error!("{error}"),
         }
+
+        let translucent = config.window.opacity < 1.0 && self.renderer.supports_transparency();
+        self.window.set_transparent(translucent);
+        self.window.set_blur(translucent && config.window.blur);
 
         let shaders: Vec<PostShader> = config
             .shader_sources(paths)
@@ -750,6 +775,11 @@ impl Session {
             None => {}
         }
 
+        // Animated images.
+        if let Some(due) = self.snapshot.next_frame_due {
+            wake_at(due.max(now + Duration::from_millis(1)));
+        }
+
         // Built without the lock, so the reader keeps parsing meanwhile.
         self.renderer.prepare(&self.snapshot, &mut self.fonts, self.focused);
         let capture_now = self.screenshot.as_ref().is_some_and(|(_, due)| now >= *due);
@@ -758,6 +788,15 @@ impl Session {
         }
         self.renderer.render();
         self.last_frame = Instant::now();
+        if let Some(pressed) = self.pending_key
+            && self.snapshot.damaged.iter().any(|&damaged| damaged)
+        {
+            log::info!(
+                "latency: key press to presented frame {:.2} ms",
+                (self.last_frame - pressed).as_secs_f64() * 1000.0
+            );
+            self.pending_key = None;
+        }
         self.update_ime_area();
 
         if capture_now {

@@ -19,13 +19,23 @@ fallback = []
 features = []
 # Programming ligatures. false disables calt, liga and dlig.
 ligatures = true
+# Separate families for styled text. Default: family.
+# bold_family = "Iosevka Heavy"
+# italic_family = "Victor Mono"
+# bold_italic_family = "Victor Mono"
+# Variable font axes.
+# variations = { wght = 450, wdth = 90 }
+# Outline hinting: auto (on below 1.5x scale), on or off.
+hinting = "auto"
 
 [window]
 title = "tron"
 padding_x = 10
 padding_y = 8
-# Background opacity from 0.0 to 1.0. Needs a restart.
+# Background opacity from 0.0 to 1.0.
 opacity = 1.0
+# Blur what is behind a translucent window (KDE Plasma).
+blur = false
 decorations = true
 columns = 100
 rows = 30
