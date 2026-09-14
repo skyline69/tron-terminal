@@ -6,6 +6,11 @@
 // Read the rendered terminal with `terminal(uv)` and the final output of the
 // previous frame with `previous(uv)`. Output premultiplied alpha.
 //
+// Alpha: many shaders are written for opaque windows and return alpha 1. The
+// output alpha is kept at most at the input's alpha, rising above it only as far
+// as the brightest color channel needs, so a translucent window stays translucent
+// while a shader runs.
+//
 // Redraws: shaders that read `tron.time` or `tron.frame` redraw every frame.
 // Shaders that read `tron.cursor_change_time` or `tron.previous_cursor` redraw
 // for one second after each cursor move, then stop until the next change.
@@ -69,7 +74,10 @@ fn tron_vs(@builtin(vertex_index) index: u32) -> TronVertexOut {
 
 @fragment
 fn tron_fs(v: TronVertexOut) -> @location(0) vec4<f32> {
-    return shade(v.uv, v.position.xy);
+    let color = shade(v.uv, v.position.xy);
+    let input = terminal(v.uv).a;
+    let alpha = min(color.a, max(input, max(color.r, max(color.g, color.b))));
+    return vec4<f32>(min(color.rgb, vec3<f32>(alpha)), alpha);
 }
 
 // ---- user shader ----

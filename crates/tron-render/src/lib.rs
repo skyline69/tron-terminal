@@ -656,20 +656,19 @@ impl Renderer {
         let mut rgba = Vec::with_capacity(width * height * 4);
         for row in data.chunks(padded_row as usize).take(height) {
             for pixel in row[..width * 4].as_chunks::<4>().0 {
-                let rgb = match format {
+                // Alpha is kept, so captures of translucent windows show their opacity.
+                let color = match format {
                     wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
-                        [pixel[2], pixel[1], pixel[0]]
+                        [pixel[2], pixel[1], pixel[0], pixel[3]]
                     }
-                    wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => {
-                        [pixel[0], pixel[1], pixel[2]]
-                    }
+                    wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => *pixel,
                     wgpu::TextureFormat::Rgb10a2Unorm => {
                         let v = u32::from_le_bytes(*pixel);
-                        [(v >> 2) as u8, (v >> 12) as u8, (v >> 22) as u8]
+                        [(v >> 2) as u8, (v >> 12) as u8, (v >> 22) as u8, ((v >> 30) * 85) as u8]
                     }
                     other => return Err(format!("capture does not support {other:?}")),
                 };
-                rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+                rgba.extend_from_slice(&color);
             }
         }
         let file = std::fs::File::create(path).map_err(|e| e.to_string())?;

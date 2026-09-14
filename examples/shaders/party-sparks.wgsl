@@ -117,6 +117,9 @@ fn shade(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
     var rgb = c0 * base_color;
     rgb += hash33(vec3<f32>(frag, tron.time * 256.0)) / 512.0;
     let mask = clamp(c0 * 0.2, 0.0, 1.0) * fade;
-    // Additive, clamped.
-    return min(color + vec4<f32>(rgb * mask, 1.0), vec4<f32>(1.0));
+    // Additive, clamped. The original wrote alpha 1, which made a translucent window
+    // turn opaque while the sparks ran; the sparks add their light to the alpha instead.
+    let added = rgb * mask;
+    let alpha = min(color.a + max(max(added.r, added.g), added.b), 1.0);
+    return vec4<f32>(min(color.rgb + added, vec3<f32>(alpha)), alpha);
 }
