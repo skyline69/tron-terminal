@@ -1,0 +1,81 @@
+# tron configuration.
+#
+# Copy to ~/.config/tron/config.toml. Every key is optional.
+# tron watches the config directory and applies changes while running.
+#
+#   ~/.config/tron/config.toml          this file
+#   ~/.config/tron/themes/<name>.toml   color themes
+#   ~/.config/tron/shaders/<name>.wgsl  post-processing shaders
+
+# Theme from themes/<name>.toml. "tron" is built in.
+# theme = "tron-light"
+
+[font]
+family = "monospace"
+size = 12.0
+# Tried in order before system fallback.
+fallback = []
+# OpenType features, for example ["ss01", "zero"].
+features = []
+# Programming ligatures. false disables calt, liga and dlig.
+ligatures = true
+
+[window]
+title = "tron"
+padding_x = 10
+padding_y = 8
+# Background opacity from 0.0 to 1.0. Needs a restart.
+opacity = 1.0
+decorations = true
+columns = 100
+rows = 30
+
+[cursor]
+# block, beam or underline
+shape = "block"
+
+# Overrides applied on top of the theme.
+[colors]
+# foreground = "#c7d5e0"
+# background = "#0a0e14"
+# cursor = "#4fd6ff"
+# cursor_text = "#0a0e14"
+# selection_background = "#1f4a6b"
+# selection_foreground = "#ffffff"
+# normal = ["#1b2230", "#ff5c75", "#5ce6a6", "#ffc86b", "#4f9dff", "#c38bff", "#4fd6ff", "#c7d5e0"]
+# bright = ["#4a5568", "#ff8095", "#86f0bf", "#ffd99a", "#7fb8ff", "#d6adff", "#8ae6ff", "#eef4f8"]
+
+[scrollback]
+lines = 10000
+# Lines per mouse wheel step.
+multiplier = 3.0
+
+[shell]
+# program = "/usr/bin/fish"
+# args = ["--login"]
+# "xterm-tron" uses the bundled terminfo entry. Use "xterm-256color" for
+# remote hosts without it.
+term = "xterm-tron"
+# env = { EDITOR = "nvim" }
+
+[selection]
+word_separators = ",│`|:\"'()[]{}<>"
+# Copy selections to the primary selection (middle click paste).
+copy_on_select = true
+
+[clipboard]
+# OSC 52 access for applications: disabled, copy or copy-paste.
+osc52 = "copy"
+
+[shader]
+# WGSL files from shaders/, applied in order. See examples/shaders.
+files = []
+# auto redraws continuously when a shader reads tron.time or tron.frame.
+# always or never force it.
+animation = "auto"
+
+[images]
+# Memory for decoded kitty graphics protocol images, in MiB.
+memory_limit = 320
+# Let applications send images as file paths.
+file_transfer = true

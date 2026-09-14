@@ -1,0 +1,7 @@
+# Light variant of the built-in tron theme.
+foreground = "#1b2430"
+background = "#f4f7fa"
+cursor = "#0077b6"
+selection_background = "#bcdcf2"
+normal = ["#1b2230", "#d0314c", "#1f9d68", "#b7791f", "#2b6cb0", "#8a4fd3", "#0e8fb8", "#d9e2ea"]
+bright = ["#5a6778", "#e0556d", "#2fb57f", "#c9912e", "#4a86c8", "#a06ee0", "#28a9d1", "#ffffff"]

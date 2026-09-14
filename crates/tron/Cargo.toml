@@ -1,0 +1,23 @@
+[package]
+name = "tron"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tron-core.workspace = true
+tron-pty.workspace = true
+tron-font.workspace = true
+tron-render.workspace = true
+tron-config.workspace = true
+winit.workspace = true
+pollster.workspace = true
+parking_lot.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+smithay-clipboard.workspace = true
