@@ -40,6 +40,8 @@ bitflags! {
         const REVERSE_VIDEO    = 1 << 16;
         const CURSOR_BLINK     = 1 << 17;
         const ALTERNATE_SCROLL = 1 << 18;
+        /// Report dark/light color scheme changes (mode 2031).
+        const COLOR_SCHEME_UPDATES = 1 << 19;
 
         const MOUSE_TRACKING = Self::MOUSE_X10.bits()
             | Self::MOUSE_NORMAL.bits()
@@ -66,14 +68,44 @@ pub struct CursorState {
     pub blinking: bool,
 }
 
+/// A hyperlink target set with OSC 8.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hyperlink {
+    pub id: Option<String>,
+    pub uri: String,
+}
+
+/// A link under the pointer: an OSC 8 hyperlink or a detected URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkMatch {
+    pub uri: String,
+    /// Inclusive cell range.
+    pub start: Point,
+    pub end: Point,
+    /// Set for OSC 8 links: every cell with this id belongs to the link.
+    pub id: Option<u16>,
+}
+
+#[derive(Debug)]
+enum DcsRequest {
+    Decrqss(Vec<u8>),
+    Xtgettcap(Vec<u8>),
+}
+
 /// Something the application embedding the terminal must act on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TermEvent {
     Bell,
     /// OSC 52 write.
-    ClipboardStore { primary: bool, text: String },
+    ClipboardStore {
+        primary: bool,
+        text: String,
+    },
     /// OSC 52 read. Reply with [`Terminal::clipboard_reply`].
-    ClipboardLoad { primary: bool, terminator: &'static str },
+    ClipboardLoad {
+        primary: bool,
+        terminator: &'static str,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
@@ -138,6 +170,12 @@ pub struct Terminal {
     /// Absolute line where the shell's current prompt starts (OSC 133;A),
     /// cleared when a command runs (OSC 133;C or D).
     prompt_line: Option<i64>,
+    /// Kitty keyboard protocol flag stacks for the primary and alternate screen.
+    keyboard: [Vec<u8>; 2],
+    dcs: Option<DcsRequest>,
+    links: Vec<Hyperlink>,
+    link_ids: std::collections::HashMap<(Option<String>, String), u16>,
+    title_stack: Vec<String>,
 }
 
 impl Terminal {
@@ -175,6 +213,11 @@ impl Terminal {
             word_separators: ",│`|:\"'()[]{}<>".to_owned(),
             cwd: None,
             prompt_line: None,
+            keyboard: [Vec::new(), Vec::new()],
+            dcs: None,
+            links: Vec::new(),
+            link_ids: std::collections::HashMap::new(),
+            title_stack: Vec::new(),
         }
     }
 
@@ -269,6 +312,145 @@ impl Terminal {
         self.grids[self.active].clear_damage();
     }
 
+    /// Active kitty keyboard protocol flags.
+    pub fn keyboard_flags(&self) -> u8 {
+        self.keyboard[self.active].last().copied().unwrap_or(0)
+    }
+
+    /// Target of hyperlink `id` from a cell's `link` field.
+    pub fn hyperlink(&self, id: u16) -> Option<&Hyperlink> {
+        id.checked_sub(1).and_then(|i| self.links.get(usize::from(i)))
+    }
+
+    /// The link at an absolute cell position: OSC 8 hyperlinks first, then URLs in the text.
+    pub fn link_at(&self, point: Point) -> Option<LinkMatch> {
+        let grid = self.grid();
+        let logical = crate::text::LogicalLine::at(grid, point.line)?;
+        let row = grid.line(point.line)?;
+        let link = row.cells.get(point.col)?.link;
+        if let Some(target) = self.hyperlink(link) {
+            let same = |p: &Point| grid.line(p.line).and_then(|r| r.cells.get(p.col)).is_some_and(|c| c.link == link);
+            let index = logical.points.iter().position(|p| *p >= point)?;
+            let mut first = index;
+            while first > 0 && same(&logical.points[first - 1]) {
+                first -= 1;
+            }
+            let mut last = index;
+            while last + 1 < logical.points.len() && same(&logical.points[last + 1]) {
+                last += 1;
+            }
+            return Some(LinkMatch {
+                uri: target.uri.clone(),
+                start: logical.points[first],
+                end: logical.points[last],
+                id: Some(link),
+            });
+        }
+        let (first, last) = logical.url_at(point)?;
+        Some(LinkMatch {
+            uri: logical.text(first, last),
+            start: logical.points[first],
+            end: logical.points[last],
+            id: None,
+        })
+    }
+
+    /// Searches the screen and scrollback. See [`crate::text::search`].
+    pub fn search(&self, query: &str, from: Option<Point>, backwards: bool) -> Option<crate::SearchMatch> {
+        let grid = self.grid();
+        let from = from.unwrap_or(Point::new(grid.last_line(), grid.cols() - 1));
+        crate::text::search(grid, query, from, backwards)
+    }
+
+    /// Scrolls the viewport to show absolute line `line`.
+    pub fn scroll_to_line(&mut self, line: i64) {
+        self.grids[self.active].scroll_to_line(line);
+    }
+
+    /// Whether the background color counts as dark, for color scheme reports.
+    fn is_dark(&self) -> bool {
+        let [r, g, b] = self.palette.background.map(f32::from);
+        0.2126 * r + 0.7152 * g + 0.0722 * b < 128.0
+    }
+
+    fn intern_link(&mut self, id: Option<String>, uri: String) -> u16 {
+        let key = (id, uri);
+        if let Some(&link) = self.link_ids.get(&key) {
+            return link;
+        }
+        if self.links.len() >= usize::from(u16::MAX - 1) {
+            return 0;
+        }
+        self.links.push(Hyperlink { id: key.0.clone(), uri: key.1.clone() });
+        let link = self.links.len() as u16;
+        self.link_ids.insert(key, link);
+        link
+    }
+
+    fn decrqss(&mut self, request: &[u8]) {
+        let reply = match request {
+            b" q" => {
+                let blinking = self.modes.contains(Modes::CURSOR_BLINK);
+                let style = match (self.cursor_shape, blinking) {
+                    (CursorShape::Block, true) => 1,
+                    (CursorShape::Block, false) => 2,
+                    (CursorShape::Underline, true) => 3,
+                    (CursorShape::Underline, false) => 4,
+                    (CursorShape::Beam, true) => 5,
+                    (CursorShape::Beam, false) => 6,
+                };
+                Some(format!("{style} q"))
+            }
+            b"r" => Some(format!("{};{}r", self.scroll_top + 1, self.scroll_bottom + 1)),
+            b"m" => {
+                let pen = self.cursor.pen;
+                let mut attrs = vec!["0".to_string()];
+                for (flag, code) in [
+                    (Flags::BOLD, "1"),
+                    (Flags::DIM, "2"),
+                    (Flags::ITALIC, "3"),
+                    (Flags::UNDERLINE, "4"),
+                    (Flags::BLINK, "5"),
+                    (Flags::INVERSE, "7"),
+                    (Flags::HIDDEN, "8"),
+                    (Flags::STRIKETHROUGH, "9"),
+                ] {
+                    if pen.flags.contains(flag) {
+                        attrs.push(code.into());
+                    }
+                }
+                for (color, base) in [(pen.fg, 38), (pen.bg, 48)] {
+                    match color.kind() {
+                        crate::ColorKind::Indexed(i) => attrs.push(format!("{base}:5:{i}")),
+                        crate::ColorKind::Rgb(r, g, b) => attrs.push(format!("{base}:2::{r}:{g}:{b}")),
+                        crate::ColorKind::Default => {}
+                    }
+                }
+                Some(format!("{}m", attrs.join(";")))
+            }
+            _ => None,
+        };
+        match reply {
+            Some(reply) => self.respond(format!("\x1bP1$r{reply}\x1b\\").as_bytes()),
+            None => self.respond(b"\x1bP0$r\x1b\\"),
+        }
+    }
+
+    fn xtgettcap(&mut self, request: &[u8]) {
+        for hex in request.split(|&b| b == b';') {
+            let name = decode_hex(hex).and_then(|bytes| String::from_utf8(bytes).ok());
+            let hex = String::from_utf8_lossy(hex).into_owned();
+            match name.as_deref().and_then(capability) {
+                Some("") => self.respond(format!("\x1bP1+r{hex}\x1b\\").as_bytes()),
+                Some(value) => {
+                    let encoded: String = value.bytes().map(|b| format!("{b:02X}")).collect();
+                    self.respond(format!("\x1bP1+r{hex}={encoded}\x1b\\").as_bytes());
+                }
+                None => self.respond(format!("\x1bP0+r{hex}\x1b\\").as_bytes()),
+            }
+        }
+    }
+
     /// Events for the embedding application, oldest first.
     pub fn take_events(&mut self) -> Vec<TermEvent> {
         std::mem::take(&mut self.events)
@@ -298,9 +480,14 @@ impl Terminal {
 
     /// Sets the configured colors. Application overrides are discarded.
     pub fn set_default_palette(&mut self, palette: Palette) {
+        let was_dark = self.is_dark();
         self.default_palette = palette;
         self.palette = palette;
         self.palette_generation += 1;
+        if self.modes.contains(Modes::COLOR_SCHEME_UPDATES) && self.is_dark() != was_dark {
+            let scheme = if self.is_dark() { 1 } else { 2 };
+            self.respond(format!("\x1b[?997;{scheme}n").as_bytes());
+        }
     }
 
     pub fn graphics(&self) -> &Graphics {
@@ -462,11 +649,7 @@ impl Terminal {
     }
 
     fn move_down(&mut self, n: usize) {
-        let bottom = if self.cursor.row <= self.scroll_bottom {
-            self.scroll_bottom
-        } else {
-            self.rows() - 1
-        };
+        let bottom = if self.cursor.row <= self.scroll_bottom { self.scroll_bottom } else { self.rows() - 1 };
         self.cursor.row = (self.cursor.row + n).min(bottom);
         self.cursor.pending_wrap = false;
     }
@@ -553,11 +736,36 @@ impl Terminal {
             return c;
         }
         match c {
-            '`' => '◆', 'a' => '▒', 'b' => '␉', 'c' => '␌', 'd' => '␍', 'e' => '␊',
-            'f' => '°', 'g' => '±', 'h' => '␤', 'i' => '␋', 'j' => '┘', 'k' => '┐',
-            'l' => '┌', 'm' => '└', 'n' => '┼', 'o' => '⎺', 'p' => '⎻', 'q' => '─',
-            'r' => '⎼', 's' => '⎽', 't' => '├', 'u' => '┤', 'v' => '┴', 'w' => '┬',
-            'x' => '│', 'y' => '≤', 'z' => '≥', '{' => 'π', '|' => '≠', '}' => '£',
+            '`' => '◆',
+            'a' => '▒',
+            'b' => '␉',
+            'c' => '␌',
+            'd' => '␍',
+            'e' => '␊',
+            'f' => '°',
+            'g' => '±',
+            'h' => '␤',
+            'i' => '␋',
+            'j' => '┘',
+            'k' => '┐',
+            'l' => '┌',
+            'm' => '└',
+            'n' => '┼',
+            'o' => '⎺',
+            'p' => '⎻',
+            'q' => '─',
+            'r' => '⎼',
+            's' => '⎽',
+            't' => '├',
+            'u' => '┤',
+            'v' => '┴',
+            'w' => '┬',
+            'x' => '│',
+            'y' => '≤',
+            'z' => '≥',
+            '{' => 'π',
+            '|' => '≠',
+            '}' => '£',
             '~' => '·',
             _ => c,
         }
@@ -604,11 +812,8 @@ impl Terminal {
             let base = line.cells[col];
             line.cells[col].flags.insert(Flags::WIDE);
             line.touch(col + 1, col + 2);
-            line.cells[col + 1] = Cell {
-                ch: '\0',
-                flags: (base.flags - Flags::CONTENT_MASK) | Flags::WIDE_SPACER,
-                ..base
-            };
+            line.cells[col + 1] =
+                Cell { ch: '\0', flags: (base.flags - Flags::CONTENT_MASK) | Flags::WIDE_SPACER, ..base };
             if self.cursor.row == row && self.cursor.col == col + 1 && !self.cursor.pending_wrap {
                 if col + 2 >= cols {
                     self.cursor.col = cols - 1;
@@ -798,6 +1003,7 @@ impl Terminal {
             self.selection = None;
             if !alternate {
                 self.graphics.clear_alt_screen();
+                self.keyboard[ALTERNATE].clear();
             }
         }
         if clear && alternate {
@@ -882,6 +1088,7 @@ impl Terminal {
                 }
             }
             2004 => self.modes.set(Modes::BRACKETED_PASTE, on),
+            2031 => self.modes.set(Modes::COLOR_SCHEME_UPDATES, on),
             2026 => {
                 self.modes.set(Modes::SYNC_OUTPUT, on);
                 self.sync_started = on.then(Instant::now);
@@ -908,6 +1115,7 @@ impl Terminal {
             47 | 1047 | 1049 => Modes::ALT_SCREEN,
             2004 => Modes::BRACKETED_PASTE,
             2026 => Modes::SYNC_OUTPUT,
+            2031 => Modes::COLOR_SCHEME_UPDATES,
             _ => return None,
         };
         Some(self.modes.contains(flag))
@@ -915,8 +1123,9 @@ impl Terminal {
 
     fn sgr(&mut self, params: &Params) {
         let pen = &mut self.cursor.pen;
+        let link = pen.link;
         if params.is_empty() {
-            *pen = Cell::BLANK;
+            *pen = Cell { link, ..Cell::BLANK };
             return;
         }
         let mut groups: [&[u16]; MAX_PARAMS] = [&[]; MAX_PARAMS];
@@ -931,7 +1140,7 @@ impl Terminal {
         while i < groups.len() {
             let group = groups[i];
             match group[0] {
-                0 => *pen = Cell::BLANK,
+                0 => *pen = Cell { link, ..Cell::BLANK },
                 1 => pen.flags.insert(Flags::BOLD),
                 2 => pen.flags.insert(Flags::DIM),
                 3 => pen.flags.insert(Flags::ITALIC),
@@ -1012,10 +1221,7 @@ fn extended_color(group: &[u16], rest: &[&[u16]]) -> Option<(Color, usize)> {
     }
     match rest.first().map(|g| g[0]) {
         Some(5) => rest.get(1).map(|g| (Color::indexed(byte(g[0])), 2)),
-        Some(2) if rest.len() >= 4 => Some((
-            Color::rgb(byte(rest[1][0]), byte(rest[2][0]), byte(rest[3][0])),
-            4,
-        )),
+        Some(2) if rest.len() >= 4 => Some((Color::rgb(byte(rest[1][0]), byte(rest[2][0]), byte(rest[3][0])), 4)),
         _ => None,
     }
 }
@@ -1028,7 +1234,8 @@ fn default_tabs(cols: usize) -> Vec<bool> {
 #[inline]
 fn repair_wide(line: &mut crate::grid::Row, col: usize, width: usize) {
     let cols = line.cells.len();
-    if col > 0 && line.cells[col].flags.contains(Flags::WIDE_SPACER) && line.cells[col - 1].flags.contains(Flags::WIDE) {
+    if col > 0 && line.cells[col].flags.contains(Flags::WIDE_SPACER) && line.cells[col - 1].flags.contains(Flags::WIDE)
+    {
         let cell = &mut line.cells[col - 1];
         cell.ch = '\0';
         cell.flags.remove(Flags::CONTENT_MASK);
@@ -1049,6 +1256,41 @@ fn char_width(c: char) -> Option<usize> {
         0x4e00..=0x9fff => Some(2),
         _ => c.width(),
     }
+}
+
+fn decode_hex(hex: &[u8]) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    hex.chunks(2).map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()).collect()
+}
+
+/// Terminfo capabilities reported through XTGETTCAP. Empty strings are booleans.
+fn capability(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "TN" | "name" => "xterm-tron",
+        "Co" | "colors" => "256",
+        "RGB" => "8/8/8",
+        "Tc" => "",
+        "Smulx" => "\x1b[4:%p1%dm",
+        "Setulc" => "\x1b[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m",
+        "setrgbf" => "\x1b[38:2::%p1%d:%p2%d:%p3%dm",
+        "setrgbb" => "\x1b[48:2::%p1%d:%p2%d:%p3%dm",
+        "Ss" => "\x1b[%p1%d q",
+        "Se" => "\x1b[2 q",
+        "Sync" => "\x1b[?2026%?%p1%{1}%-%tl%eh%;",
+        "indn" => "\x1b[%p1%dS",
+        "rin" => "\x1b[%p1%dT",
+        "BE" => "\x1b[?2004h",
+        "BD" => "\x1b[?2004l",
+        "PS" => "\x1b[200~",
+        "PE" => "\x1b[201~",
+        "fe" => "\x1b[?1004h",
+        "fd" => "\x1b[?1004l",
+        "kxIN" => "\x1b[I",
+        "kxOUT" => "\x1b[O",
+        _ => return None,
+    })
 }
 
 fn parse_number(bytes: &[u8]) -> Option<usize> {
@@ -1145,7 +1387,9 @@ impl Perform for Terminal {
                         Some(width @ 1..=2) if !is_regional_indicator(c) => width,
                         _ => break,
                     };
-                    if col + width > cols || line.cells[col..col + width].iter().any(|cell| cell.flags.intersects(Flags::CONTENT_MASK)) {
+                    if col + width > cols
+                        || line.cells[col..col + width].iter().any(|cell| cell.flags.intersects(Flags::CONTENT_MASK))
+                    {
                         break;
                     }
                     if width == 2 {
@@ -1313,8 +1557,72 @@ impl Perform for Terminal {
             }
             ([], b's') => self.save_cursor(),
             ([], b'u') => self.restore_cursor(),
-            // Kitty keyboard protocol query: no progressive enhancements yet.
-            ([b'?'], b'u') => self.respond(b"\x1b[?0u"),
+            ([b'?'], b'u') => {
+                let flags = self.keyboard_flags();
+                self.respond(format!("\x1b[?{flags}u").as_bytes());
+            }
+            ([b'>'], b'u') => {
+                let stack = &mut self.keyboard[self.active];
+                if stack.len() >= 16 {
+                    stack.remove(0);
+                }
+                stack.push(mode(0) as u8 & 0x1f);
+            }
+            ([b'<'], b'u') => {
+                let stack = &mut self.keyboard[self.active];
+                stack.truncate(stack.len().saturating_sub(n(0)));
+            }
+            ([b'='], b'u') => {
+                let flags = mode(0) as u8 & 0x1f;
+                let how = params.get_or(1, 1);
+                let stack = &mut self.keyboard[self.active];
+                let current = stack.last().copied().unwrap_or(0);
+                let value = match how {
+                    2 => current | flags,
+                    3 => current & !flags,
+                    _ => flags,
+                };
+                match stack.last_mut() {
+                    Some(top) => *top = value,
+                    None => stack.push(value),
+                }
+            }
+            ([b'>'], b'q') if mode(0) == 0 => {
+                self.respond(format!("\x1bP>|tron({})\x1b\\", env!("CARGO_PKG_VERSION")).as_bytes());
+            }
+            ([b'?'], b'n') => match mode(0) {
+                6 => {
+                    let origin = if self.modes.contains(Modes::ORIGIN) { self.scroll_top } else { 0 };
+                    let reply = format!("\x1b[?{};{}R", self.cursor.row - origin + 1, self.cursor.col + 1);
+                    self.respond(reply.as_bytes());
+                }
+                996 => {
+                    let scheme = if self.is_dark() { 1 } else { 2 };
+                    self.respond(format!("\x1b[?997;{scheme}n").as_bytes());
+                }
+                _ => {}
+            },
+            ([], b't') => {
+                let (cell_w, cell_h) = self.cell_pixels;
+                let (rows, cols) = (self.rows() as u32, self.cols() as u32);
+                match mode(0) {
+                    14 => self.respond(format!("\x1b[4;{};{}t", rows * cell_h, cols * cell_w).as_bytes()),
+                    16 => self.respond(format!("\x1b[6;{cell_h};{cell_w}t").as_bytes()),
+                    18 => self.respond(format!("\x1b[8;{rows};{cols}t").as_bytes()),
+                    22 => {
+                        if self.title_stack.len() < 32 {
+                            self.title_stack.push(self.title.clone());
+                        }
+                    }
+                    23 => {
+                        if let Some(title) = self.title_stack.pop() {
+                            self.title = title;
+                            self.title_dirty = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             ([b' '], b'q') => {
                 let (shape, blinking) = match mode(0) {
                     0 => (self.default_cursor_shape, true),
@@ -1338,11 +1646,7 @@ impl Perform for Terminal {
                 };
                 self.respond(format!("\x1b[?{m};{state}$y").as_bytes());
             }
-            _ => log::debug!(
-                "unhandled CSI {:?} {}",
-                String::from_utf8_lossy(intermediates),
-                action as char
-            ),
+            _ => log::debug!("unhandled CSI {:?} {}", String::from_utf8_lossy(intermediates), action as char),
         }
     }
 
@@ -1453,6 +1757,19 @@ impl Perform for Terminal {
                     self.events.push(TermEvent::ClipboardStore { primary, text });
                 }
             }
+            [b"8", link_params, uri @ ..] => {
+                let uri = uri.join(&b';');
+                if uri.is_empty() || uri.len() > 4096 {
+                    self.cursor.pen.link = 0;
+                } else {
+                    let id = link_params
+                        .split(|&b| b == b':')
+                        .find_map(|p| p.strip_prefix(b"id="))
+                        .map(|id| String::from_utf8_lossy(id).into_owned());
+                    let uri = String::from_utf8_lossy(&uri).into_owned();
+                    self.cursor.pen.link = self.intern_link(id, uri);
+                }
+            }
             [b"133", kind, ..] => match kind.first() {
                 Some(b'A') if self.active == PRIMARY => {
                     self.prompt_line = Some(self.grids[PRIMARY].screen_line(self.cursor.row));
@@ -1470,6 +1787,30 @@ impl Perform for Terminal {
             }
             [kind, ..] => log::debug!("unhandled OSC {}", String::from_utf8_lossy(kind)),
             [] => {}
+        }
+    }
+
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: u8) {
+        self.dcs = match (intermediates, action, ignore) {
+            ([b'$'], b'q', false) => Some(DcsRequest::Decrqss(Vec::new())),
+            ([b'+'], b'q', false) => Some(DcsRequest::Xtgettcap(Vec::new())),
+            _ => None,
+        };
+    }
+
+    fn put(&mut self, byte: u8) {
+        if let Some(DcsRequest::Decrqss(buffer) | DcsRequest::Xtgettcap(buffer)) = &mut self.dcs
+            && buffer.len() < 4096
+        {
+            buffer.push(byte);
+        }
+    }
+
+    fn unhook(&mut self) {
+        match self.dcs.take() {
+            Some(DcsRequest::Decrqss(request)) => self.decrqss(&request),
+            Some(DcsRequest::Xtgettcap(request)) => self.xtgettcap(&request),
+            None => {}
         }
     }
 
@@ -1642,10 +1983,7 @@ mod tests {
         let mut t = term(10, 1, b"\x1b]11;?\x07\x1b]4;1;#ff0000\x1b\\\x1b]52;c;aGVsbG8=\x07");
         assert_eq!(t.take_responses().unwrap(), b"\x1b]11;rgb:0000/0000/0000\x07");
         assert_eq!(t.palette().colors[1], [255, 0, 0]);
-        assert_eq!(
-            t.take_events(),
-            vec![TermEvent::ClipboardStore { primary: false, text: "hello".into() }]
-        );
+        assert_eq!(t.take_events(), vec![TermEvent::ClipboardStore { primary: false, text: "hello".into() }]);
     }
 
     #[test]
@@ -1717,8 +2055,30 @@ mod tests {
     #[test]
     fn fast_paths_match_character_by_character_printing() {
         const PIECES: &[&str] = &[
-            "a", "bc", " ", "中", "文字", "é", "e\u{301}", "\u{200D}", "👨", "🇩", "🇪", "❤", "\u{FE0F}",
-            "→", "✓", "\r\n", "\n", "\x1b[2D", "\x1b[H", "\x1b[1;31m", "\x1b[K", "\t", "\x1b[3@", "λ",
+            "a",
+            "bc",
+            " ",
+            "中",
+            "文字",
+            "é",
+            "e\u{301}",
+            "\u{200D}",
+            "👨",
+            "🇩",
+            "🇪",
+            "❤",
+            "\u{FE0F}",
+            "→",
+            "✓",
+            "\r\n",
+            "\n",
+            "\x1b[2D",
+            "\x1b[H",
+            "\x1b[1;31m",
+            "\x1b[K",
+            "\t",
+            "\x1b[3@",
+            "λ",
         ];
         let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
         for round in 0..300 {
@@ -1736,9 +2096,17 @@ mod tests {
                 fast_parser.advance(&mut fast, piece.as_bytes());
                 slow_parser.advance(&mut CharByChar(&mut slow), piece.as_bytes());
                 for row in 0..4 {
-                    assert_eq!(fast.grid().row(row).cells, slow.grid().row(row).cells, "cols {cols}, row {row} after {input:?}");
+                    assert_eq!(
+                        fast.grid().row(row).cells,
+                        slow.grid().row(row).cells,
+                        "cols {cols}, row {row} after {input:?}"
+                    );
                     for col in 0..cols {
-                        assert_eq!(fast.grid().row(row).combining(col), slow.grid().row(row).combining(col), "{input:?}");
+                        assert_eq!(
+                            fast.grid().row(row).combining(col),
+                            slow.grid().row(row).combining(col),
+                            "{input:?}"
+                        );
                     }
                 }
                 assert_eq!(fast.cursor(), slow.cursor(), "cols {cols}, cursor after {input:?}");
@@ -1793,6 +2161,43 @@ mod tests {
         t.resize(20, 4);
         assert_eq!(line(&t, 0), "$");
         assert_eq!(line(&t, 1), "0123456789abc");
+    }
+
+    #[test]
+    fn kitty_keyboard_flag_stack() {
+        let mut t = term(10, 2, b"\x1b[>1u\x1b[>5u\x1b[?u\x1b[=1;3u\x1b[?u\x1b[<u\x1b[?u\x1b[<5u\x1b[?u");
+        assert_eq!(t.take_responses().unwrap(), b"\x1b[?5u\x1b[?4u\x1b[?1u\x1b[?0u");
+        let t = term(10, 2, b"\x1b[>3u\x1b[?1049h");
+        assert_eq!(t.keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn capability_and_state_queries() {
+        let mut t = term(10, 4, b"\x1b[5 q\x1bP$q q\x1b\\\x1bP+q544e;6e6f7065\x1b\\\x1b[>q\x1b[18t\x1b[?996n");
+        let replies = String::from_utf8(t.take_responses().unwrap()).unwrap();
+        assert!(replies.starts_with("\x1bP1$r5 q\x1b\\"), "{replies:?}");
+        assert!(replies.contains("\x1bP1+r544e=787465726D2D74726F6E\x1b\\"), "{replies:?}");
+        assert!(replies.contains("\x1bP0+r6e6f7065\x1b\\"), "{replies:?}");
+        assert!(replies.contains("\x1bP>|tron("), "{replies:?}");
+        assert!(replies.contains("\x1b[8;4;10t"), "{replies:?}");
+        assert!(replies.ends_with("\x1b[?997;1n"), "{replies:?}");
+    }
+
+    #[test]
+    fn osc8_hyperlinks_survive_sgr_reset() {
+        let t = term(20, 2, b"\x1b]8;id=a;https://tron.dev\x1b\\li\x1b[0mnk\x1b]8;;\x1b\\ x");
+        let row = t.grid().row(0);
+        let link = row.cells[0].link;
+        assert_ne!(link, 0);
+        assert_eq!(row.cells[3].link, link);
+        assert_eq!(row.cells[5].link, 0);
+        assert_eq!(t.hyperlink(link).unwrap().uri, "https://tron.dev");
+        let found = t.link_at(t.viewport_point(0, 2)).unwrap();
+        assert_eq!((found.start.col, found.end.col, found.uri.as_str()), (0, 3, "https://tron.dev"));
+        let plain = term(30, 2, b"go to https://a.b/c, now");
+        let found = plain.link_at(plain.viewport_point(0, 10)).unwrap();
+        assert_eq!(found.uri, "https://a.b/c");
+        assert_eq!(found.id, None);
     }
 
     #[test]

@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=tron
+GenericName=Terminal
+Comment=GPU accelerated terminal emulator
+Exec=tron
+Icon=dev.tron.Terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;prompt;command;commandline;
+StartupWMClass=tron
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=tron

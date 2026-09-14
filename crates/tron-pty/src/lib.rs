@@ -105,9 +105,7 @@ impl Pty {
             });
         }
 
-        let child = command
-            .spawn()
-            .map_err(|source| PtyError::Spawn { program, source })?;
+        let child = command.spawn().map_err(|source| PtyError::Spawn { program, source })?;
         Ok(Self { master, child })
     }
 
@@ -147,11 +145,7 @@ fn open_pair(size: WindowSize) -> io::Result<(OwnedFd, OwnedFd)> {
     rustix::pty::grantpt(&master)?;
     rustix::pty::unlockpt(&master)?;
     let name = rustix::pty::ptsname(&master, Vec::new())?;
-    let slave = rustix::fs::open(
-        name.as_c_str(),
-        OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
+    let slave = rustix::fs::open(name.as_c_str(), OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC, Mode::empty())?;
     rustix::termios::tcsetwinsize(&master, size.winsize())?;
     if let Ok(mut termios) = rustix::termios::tcgetattr(&slave) {
         termios.input_modes.insert(InputModes::IUTF8);
@@ -174,7 +168,10 @@ mod tests {
     fn runs_command_and_reads_output() {
         let options = SpawnOptions {
             program: Some("/bin/sh".into()),
-            args: vec!["-c".into(), "printf 'cols=%s' \"$(tput cols 2>/dev/null || stty size | cut -d' ' -f2)\"".into()],
+            args: vec![
+                "-c".into(),
+                "printf 'cols=%s' \"$(tput cols 2>/dev/null || stty size | cut -d' ' -f2)\"".into(),
+            ],
             ..Default::default()
         };
         let size = WindowSize { cols: 97, rows: 31, cell_width: 8, cell_height: 16 };

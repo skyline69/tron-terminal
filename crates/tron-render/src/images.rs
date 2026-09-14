@@ -104,10 +104,7 @@ impl ImagePipeline {
                     attributes: &ATTRIBUTES,
                 })],
             },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
@@ -170,8 +167,7 @@ impl ImagePipeline {
             layer.clear();
         }
         let images = &snapshot.images;
-        self.textures
-            .retain(|id, gpu| images.get(id).is_some_and(|image| image.generation == gpu.generation));
+        self.textures.retain(|id, gpu| images.get(id).is_some_and(|image| image.generation == gpu.generation));
         if snapshot.placements.is_empty() {
             return;
         }
@@ -255,7 +251,11 @@ impl ImagePipeline {
                 aspect: wgpu::TextureAspect::All,
             },
             &premultiplied,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * image.width), rows_per_image: Some(image.height) },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * image.width),
+                rows_per_image: Some(image.height),
+            },
             size,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

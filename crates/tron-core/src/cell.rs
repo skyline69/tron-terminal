@@ -97,6 +97,8 @@ pub struct Cell {
     pub bg: Color,
     pub underline_color: Color,
     pub flags: Flags,
+    /// Hyperlink id (OSC 8), 0 for none. See [`crate::Terminal::hyperlink`].
+    pub link: u16,
 }
 
 impl Default for Cell {
@@ -114,6 +116,7 @@ impl Cell {
         bg: Color::DEFAULT,
         underline_color: Color::DEFAULT,
         flags: Flags::empty(),
+        link: 0,
     };
 
     /// Whether the cell holds no character.
@@ -125,7 +128,7 @@ impl Cell {
     /// A blank cell that keeps the background of `pen` (background color erase).
     #[inline]
     pub fn erased(pen: &Cell) -> Self {
-        Self { bg: pen.bg, ..Self::BLANK }
+        Self { bg: pen.bg, link: 0, ..Self::BLANK }
     }
 }
 

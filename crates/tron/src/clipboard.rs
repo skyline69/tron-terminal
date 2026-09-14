@@ -13,7 +13,9 @@ impl Clipboard {
         let inner = match raw {
             // SAFETY: the Wayland display outlives the clipboard, because
             // `Session` declares the clipboard before the window and drops it first.
-            Some(RawDisplayHandle::Wayland(handle)) => Some(unsafe { smithay_clipboard::Clipboard::new(handle.display.as_ptr()) }),
+            Some(RawDisplayHandle::Wayland(handle)) => {
+                Some(unsafe { smithay_clipboard::Clipboard::new(handle.display.as_ptr()) })
+            }
             _ => {
                 log::warn!("clipboard support needs Wayland");
                 None

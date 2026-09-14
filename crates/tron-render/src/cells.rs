@@ -6,11 +6,12 @@ use std::mem::size_of;
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
-use tron_core::{Cell, CursorShape, Flags, Modes, Palette, Row, SelectionRange, Snapshot};
+use tron_core::{Cell, Color, ColorKind, CursorShape, Flags, Modes, Palette, Row, SelectionRange, Snapshot};
 use tron_font::{CellMetrics, FontSystem, GlyphFormat, GlyphKey, ShapedGlyph, Style};
+use unicode_width::UnicodeWidthChar;
 
-use crate::Theme;
 use crate::atlas::Atlas;
+use crate::{LinkHighlight, Overlay, Theme};
 
 const INITIAL_ATLAS_SIZE: u32 = 1024;
 const SHAPE_CACHE_LIMIT: usize = 16_384;
@@ -18,6 +19,7 @@ const SHAPE_CACHE_LIMIT: usize = 16_384;
 const KIND_SOLID: u32 = 0;
 const KIND_MASK: u32 = 1;
 const KIND_COLOR: u32 = 2;
+const KIND_CURLY: u32 = 3;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, PartialEq)]
@@ -99,7 +101,13 @@ impl ColorContext<'_> {
     /// Foreground color and, when it differs from the window background, background color.
     fn cell(&self, cell: &Cell, selected: bool) -> ([f32; 4], Option<[f32; 4]>) {
         let palette = self.palette;
-        let mut fg = palette.resolve(cell.fg, palette.foreground);
+        let fg_color = match cell.fg.kind() {
+            ColorKind::Indexed(i) if i < 8 && self.theme.bold_is_bright && cell.flags.contains(Flags::BOLD) => {
+                Color::indexed(i + 8)
+            }
+            _ => cell.fg,
+        };
+        let mut fg = palette.resolve(fg_color, palette.foreground);
         let mut bg = palette.resolve(cell.bg, palette.background);
         let inverse = cell.flags.contains(Flags::INVERSE) != self.reverse;
         if inverse {
@@ -160,6 +168,11 @@ pub struct CellPipeline {
     palette_generation: u64,
     reverse: bool,
     cursor_rect: [f32; 4],
+    cursor_hidden: bool,
+    link_highlight: Option<LinkHighlight>,
+    overlays: Vec<Overlay>,
+    overlay_instances: RowInstances,
+    flash: f32,
     // Scratch buffers reused across rows.
     foreground: Vec<[f32; 4]>,
     run: Run,
@@ -214,10 +227,7 @@ impl CellPipeline {
                     attributes: &INSTANCE_ATTRIBUTES,
                 })],
             },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
@@ -269,6 +279,11 @@ impl CellPipeline {
             palette_generation: u64::MAX,
             reverse: false,
             cursor_rect: [0.0; 4],
+            cursor_hidden: false,
+            link_highlight: None,
+            overlays: Vec::new(),
+            overlay_instances: RowInstances::default(),
+            flash: 0.0,
             foreground: Vec::new(),
             run: Run::default(),
             shaped: Vec::new(),
@@ -303,6 +318,25 @@ impl CellPipeline {
 
     pub fn invalidate(&mut self) {
         self.full_rebuild = true;
+    }
+
+    pub fn set_cursor_hidden(&mut self, hidden: bool) {
+        self.cursor_hidden = hidden;
+    }
+
+    pub fn set_link_highlight(&mut self, highlight: Option<LinkHighlight>) {
+        if highlight != self.link_highlight {
+            self.link_highlight = highlight;
+            self.full_rebuild = true;
+        }
+    }
+
+    pub fn set_overlays(&mut self, overlays: Vec<Overlay>) {
+        self.overlays = overlays;
+    }
+
+    pub fn set_flash(&mut self, strength: f32) {
+        self.flash = strength.clamp(0.0, 1.0);
     }
 
     fn rebind(&mut self, device: &wgpu::Device) {
@@ -391,7 +425,16 @@ impl CellPipeline {
                 instances.background.clear();
                 instances.foreground.clear();
                 let cursor_col = cursor_cell.filter(|c| c.0 == y).map(|c| c.1);
-                self.build_row(&snapshot.rows[y], y, snapshot.line(y), cursor_col, &colors, fonts, queue, &mut instances);
+                self.build_row(
+                    &snapshot.rows[y],
+                    y,
+                    snapshot.line(y),
+                    cursor_col,
+                    &colors,
+                    fonts,
+                    queue,
+                    &mut instances,
+                );
                 self.rows[y] = instances;
             }
         }
@@ -406,6 +449,27 @@ impl CellPipeline {
         self.split = self.frame.len();
         for row in &self.rows {
             self.frame.extend_from_slice(&row.foreground);
+        }
+
+        // Overlays (search bar, IME preedit) are drawn above the terminal text.
+        if !self.overlays.is_empty() {
+            let overlays = std::mem::take(&mut self.overlays);
+            let mut instances = std::mem::take(&mut self.overlay_instances);
+            instances.background.clear();
+            instances.foreground.clear();
+            for overlay in &overlays {
+                if overlay.row < rows {
+                    let row = overlay_row(overlay, snapshot.cols);
+                    self.build_row(&row, overlay.row, i64::MIN, None, &colors, fonts, queue, &mut instances);
+                }
+            }
+            self.frame.extend_from_slice(&instances.background);
+            self.frame.extend_from_slice(&instances.foreground);
+            self.overlay_instances = instances;
+            self.overlays = overlays;
+        }
+        if self.flash > 0.0 {
+            self.frame.push(solid(0.0, 0.0, viewport[0], viewport[1], [1.0, 1.0, 1.0, self.flash * 0.18]));
         }
 
         let cursor_text = theme.cursor_text.unwrap_or(colors.palette.background);
@@ -441,7 +505,8 @@ impl CellPipeline {
             let selected = colors.selection.is_some_and(|s| s.contains(line, x));
             let (fg, bg) = colors.cell(cell, selected);
             foreground[x] = fg;
-            let trailing_half = cell.flags.contains(Flags::WIDE_SPACER) && x > 0 && row.cells[x - 1].flags.contains(Flags::WIDE);
+            let trailing_half =
+                cell.flags.contains(Flags::WIDE_SPACER) && x > 0 && row.cells[x - 1].flags.contains(Flags::WIDE);
             if trailing_half {
                 continue;
             }
@@ -456,7 +521,8 @@ impl CellPipeline {
                 }
             }
             if !cell.flags.contains(Flags::HIDDEN) {
-                self.push_decorations(cell, colors, fg, left, top, width, out);
+                let linked = self.link_highlight.as_ref().is_some_and(|h| h.contains(line, x, cell.link));
+                self.push_decorations(cell, colors, fg, left, top, width, linked, out);
             }
         }
 
@@ -479,7 +545,12 @@ impl CellPipeline {
                 self.flush_run(&mut run, top, &foreground, fonts, queue, out);
                 if let Some(glyph) = self.glyph(GlyphSource::Sprite(cell.ch), fonts, queue) {
                     let left = self.padding[0] + x as f32 * cell_w;
-                    out.foreground.push(glyph_instance(&glyph, left, top + m.baseline as f32 - glyph.top as f32, foreground[x]));
+                    out.foreground.push(glyph_instance(
+                        &glyph,
+                        left,
+                        top + m.baseline as f32 - glyph.top as f32,
+                        foreground[x],
+                    ));
                 }
                 x += width;
                 continue;
@@ -583,6 +654,7 @@ impl CellPipeline {
         left: f32,
         top: f32,
         width: f32,
+        linked: bool,
         out: &mut RowInstances,
     ) {
         let m = self.metrics;
@@ -596,26 +668,36 @@ impl CellPipeline {
             };
             let y = top + m.underline_position as f32;
             if flags.contains(Flags::DOUBLE_UNDERLINE) {
-                let second = if y + 3.0 * thickness <= top + m.height as f32 { y + 2.0 * thickness } else { y - 2.0 * thickness };
+                let second = if y + 3.0 * thickness <= top + m.height as f32 {
+                    y + 2.0 * thickness
+                } else {
+                    y - 2.0 * thickness
+                };
                 out.foreground.push(solid(left, y, width, thickness, color));
                 out.foreground.push(solid(left, second, width, thickness, color));
             } else if flags.intersects(Flags::DOTTED_UNDERLINE | Flags::DASHED_UNDERLINE) {
-                let dash = if flags.contains(Flags::DOTTED_UNDERLINE) { thickness } else { (m.width as f32 / 3.0).ceil() };
+                let dash =
+                    if flags.contains(Flags::DOTTED_UNDERLINE) { thickness } else { (m.width as f32 / 3.0).ceil() };
                 let mut x = left;
                 while x < left + width {
                     out.foreground.push(solid(x, y, dash.min(left + width - x), thickness, color));
                     x += dash * 2.0;
                 }
             } else if flags.contains(Flags::CURLY_UNDERLINE) {
-                let segments = 4;
-                let segment = width / segments as f32;
-                for i in 0..segments {
-                    let offset = if i % 2 == 0 { -thickness / 2.0 } else { thickness / 2.0 };
-                    out.foreground.push(solid(left + i as f32 * segment, y + offset, segment, thickness, color));
-                }
+                let amplitude = (thickness * 1.25).max(1.5);
+                let band = 2.0 * (amplitude + thickness) + 2.0;
+                out.foreground.push(Instance {
+                    pos: [left, y + thickness / 2.0 - band / 2.0],
+                    size: [width, band],
+                    uv: [m.width as f32, amplitude, thickness.max(1.0), band],
+                    color,
+                    kind: KIND_CURLY,
+                });
             } else {
                 out.foreground.push(solid(left, y, width, thickness, color));
             }
+        } else if linked {
+            out.foreground.push(solid(left, top + m.underline_position as f32, width, thickness, fg));
         }
         if flags.contains(Flags::STRIKETHROUGH) {
             out.foreground.push(solid(left, top + m.strikeout_position as f32, width, thickness, fg));
@@ -630,7 +712,11 @@ impl CellPipeline {
         const NONE: [f32; 4] = [-1.0, -1.0, -1.0, -1.0];
         self.cursor_rect = [0.0; 4];
         let cursor = snapshot.cursor();
-        if !cursor.visible || snapshot.display_offset != 0 || cursor.row >= snapshot.rows() || cursor.col >= snapshot.cols {
+        if !cursor.visible
+            || snapshot.display_offset != 0
+            || cursor.row >= snapshot.rows()
+            || cursor.col >= snapshot.cols
+        {
             return NONE;
         }
         let m = self.metrics;
@@ -640,6 +726,9 @@ impl CellPipeline {
         let x = self.padding[0] + cursor.col as f32 * cell_w;
         let y = self.padding[1] + cursor.row as f32 * cell_h;
         self.cursor_rect = [x, y, width, cell_h];
+        if self.cursor_hidden {
+            return NONE;
+        }
         let color = colors.rgba(colors.palette.cursor);
         let stroke = (m.underline_thickness as f32).max((cell_h / 16.0).round()).max(1.0);
 
@@ -730,16 +819,38 @@ impl CellPipeline {
     }
 }
 
+/// Lays out overlay text as a row of cells with explicit colors.
+fn overlay_row(overlay: &Overlay, cols: usize) -> Row {
+    let mut row = Row::new(cols);
+    let [r, g, b] = overlay.fg;
+    let fg = Color::rgb(r, g, b);
+    let [r, g, b] = overlay.bg;
+    let bg = Color::rgb(r, g, b);
+    let base = if overlay.underline { Flags::UNDERLINE } else { Flags::empty() };
+    let mut col = overlay.col;
+    for c in overlay.text.chars() {
+        let width = c.width().unwrap_or(0);
+        if width == 0 {
+            continue;
+        }
+        if col + width > cols {
+            break;
+        }
+        let flags = if width == 2 { base | Flags::WIDE } else { base };
+        row.cells[col] = Cell { ch: c, fg, bg, flags, ..Cell::BLANK };
+        if width == 2 {
+            row.cells[col + 1] = Cell { fg, bg, flags: base | Flags::WIDE_SPACER, ..Cell::BLANK };
+        }
+        col += width;
+    }
+    row
+}
+
 fn glyph_instance(entry: &GlyphEntry, left: f32, top: f32, color: [f32; 4]) -> Instance {
     Instance {
         pos: [left.round(), top.round()],
         size: [entry.width as f32, entry.height as f32],
-        uv: [
-            entry.x as f32,
-            entry.y as f32,
-            (entry.x + entry.width) as f32,
-            (entry.y + entry.height) as f32,
-        ],
+        uv: [entry.x as f32, entry.y as f32, (entry.x + entry.width) as f32, (entry.y + entry.height) as f32],
         color,
         kind: match entry.format {
             GlyphFormat::Mask => KIND_MASK,

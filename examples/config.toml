@@ -29,10 +29,15 @@ opacity = 1.0
 decorations = true
 columns = 100
 rows = 30
+# Close the window when the shell exits. false keeps it open until a key press.
+close_on_exit = true
 
 [cursor]
 # block, beam or underline
 shape = "block"
+# app: blink when the application asks for it. always or never override it.
+blinking = "app"
+blink_interval_ms = 530
 
 # Overrides applied on top of the theme.
 [colors]
@@ -44,6 +49,8 @@ shape = "block"
 # selection_foreground = "#ffffff"
 # normal = ["#1b2230", "#ff5c75", "#5ce6a6", "#ffc86b", "#4f9dff", "#c38bff", "#4fd6ff", "#c7d5e0"]
 # bright = ["#4a5568", "#ff8095", "#86f0bf", "#ffd99a", "#7fb8ff", "#d6adff", "#8ae6ff", "#eef4f8"]
+# Draw bold text in ANSI colors 0-7 with the bright variant.
+# bold_is_bright = false
 
 [scrollback]
 lines = 10000
@@ -79,3 +86,23 @@ animation = "auto"
 memory_limit = 320
 # Let applications send images as file paths.
 file_transfer = true
+
+[bell]
+# none, visual (flash), attention (urgency hint when unfocused) or both.
+mode = "attention"
+
+[links]
+# Program that opens links clicked with Ctrl.
+open_command = "xdg-open"
+
+# Key combination = action. Entries override the defaults, "none" removes one.
+# Actions: copy, paste, paste_selection, increase_font_size, decrease_font_size,
+# reset_font_size, scroll_line_up, scroll_line_down, scroll_page_up,
+# scroll_page_down, scroll_to_top, scroll_to_bottom, clear_scrollback, search,
+# new_window, reload_config, text:<text to send>, none.
+[keybindings]
+# "ctrl+shift+c" = "copy"
+# "ctrl+shift+v" = "paste"
+# "ctrl+shift+f" = "search"
+# "ctrl+shift+n" = "new_window"
+# "alt+enter" = "none"

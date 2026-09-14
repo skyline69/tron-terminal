@@ -13,9 +13,11 @@ mod images;
 mod post;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use tron_core::Snapshot;
+use tron_core::{Point, Snapshot};
 use tron_font::{CellMetrics, FontSystem};
 
 use cells::CellPipeline;
@@ -44,11 +46,50 @@ pub struct Theme {
     pub selection_foreground: Option<[u8; 3]>,
     /// Opacity of the default background. Fixed at creation.
     pub opacity: f32,
+    /// Draw bold text in ANSI colors 0-7 with the bright variant.
+    pub bold_is_bright: bool,
 }
 
 impl Default for Theme {
     fn default() -> Self {
-        Self { cursor_text: None, selection_background: [0x1f, 0x4a, 0x6b], selection_foreground: None, opacity: 1.0 }
+        Self {
+            cursor_text: None,
+            selection_background: [0x1f, 0x4a, 0x6b],
+            selection_foreground: None,
+            opacity: 1.0,
+            bold_is_bright: false,
+        }
+    }
+}
+
+/// Text drawn above the terminal, such as the search bar or IME preedit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Overlay {
+    /// Viewport position of the first character.
+    pub row: usize,
+    pub col: usize,
+    pub text: String,
+    pub fg: [u8; 3],
+    pub bg: [u8; 3],
+    pub underline: bool,
+}
+
+/// Cells to underline because the pointer hovers a link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkHighlight {
+    pub start: Point,
+    pub end: Point,
+    /// OSC 8 link id. When set, every cell with this id is highlighted.
+    pub id: Option<u16>,
+}
+
+impl LinkHighlight {
+    fn contains(&self, line: i64, col: usize, link: u16) -> bool {
+        if let Some(id) = self.id {
+            return link == id;
+        }
+        let point = Point::new(line, col);
+        self.start <= point && point <= self.end
     }
 }
 
@@ -108,6 +149,7 @@ pub struct Renderer {
     started: Instant,
     post_frame: u32,
     capture: Option<PathBuf>,
+    device_lost: Arc<AtomicBool>,
 }
 
 impl Renderer {
@@ -136,6 +178,12 @@ impl Renderer {
         theme: Theme,
     ) -> Result<Self, RenderError> {
         let Gpu { instance, adapter, device, queue } = gpu;
+        let device_lost = Arc::new(AtomicBool::new(false));
+        let lost = device_lost.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            log::error!("GPU device lost ({reason:?}): {message}");
+            lost.store(true, Ordering::Release);
+        });
         let surface = instance.create_surface(target)?;
         if !adapter.is_surface_supported(&surface) {
             return Err(RenderError::Unsupported);
@@ -151,9 +199,8 @@ impl Renderer {
             .or_else(|| caps.formats.first().copied())
             .ok_or(RenderError::Unsupported)?;
         log::info!("surface format {format:?}, available {:?}", caps.formats);
-        let mut config = surface
-            .get_default_config(&adapter, width.max(1), height.max(1))
-            .ok_or(RenderError::Unsupported)?;
+        let mut config =
+            surface.get_default_config(&adapter, width.max(1), height.max(1)).ok_or(RenderError::Unsupported)?;
         config.format = format;
         config.view_formats.clear();
         config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
@@ -161,13 +208,14 @@ impl Renderer {
         } else {
             wgpu::PresentMode::Fifo
         };
-        config.alpha_mode = if theme.opacity < 1.0 && caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-            wgpu::CompositeAlphaMode::PreMultiplied
-        } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
-            wgpu::CompositeAlphaMode::Opaque
-        } else {
-            caps.alpha_modes[0]
-        };
+        config.alpha_mode =
+            if theme.opacity < 1.0 && caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+                wgpu::CompositeAlphaMode::PreMultiplied
+            } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
+                wgpu::CompositeAlphaMode::Opaque
+            } else {
+                caps.alpha_modes[0]
+            };
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
 
@@ -192,7 +240,36 @@ impl Renderer {
             started: Instant::now(),
             post_frame: 0,
             capture: None,
+            device_lost,
         })
+    }
+
+    /// True after the GPU device was lost. The renderer must be recreated.
+    pub fn is_device_lost(&self) -> bool {
+        self.device_lost.load(Ordering::Acquire)
+    }
+
+    /// Cursor rectangle of the last frame in pixels: x, y, width, height.
+    pub fn cursor_rect(&self) -> [f32; 4] {
+        self.cells.cursor_rect()
+    }
+
+    /// Hides the cursor, for blinking.
+    pub fn set_cursor_hidden(&mut self, hidden: bool) {
+        self.cells.set_cursor_hidden(hidden);
+    }
+
+    pub fn set_link_highlight(&mut self, highlight: Option<LinkHighlight>) {
+        self.cells.set_link_highlight(highlight);
+    }
+
+    pub fn set_overlays(&mut self, overlays: Vec<Overlay>) {
+        self.cells.set_overlays(overlays);
+    }
+
+    /// Visual bell flash strength for the next frame, 0 to 1.
+    pub fn set_flash(&mut self, strength: f32) {
+        self.cells.set_flash(strength);
     }
 
     /// Allows reading presented frames back. Returns false when the surface does not support it.
@@ -273,8 +350,24 @@ impl Renderer {
         let viewport = [self.config.width as f32, self.config.height as f32];
         self.focused = focused;
         self.background = snapshot.palette.background;
-        self.cells.prepare(&self.device, &self.queue, snapshot, fonts, &self.theme, focused, self.srgb_output, viewport);
-        self.images.prepare(&self.device, &self.queue, snapshot, self.cells.metrics(), self.cells.padding(), self.srgb_output);
+        self.cells.prepare(
+            &self.device,
+            &self.queue,
+            snapshot,
+            fonts,
+            &self.theme,
+            focused,
+            self.srgb_output,
+            viewport,
+        );
+        self.images.prepare(
+            &self.device,
+            &self.queue,
+            snapshot,
+            self.cells.metrics(),
+            self.cells.padding(),
+            self.srgb_output,
+        );
     }
 
     /// Presents the prepared frame.
@@ -354,7 +447,11 @@ impl Renderer {
                 frame.texture.as_image_copy(),
                 wgpu::TexelCopyBufferInfo {
                     buffer: &buffer,
-                    layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(height) },
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded),
+                        rows_per_image: Some(height),
+                    },
                 },
                 wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             );
@@ -388,8 +485,12 @@ impl Renderer {
         for row in data.chunks(padded_row as usize).take(height) {
             for pixel in row[..width * 4].as_chunks::<4>().0 {
                 let rgb = match format {
-                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => [pixel[2], pixel[1], pixel[0]],
-                    wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => [pixel[0], pixel[1], pixel[2]],
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
+                        [pixel[2], pixel[1], pixel[0]]
+                    }
+                    wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => {
+                        [pixel[0], pixel[1], pixel[2]]
+                    }
                     wgpu::TextureFormat::Rgb10a2Unorm => {
                         let v = u32::from_le_bytes(*pixel);
                         [(v >> 2) as u8, (v >> 12) as u8, (v >> 22) as u8]

@@ -120,7 +120,12 @@ impl PostChain {
     ///
     /// `animation` forces continuous redraws on or off. `None` animates when a
     /// shader reads `tron.time` or `tron.frame`.
-    pub fn set_shaders(&mut self, device: &wgpu::Device, shaders: &[PostShader], animation: Option<bool>) -> Vec<String> {
+    pub fn set_shaders(
+        &mut self,
+        device: &wgpu::Device,
+        shaders: &[PostShader],
+        animation: Option<bool>,
+    ) -> Vec<String> {
         let mut errors = Vec::new();
         let mut passes = Vec::new();
         let mut uses_time = false;
@@ -219,7 +224,13 @@ impl PostChain {
         self.targets.first().map(|t| &t.view)
     }
 
-    pub fn run(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView, uniforms: &PostUniforms) {
+    pub fn run(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        output: &wgpu::TextureView,
+        uniforms: &PostUniforms,
+    ) {
         if self.targets.is_empty() {
             return;
         }

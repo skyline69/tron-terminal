@@ -7,6 +7,8 @@ mod terminfo;
 
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -16,17 +18,23 @@ use anyhow::Context;
 use parking_lot::Mutex;
 use winit::application::ApplicationHandler;
 use winit::cursor::CursorIcon;
-use winit::dpi::LogicalSize;
-use winit::event::{ButtonSource, ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{ButtonSource, ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{UserAttentionType, Window, WindowAttributes, WindowId};
+use winit::window::{
+    ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, UserAttentionType, Window, WindowAttributes,
+    WindowId,
+};
 
-use tron_config::{Animation, Config, Osc52, Paths, Watcher};
-use tron_core::{CursorShape, Modes, Palette, Parser, Selection, SelectionKind, Snapshot, TermEvent, Terminal};
+use tron_config::{Action, Animation, Bell, BindKey, Binding, Blinking, Config, KeyCombo, Osc52, Paths, Watcher};
+use tron_core::{
+    CursorShape, LinkMatch, Modes, Palette, Parser, SearchMatch, Selection, SelectionKind, Snapshot, TermEvent,
+    Terminal,
+};
 use tron_font::{CellMetrics, FontSystem};
 use tron_pty::{Pty, SpawnOptions, WindowSize};
-use tron_render::{Gpu, PostShader, Renderer, Theme};
+use tron_render::{Gpu, LinkHighlight, Overlay, PostShader, Renderer, Theme};
 
 use clipboard::Clipboard;
 
@@ -34,17 +42,78 @@ use clipboard::Clipboard;
 const SYNC_POLL: Duration = Duration::from_millis(8);
 /// Maximum time between clicks of a double or triple click.
 const MULTI_CLICK: Duration = Duration::from_millis(400);
+/// Duration of the visual bell flash.
+const FLASH: Duration = Duration::from_millis(150);
+/// Link schemes opened on Ctrl+click.
+const LINK_SCHEMES: [&str; 9] =
+    ["http://", "https://", "file://", "mailto:", "ftp://", "sftp://", "ssh://", "git://", "gemini://"];
+
+const HELP: &str = "tron: GPU accelerated terminal emulator
+
+Usage: tron [options] [-e program [args...]]
+
+Options:
+  -e, --command <program> [args...]  Run a program instead of the shell
+  -d, --working-directory <dir>      Start in this directory
+      --config-dir <dir>             Use this configuration directory
+  -h, --help                         Show this help
+  -V, --version                      Show the version
+";
+
+#[derive(Default, Clone)]
+struct Cli {
+    command: Option<Vec<String>>,
+    working_directory: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+}
+
+/// Parses arguments. `Ok(None)` means help or version was printed.
+fn parse_cli() -> Result<Option<Cli>, String> {
+    let mut cli = Cli::default();
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("-e" | "--command") => {
+                let command: Vec<String> = args.by_ref().map(|a| a.to_string_lossy().into_owned()).collect();
+                if command.is_empty() {
+                    return Err("-e needs a program".into());
+                }
+                cli.command = Some(command);
+            }
+            Some("-d" | "--working-directory") => {
+                cli.working_directory = Some(args.next().ok_or("--working-directory needs a directory")?.into());
+            }
+            Some("--config-dir") => cli.config_dir = Some(args.next().ok_or("--config-dir needs a directory")?.into()),
+            Some("-h" | "--help") => {
+                print!("{HELP}");
+                return Ok(None);
+            }
+            Some("-V" | "--version") => {
+                println!("tron {}", env!("CARGO_PKG_VERSION"));
+                return Ok(None);
+            }
+            _ => return Err(format!("unknown argument {arg:?}, see --help")),
+        }
+    }
+    Ok(Some(cli))
+}
 
 fn main() -> anyhow::Result<()> {
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Warn)
-        .parse_env(env_logger::Env::default())
-        .init();
-    let gpu = thread::Builder::new()
-        .name("gpu-init".into())
-        .spawn(|| pollster::block_on(Gpu::new()))
-        .ok();
-    let paths = Paths::discover();
+    env_logger::Builder::new().filter_level(log::LevelFilter::Warn).parse_env(env_logger::Env::default()).init();
+    let cli = match parse_cli() {
+        Ok(Some(cli)) => cli,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            eprintln!("tron: {error}");
+            std::process::exit(2);
+        }
+    };
+    let gpu = thread::Builder::new().name("gpu-init".into()).spawn(|| pollster::block_on(Gpu::new())).ok();
+    let paths = match (Paths::discover(), &cli.config_dir) {
+        (Some(paths), Some(dir)) => Some(Paths::with_dirs(dir.clone(), paths.data_dir)),
+        (None, Some(dir)) => Some(Paths::with_dirs(dir.clone(), dir.join("data"))),
+        (paths, None) => paths,
+    };
     if paths.is_none() {
         log::warn!("no home directory found, using the default configuration");
     }
@@ -72,7 +141,7 @@ fn main() -> anyhow::Result<()> {
         .ok()
     });
 
-    event_loop.run_app(App { paths, config, proxy, config_dirty, _watcher: watcher, gpu, session: None })?;
+    event_loop.run_app(App { cli, paths, config, proxy, config_dirty, _watcher: watcher, gpu, session: None })?;
     Ok(())
 }
 
@@ -85,6 +154,7 @@ struct Shared {
 }
 
 struct App {
+    cli: Cli,
     paths: Option<Paths>,
     config: Config,
     proxy: EventLoopProxy,
@@ -104,6 +174,11 @@ struct Settings {
     scroll_multiplier: f32,
     copy_on_select: bool,
     osc52: Osc52,
+    close_on_exit: bool,
+    bell: Bell,
+    blinking: Blinking,
+    blink_interval: Duration,
+    open_command: String,
 }
 
 impl Settings {
@@ -115,8 +190,19 @@ impl Settings {
             scroll_multiplier: config.scrollback.multiplier,
             copy_on_select: config.selection.copy_on_select,
             osc52: config.clipboard.osc52,
+            close_on_exit: config.window.close_on_exit,
+            bell: config.bell.mode,
+            blinking: config.cursor.blinking,
+            blink_interval: Duration::from_millis(config.cursor.blink_interval_ms.max(50)),
+            open_command: config.links.open_command.clone(),
         }
     }
+}
+
+#[derive(Default)]
+struct SearchState {
+    query: String,
+    current: Option<SearchMatch>,
 }
 
 #[derive(Default)]
@@ -147,6 +233,16 @@ struct Session {
     mouse: MouseState,
     /// Mouse pointer shape currently set on the window.
     pointer_icon: CursorIcon,
+    bindings: Vec<Binding>,
+    search: Option<SearchState>,
+    /// Uncommitted IME text.
+    preedit: Option<String>,
+    hovered_link: Option<LinkMatch>,
+    blink_epoch: Instant,
+    flash_until: Option<Instant>,
+    /// The shell exited but the window stays open.
+    exited: bool,
+    ime_area: Option<[f32; 4]>,
     focused: bool,
     scale_factor: f64,
     font_size: f32,
@@ -204,7 +300,9 @@ impl App {
         let theme = Theme { opacity: config.window.opacity.clamp(0.0, 1.0), ..Theme::default() };
         let preloaded = self.gpu.take().and_then(|handle| handle.join().ok());
         let renderer = match preloaded {
-            Some(Ok(gpu)) => Renderer::with_gpu(gpu, window.clone(), size.width, size.height, metrics, window_padding, theme.clone()),
+            Some(Ok(gpu)) => {
+                Renderer::with_gpu(gpu, window.clone(), size.width, size.height, metrics, window_padding, theme.clone())
+            }
             Some(Err(error)) => Err(error),
             None => Err(tron_render::RenderError::Unsupported),
         };
@@ -212,13 +310,28 @@ impl App {
             Ok(renderer) => renderer,
             Err(error) => {
                 log::debug!("preloaded GPU unusable ({error}), initializing again");
-                pollster::block_on(Renderer::new(window.clone(), size.width, size.height, metrics, window_padding, theme))?
+                pollster::block_on(Renderer::new(
+                    window.clone(),
+                    size.width,
+                    size.height,
+                    metrics,
+                    window_padding,
+                    theme,
+                ))?
             }
         };
         log::debug!("startup: renderer ready after {:?}", started.elapsed());
 
-        #[allow(deprecated)]
-        window.set_ime_allowed(true);
+        let ime = ImeEnableRequest::new(
+            ImeCapabilities::new().with_cursor_area(),
+            ImeRequestData::default()
+                .with_cursor_area(PhysicalPosition::new(0.0, 0.0).into(), PhysicalSize::new(1.0, 1.0).into()),
+        );
+        if let Some(request) = ime
+            && let Err(error) = window.request_ime_update(ImeRequest::Enable(request))
+        {
+            log::debug!("IME unavailable: {error}");
+        }
 
         let mut session = Session {
             clipboard: Clipboard::new(window.as_ref()),
@@ -237,6 +350,14 @@ impl App {
             modifiers: ModifiersState::empty(),
             mouse: MouseState::default(),
             pointer_icon: CursorIcon::Text,
+            bindings: Vec::new(),
+            search: None,
+            preedit: None,
+            hovered_link: None,
+            blink_epoch: Instant::now(),
+            flash_until: None,
+            exited: false,
+            ime_area: None,
             focused: true,
             scale_factor,
             font_size: config.font.size,
@@ -254,11 +375,15 @@ impl App {
 
     fn spawn_options(&self) -> SpawnOptions {
         let shell = &self.config.shell;
+        let (program, args) = match &self.cli.command {
+            Some(command) => (Some(command[0].clone()), command[1..].to_vec()),
+            None => (shell.program.clone(), shell.args.clone()),
+        };
         let mut options = SpawnOptions {
-            program: shell.program.clone(),
-            args: shell.args.clone(),
+            program,
+            args,
             term: shell.term.clone(),
-            cwd: None,
+            cwd: self.cli.working_directory.clone(),
             env: Vec::new(),
         };
         if options.term == "xterm-tron" {
@@ -322,9 +447,14 @@ impl ApplicationHandler for App {
         }
         let Some(session) = self.session.as_mut() else { return };
         session.shared.wake_pending.store(false, Ordering::Release);
-        if session.shared.exited.load(Ordering::Acquire) {
-            event_loop.exit();
-            return;
+        if session.shared.exited.load(Ordering::Acquire) && !session.exited {
+            if session.settings.close_on_exit {
+                event_loop.exit();
+                return;
+            }
+            session.exited = true;
+            let mut term = session.shared.term.lock();
+            Parser::new().advance(&mut *term, b"\r\n\x1b[0;2m[process exited, press any key to close]\x1b[0m");
         }
         let (events, modes) = {
             let mut term = session.shared.term.lock();
@@ -339,7 +469,16 @@ impl ApplicationHandler for App {
         let Some(session) = self.session.as_mut() else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::RedrawRequested => session.redraw(event_loop),
+            WindowEvent::RedrawRequested => {
+                session.redraw(event_loop);
+                if session.renderer.is_device_lost() {
+                    let config = &self.config;
+                    if let Err(error) = session.recreate_renderer(config, self.paths.as_ref()) {
+                        log::error!("cannot recover from GPU device loss: {error:#}");
+                        event_loop.exit();
+                    }
+                }
+            }
             WindowEvent::SurfaceResized(size) => {
                 session.renderer.resize(size.width, size.height);
                 session.resize_grid();
@@ -351,8 +490,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 session.modifiers = modifiers.state();
-                let modes = session.shared.term.lock().modes();
-                session.update_pointer_icon(modes);
+                session.update_hover();
             }
             WindowEvent::Focused(focused) => {
                 session.focused = focused;
@@ -361,19 +499,58 @@ impl ApplicationHandler for App {
                 }
                 session.window.request_redraw();
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if session.handle_shortcut(&event.logical_key) {
+            WindowEvent::KeyboardInput { event, .. } => {
+                let pressed = event.state == ElementState::Pressed;
+                if pressed {
+                    if session.exited {
+                        event_loop.exit();
+                        return;
+                    }
+                    session.blink_epoch = Instant::now();
+                    let action = session.binding_for(&event);
+                    if action == Some(Action::ReloadConfig) {
+                        self.reload_config();
+                        return;
+                    }
+                    if session.search.is_some() {
+                        match action {
+                            Some(Action::Search) => session.search_step(true, false),
+                            _ => session.search_key(&event),
+                        }
+                        return;
+                    }
+                    if let Some(action) = action {
+                        session.run_action(action);
+                        return;
+                    }
+                } else if session.search.is_some() {
                     return;
                 }
-                let app_cursor = session.shared.term.lock().modes().contains(Modes::APP_CURSOR);
-                if let Some(bytes) = input::encode(&event, session.modifiers, app_cursor) {
-                    session.prepare_input();
+                let (app_cursor, kitty_flags) = {
+                    let term = session.shared.term.lock();
+                    (term.modes().contains(Modes::APP_CURSOR), term.keyboard_flags())
+                };
+                if let Some(bytes) = input::encode(&event, session.modifiers, app_cursor, kitty_flags) {
+                    if pressed {
+                        session.prepare_input();
+                    }
                     session.send(bytes);
                 }
             }
+            WindowEvent::Ime(Ime::Preedit(text, _)) => {
+                session.preedit = (!text.is_empty()).then_some(text);
+                session.update_overlays();
+                session.window.request_redraw();
+            }
             WindowEvent::Ime(Ime::Commit(text)) => {
-                session.prepare_input();
-                session.send(text.into_bytes());
+                session.preedit = None;
+                session.update_overlays();
+                if session.search.is_some() {
+                    session.search_text(&text);
+                } else {
+                    session.prepare_input();
+                    session.send(text.into_bytes());
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
@@ -411,6 +588,11 @@ impl Session {
 
     fn apply_config(&mut self, config: &Config, paths: Option<&Paths>) {
         self.settings = Settings::new(config);
+        let (bindings, errors) = config.bindings();
+        for error in errors {
+            log::error!("keybindings: {error}");
+        }
+        self.bindings = bindings;
 
         if config.font.family != self.font_family {
             match FontSystem::new(&config.font.family, config.font.size, self.scale_factor) {
@@ -439,6 +621,7 @@ impl Session {
                     selection_background: colors.selection_background.to_array(),
                     selection_foreground: colors.selection_foreground.map(|c| c.to_array()),
                     opacity: config.window.opacity.clamp(0.0, 1.0),
+                    bold_is_bright: colors.bold_is_bright,
                 });
             }
             Err(error) => log::error!("{error}"),
@@ -484,8 +667,11 @@ impl Session {
         for event in events {
             match event {
                 TermEvent::Bell => {
-                    if !self.focused {
+                    if matches!(self.settings.bell, Bell::Attention | Bell::Both) && !self.focused {
                         self.window.request_user_attention(Some(UserAttentionType::Informational));
+                    }
+                    if matches!(self.settings.bell, Bell::Visual | Bell::Both) {
+                        self.flash_until = Some(Instant::now() + FLASH);
                     }
                 }
                 TermEvent::ClipboardStore { primary, text } => {
@@ -533,22 +719,73 @@ impl Session {
             }
             term.snapshot(&mut self.snapshot);
         }
+        let now = Instant::now();
+        let mut next_wake: Option<Instant> = None;
+        let mut wake_at = |at: Instant| next_wake = Some(next_wake.map_or(at, |n| n.min(at)));
+
+        // Cursor blinking.
+        let blinking = self.focused
+            && match self.settings.blinking {
+                Blinking::App => self.snapshot.cursor().blinking,
+                Blinking::Always => true,
+                Blinking::Never => false,
+            };
+        let interval = self.settings.blink_interval;
+        let phase = now.duration_since(self.blink_epoch).as_millis() / interval.as_millis().max(1);
+        self.renderer.set_cursor_hidden(blinking && phase % 2 == 1);
+        if blinking {
+            wake_at(self.blink_epoch + interval * (phase as u32 + 1));
+        }
+
+        // Visual bell.
+        match self.flash_until {
+            Some(until) if until > now => {
+                self.renderer.set_flash(until.duration_since(now).as_secs_f32() / FLASH.as_secs_f32());
+                wake_at(now + self.frame_interval);
+            }
+            Some(_) => {
+                self.flash_until = None;
+                self.renderer.set_flash(0.0);
+            }
+            None => {}
+        }
+
         // Built without the lock, so the reader keeps parsing meanwhile.
         self.renderer.prepare(&self.snapshot, &mut self.fonts, self.focused);
-        let capture_now = self.screenshot.as_ref().is_some_and(|(_, due)| Instant::now() >= *due);
+        let capture_now = self.screenshot.as_ref().is_some_and(|(_, due)| now >= *due);
         if capture_now && let Some((path, _)) = self.screenshot.take() {
             self.renderer.capture_next_frame(path);
         }
         self.renderer.render();
         self.last_frame = Instant::now();
+        self.update_ime_area();
+
         if capture_now {
             event_loop.exit();
-        } else if let Some((_, due)) = &self.screenshot {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(*due));
-        } else if self.renderer.is_animated() {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + self.frame_interval));
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+        if let Some((_, due)) = &self.screenshot {
+            wake_at(*due);
+        }
+        if self.renderer.is_animated() {
+            wake_at(self.last_frame + self.frame_interval);
+        }
+        event_loop.set_control_flow(next_wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+
+    /// Tells the input method where the cursor is, so its popup appears there.
+    fn update_ime_area(&mut self) {
+        let rect = self.renderer.cursor_rect();
+        if rect[2] <= 0.0 || self.ime_area == Some(rect) {
+            return;
+        }
+        self.ime_area = Some(rect);
+        let data = ImeRequestData::default().with_cursor_area(
+            PhysicalPosition::new(f64::from(rect[0]), f64::from(rect[1])).into(),
+            PhysicalSize::new(f64::from(rect[2]), f64::from(rect[3])).into(),
+        );
+        if let Err(error) = self.window.request_ime_update(ImeRequest::Update(data)) {
+            log::trace!("IME update failed: {error}");
         }
     }
 
@@ -575,48 +812,215 @@ impl Session {
         self.resize_grid();
     }
 
-    /// Handles terminal level key bindings. Returns true when the key was consumed.
-    fn handle_shortcut(&mut self, key: &Key) -> bool {
+    /// Action bound to a key event, if any.
+    fn binding_for(&self, event: &KeyEvent) -> Option<Action> {
         let mods = self.modifiers;
-        let (ctrl, shift, alt) = (mods.control_key(), mods.shift_key(), mods.alt_key());
-        if let Key::Character(c) = key {
-            if ctrl && shift && !alt {
-                if c.eq_ignore_ascii_case("c") {
-                    self.copy_selection(false);
-                    return true;
-                }
-                if c.eq_ignore_ascii_case("v") {
-                    self.paste_from(false);
-                    return true;
-                }
-            }
-            if ctrl && !shift && !alt {
-                let size = match c.as_str() {
-                    "=" | "+" => self.font_size + 1.0,
-                    "-" => self.font_size - 1.0,
-                    "0" => self.settings.font_size,
-                    _ => return false,
-                };
-                self.set_font_size(size);
-                return true;
+        let combo = |shift: bool, key: BindKey| KeyCombo {
+            ctrl: mods.control_key(),
+            shift,
+            alt: mods.alt_key(),
+            super_key: mods.meta_key(),
+            key,
+        };
+        let base = bind_key(&event.key_without_modifiers);
+        let logical = bind_key(&event.logical_key);
+        let mut candidates = Vec::with_capacity(3);
+        if let Some(base) = &base {
+            candidates.push(combo(mods.shift_key(), base.clone()));
+        }
+        if let Some(logical) = logical {
+            candidates.push(combo(mods.shift_key(), logical.clone()));
+            // Shifted symbols such as `+` also match bindings written without shift.
+            if base.as_ref() != Some(&logical) {
+                candidates.push(combo(false, logical));
             }
         }
-        if shift && !ctrl && !alt {
-            match key {
-                Key::Named(NamedKey::PageUp) => {
-                    let page = self.shared.term.lock().rows() as f32;
-                    self.scroll_history(page);
-                }
-                Key::Named(NamedKey::PageDown) => {
-                    let page = self.shared.term.lock().rows() as f32;
-                    self.scroll_history(-page);
-                }
-                Key::Named(NamedKey::Insert) => self.paste_from(true),
-                _ => return false,
+        candidates.iter().find_map(|c| self.bindings.iter().find(|b| &b.combo == c).map(|b| b.action.clone()))
+    }
+
+    fn run_action(&mut self, action: Action) {
+        match action {
+            Action::Copy => self.copy_selection(false),
+            Action::Paste => self.paste_from(false),
+            Action::PasteSelection => self.paste_from(true),
+            Action::IncreaseFontSize => self.set_font_size(self.font_size + 1.0),
+            Action::DecreaseFontSize => self.set_font_size(self.font_size - 1.0),
+            Action::ResetFontSize => self.set_font_size(self.settings.font_size),
+            Action::ScrollLineUp => self.scroll_history(1.0),
+            Action::ScrollLineDown => self.scroll_history(-1.0),
+            Action::ScrollPageUp | Action::ScrollPageDown => {
+                let page = self.shared.term.lock().rows() as f32;
+                self.scroll_history(if action == Action::ScrollPageUp { page } else { -page });
             }
-            return true;
+            Action::ScrollToTop => self.scroll_history(f32::from(u16::MAX) * 1000.0),
+            Action::ScrollToBottom => {
+                self.shared.term.lock().grid_mut().reset_display_offset();
+                self.window.request_redraw();
+            }
+            Action::ClearScrollback => {
+                self.shared.term.lock().grid_mut().clear_scrollback();
+                self.window.request_redraw();
+            }
+            Action::Search => {
+                self.search = Some(SearchState::default());
+                self.update_overlays();
+                self.window.request_redraw();
+            }
+            Action::NewWindow => self.new_window(),
+            Action::SendText(text) => {
+                self.prepare_input();
+                self.send(text.into_bytes());
+            }
+            Action::ReloadConfig | Action::None => {}
         }
-        false
+    }
+
+    fn search_key(&mut self, event: &KeyEvent) {
+        let Some(search) = &mut self.search else { return };
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.search = None;
+                self.shared.term.lock().set_selection(None);
+                self.update_overlays();
+                self.window.request_redraw();
+            }
+            Key::Named(NamedKey::Enter) => {
+                let backwards = !self.modifiers.shift_key();
+                self.search_step(backwards, false);
+            }
+            Key::Named(NamedKey::Backspace) => {
+                search.query.pop();
+                self.search_step(true, true);
+            }
+            _ => {
+                if let Some(text) = event.text.clone()
+                    && !self.modifiers.control_key()
+                {
+                    self.search_text(&text);
+                }
+            }
+        }
+    }
+
+    fn search_text(&mut self, text: &str) {
+        if let Some(search) = &mut self.search {
+            search.query.extend(text.chars().filter(|c| !c.is_control()));
+            self.search_step(true, true);
+        }
+    }
+
+    /// Moves to the next match. `restart` searches again from the bottom after the query changed.
+    fn search_step(&mut self, backwards: bool, restart: bool) {
+        let Some(search) = &mut self.search else { return };
+        {
+            let mut term = self.shared.term.lock();
+            let from = if restart { None } else { search.current.map(|m| m.start) };
+            search.current = if search.query.is_empty() { None } else { term.search(&search.query, from, backwards) };
+            match search.current {
+                Some(found) => {
+                    term.set_selection(Some(Selection {
+                        kind: SelectionKind::Simple,
+                        anchor: found.start,
+                        head: found.end,
+                    }));
+                    term.scroll_to_line(found.start.line);
+                }
+                None => term.set_selection(None),
+            }
+        }
+        self.update_overlays();
+        self.window.request_redraw();
+    }
+
+    /// Rebuilds the search bar and IME preedit overlays.
+    fn update_overlays(&mut self) {
+        let mut overlays = Vec::new();
+        let (rows, palette, cursor) = {
+            let term = self.shared.term.lock();
+            (term.rows(), *term.palette(), term.cursor())
+        };
+        if let Some(search) = &self.search {
+            let status = match (&search.current, search.query.is_empty()) {
+                (_, true) => String::new(),
+                (Some(_), false) => "  Enter: older, Shift+Enter: newer, Esc: close".into(),
+                (None, false) => "  no matches".into(),
+            };
+            overlays.push(Overlay {
+                row: rows.saturating_sub(1),
+                col: 0,
+                text: format!(" Search: {}▏{status} ", search.query),
+                fg: palette.background,
+                bg: palette.cursor,
+                underline: false,
+            });
+        }
+        if let Some(preedit) = &self.preedit {
+            overlays.push(Overlay {
+                row: cursor.row,
+                col: cursor.col,
+                text: preedit.clone(),
+                fg: palette.foreground,
+                bg: palette.background,
+                underline: true,
+            });
+        }
+        self.renderer.set_overlays(overlays);
+    }
+
+    fn new_window(&self) {
+        let cwd = self.shared.term.lock().cwd().map(percent_decode).map(PathBuf::from).filter(|p| p.is_dir());
+        let Ok(exe) = std::env::current_exe() else { return };
+        let mut command = Command::new(exe);
+        if let Some(cwd) = cwd.or_else(|| std::env::current_dir().ok()) {
+            command.arg("--working-directory").arg(cwd);
+        }
+        spawn_detached(command);
+    }
+
+    fn open_link(&self, uri: &str) {
+        let lower = uri.to_ascii_lowercase();
+        if !LINK_SCHEMES.iter().any(|scheme| lower.starts_with(scheme)) {
+            log::warn!("not opening link with unsupported scheme: {uri}");
+            return;
+        }
+        let mut command = Command::new(&self.settings.open_command);
+        command.arg(uri);
+        spawn_detached(command);
+    }
+
+    /// Underlines the link under the pointer while Ctrl is held.
+    fn update_hover(&mut self) {
+        let modes = self.shared.term.lock().modes();
+        let link = if self.modifiers.control_key() && !self.mouse_reporting(modes) {
+            let (row, col) = self.renderer.cell_at(self.mouse.position.0, self.mouse.position.1);
+            let term = self.shared.term.lock();
+            term.link_at(term.viewport_point(row, col))
+        } else {
+            None
+        };
+        if link != self.hovered_link {
+            self.renderer.set_link_highlight(link.as_ref().map(|l| LinkHighlight {
+                start: l.start,
+                end: l.end,
+                id: l.id,
+            }));
+            self.hovered_link = link;
+            self.window.request_redraw();
+        }
+        self.update_pointer_icon(modes);
+    }
+
+    /// Creates a new renderer after the GPU device was lost.
+    fn recreate_renderer(&mut self, config: &Config, paths: Option<&Paths>) -> anyhow::Result<()> {
+        let size = self.window.surface_size();
+        let theme = Theme { opacity: config.window.opacity.clamp(0.0, 1.0), ..Theme::default() };
+        let metrics = self.fonts.metrics();
+        let padding = padding(self.settings.padding, self.scale_factor);
+        self.renderer =
+            pollster::block_on(Renderer::new(self.window.clone(), size.width, size.height, metrics, padding, theme))?;
+        self.apply_config(config, paths);
+        log::warn!("renderer recreated after GPU device loss");
+        Ok(())
     }
 
     fn copy_selection(&self, primary: bool) {
@@ -648,7 +1052,13 @@ impl Session {
     /// Arrow while the application receives mouse events, I-beam while the
     /// mouse selects text (including Shift held over a mouse-reporting app).
     fn update_pointer_icon(&mut self, modes: Modes) {
-        let icon = if self.mouse_reporting(modes) { CursorIcon::Default } else { CursorIcon::Text };
+        let icon = if self.hovered_link.is_some() {
+            CursorIcon::Pointer
+        } else if self.mouse_reporting(modes) {
+            CursorIcon::Default
+        } else {
+            CursorIcon::Text
+        };
         if icon != self.pointer_icon {
             self.pointer_icon = icon;
             self.window.set_cursor(icon.into());
@@ -660,6 +1070,14 @@ impl Session {
     }
 
     fn pointer_button(&mut self, pressed: bool, button: MouseButton) {
+        if pressed
+            && button == MouseButton::Left
+            && self.modifiers.control_key()
+            && let Some(link) = self.hovered_link.clone()
+        {
+            self.open_link(&link.uri);
+            return;
+        }
         let (x, y) = self.mouse.position;
         let (row, col) = self.renderer.cell_at(x, y);
         let modes = self.shared.term.lock().modes();
@@ -730,10 +1148,14 @@ impl Session {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.mouse.position = (x, y);
+        if self.modifiers.control_key() || self.hovered_link.is_some() {
+            self.update_hover();
+        }
         let (row, col) = self.renderer.cell_at(x, y);
         let modes = self.shared.term.lock().modes();
         if self.mouse_reporting(modes) {
-            let report = modes.contains(Modes::MOUSE_ANY) || (modes.contains(Modes::MOUSE_BUTTON) && self.mouse.buttons != 0);
+            let report =
+                modes.contains(Modes::MOUSE_ANY) || (modes.contains(Modes::MOUSE_BUTTON) && self.mouse.buttons != 0);
             if report && self.mouse.last_cell != Some((row, col)) {
                 let code = (0..3).find(|b| self.mouse.buttons & (1 << b) != 0).unwrap_or(mouse::NO_BUTTON);
                 let sgr = modes.contains(Modes::MOUSE_SGR);
@@ -857,6 +1279,89 @@ fn spawn_reader(
         proxy.wake_up();
     })?;
     Ok(())
+}
+
+fn bind_key(key: &Key) -> Option<BindKey> {
+    match key {
+        Key::Character(text) => {
+            let mut chars = text.chars();
+            let c = chars.next()?;
+            chars.next().is_none().then(|| BindKey::Char(c.to_lowercase().next().unwrap_or(c)))
+        }
+        Key::Named(named) => {
+            let function = match named {
+                NamedKey::F1 => Some(1),
+                NamedKey::F2 => Some(2),
+                NamedKey::F3 => Some(3),
+                NamedKey::F4 => Some(4),
+                NamedKey::F5 => Some(5),
+                NamedKey::F6 => Some(6),
+                NamedKey::F7 => Some(7),
+                NamedKey::F8 => Some(8),
+                NamedKey::F9 => Some(9),
+                NamedKey::F10 => Some(10),
+                NamedKey::F11 => Some(11),
+                NamedKey::F12 => Some(12),
+                _ => None,
+            };
+            if let Some(n) = function {
+                return Some(BindKey::Named(format!("f{n}")));
+            }
+            let name = match named {
+                NamedKey::Enter => "enter",
+                NamedKey::Tab => "tab",
+                NamedKey::Backspace => "backspace",
+                NamedKey::Escape => "escape",
+                NamedKey::Insert => "insert",
+                NamedKey::Delete => "delete",
+                NamedKey::Home => "home",
+                NamedKey::End => "end",
+                NamedKey::PageUp => "page_up",
+                NamedKey::PageDown => "page_down",
+                NamedKey::ArrowUp => "up",
+                NamedKey::ArrowDown => "down",
+                NamedKey::ArrowLeft => "left",
+                NamedKey::ArrowRight => "right",
+                _ => return None,
+            };
+            Some(BindKey::Named(name.to_owned()))
+        }
+        _ => None,
+    }
+}
+
+/// Runs a program without waiting for it, reaping it on a helper thread.
+fn spawn_detached(mut command: Command) {
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    match command.spawn() {
+        Ok(mut child) => {
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(error) => log::error!("failed to run {:?}: {error}", command.get_program()),
+    }
+}
+
+/// Decodes `%XX` escapes in paths reported through OSC 7.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Some(value) =
+                std::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(value);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn padding(padding: (u16, u16), scale_factor: f64) -> [f32; 2] {

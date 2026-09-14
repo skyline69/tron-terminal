@@ -12,6 +12,7 @@ pub mod parser;
 pub mod selection;
 pub mod snapshot;
 pub mod term;
+pub mod text;
 
 pub use cell::{Cell, Color, ColorKind, Flags};
 pub use graphics::{Graphics, Image, Placement};
@@ -20,4 +21,5 @@ pub use palette::Palette;
 pub use parser::{Params, Parser, Perform};
 pub use selection::{Point, Selection, SelectionKind, SelectionRange};
 pub use snapshot::Snapshot;
-pub use term::{CursorShape, CursorState, Modes, TermEvent, Terminal};
+pub use term::{CursorShape, CursorState, Hyperlink, LinkMatch, Modes, TermEvent, Terminal};
+pub use text::SearchMatch;

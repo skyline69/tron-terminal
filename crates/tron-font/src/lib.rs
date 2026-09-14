@@ -11,8 +11,8 @@ use foldhash::HashMap;
 use std::str::FromStr;
 
 use fontique::{
-    Attributes, Blob, Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, GenericFamily,
-    QueryFamily, QueryStatus, SourceCache, Synthesis,
+    Attributes, Blob, Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, GenericFamily, QueryFamily,
+    QueryStatus, SourceCache, Synthesis,
 };
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
@@ -166,17 +166,11 @@ impl FontSystem {
         };
         for style in [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic] {
             let families = system.families();
-            let face = system
-                .query(&families, style, None)
-                .ok_or_else(|| FontError::NotFound(family.to_owned()))?;
+            let face = system.query(&families, style, None).ok_or_else(|| FontError::NotFound(family.to_owned()))?;
             system.primary[style as usize] = face;
         }
         system.set_size(size_pt, scale_factor);
-        log::info!(
-            "font `{family}` at {size_pt}pt, cell {}x{} px",
-            system.metrics.width,
-            system.metrics.height
-        );
+        log::info!("font `{family}` at {size_pt}pt, cell {}x{} px", system.metrics.width, system.metrics.height);
         Ok(system)
     }
 
@@ -362,12 +356,7 @@ impl FontSystem {
 
     pub fn rasterize(&mut self, key: GlyphKey) -> Option<RasterizedGlyph> {
         let face = &self.faces[key.face as usize];
-        let mut scaler = self
-            .scaler
-            .builder(face.font_ref())
-            .size(self.size_px)
-            .hint(self.hint)
-            .build();
+        let mut scaler = self.scaler.builder(face.font_ref()).size(self.size_px).hint(self.hint).build();
         let mut render = Render::new(&[
             Source::ColorOutline(0),
             Source::ColorBitmap(StrikeWith::BestFit),
@@ -422,11 +411,8 @@ fn compute_metrics(face: &Face, px: f32) -> CellMetrics {
     let baseline = ascent + (leading / 2.0).floor();
     let thickness = metrics.stroke_size.round().max(1.0);
     let underline = (baseline - metrics.underline_offset).round().clamp(0.0, height - thickness);
-    let strikeout_offset = if metrics.strikeout_offset > 0.0 {
-        metrics.strikeout_offset
-    } else {
-        metrics.x_height / 2.0
-    };
+    let strikeout_offset =
+        if metrics.strikeout_offset > 0.0 { metrics.strikeout_offset } else { metrics.x_height / 2.0 };
     let strikeout = (baseline - strikeout_offset).round().clamp(0.0, height - thickness);
 
     CellMetrics {

@@ -17,6 +17,7 @@ struct Uniforms {
 const KIND_SOLID: u32 = 0u;
 const KIND_MASK: u32 = 1u;
 const KIND_COLOR: u32 = 2u;
+const KIND_CURLY: u32 = 3u;
 
 struct Instance {
     @location(0) pos: vec2<f32>,
@@ -31,6 +32,10 @@ struct VertexOut {
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) kind: u32,
+    // Position inside the quad in pixels.
+    @location(3) local: vec2<f32>,
+    // Raw instance uv, used as parameters by curly underlines.
+    @location(4) @interpolate(flat) params: vec4<f32>,
 };
 
 @vertex
@@ -45,6 +50,8 @@ fn vs_main(@builtin(vertex_index) index: u32, inst: Instance) -> VertexOut {
     out.uv = mix(inst.uv.xy, inst.uv.zw, corner);
     out.color = inst.color;
     out.kind = inst.kind;
+    out.local = corner * inst.size;
+    out.params = inst.uv;
     return out;
 }
 
@@ -60,6 +67,16 @@ fn fs_main(v: VertexOut) -> @location(0) vec4<f32> {
             }
             let a = coverage * color.a;
             return vec4<f32>(color.rgb * a, a);
+        }
+        case KIND_CURLY: {
+            // params: wave period, amplitude, stroke thickness, band height.
+            let period = max(v.params.x, 1.0);
+            let angle = v.position.x * 6.2831853 / period;
+            let wave = v.params.w * 0.5 + v.params.y * sin(angle);
+            let slope = v.params.y * 6.2831853 / period * cos(angle);
+            let distance = abs(v.local.y - wave) / sqrt(1.0 + slope * slope);
+            let a = clamp(v.params.z * 0.5 + 0.5 - distance, 0.0, 1.0) * v.color.a;
+            return vec4<f32>(v.color.rgb * a, a);
         }
         case KIND_COLOR: {
             let texel = textureLoad(color_atlas, vec2<i32>(v.uv), 0);

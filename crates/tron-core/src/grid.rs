@@ -64,10 +64,7 @@ impl Row {
 
     /// Combining characters stored for `col`, without the base character.
     pub fn combining(&self, col: usize) -> Option<&str> {
-        self.extras
-            .iter()
-            .find(|(c, _)| usize::from(*c) == col)
-            .map(|(_, s)| s.as_str())
+        self.extras.iter().find(|(c, _)| usize::from(*c) == col).map(|(_, s)| s.as_str())
     }
 
     pub fn push_combining(&mut self, col: usize, ch: char) {
@@ -245,6 +242,20 @@ impl Grid {
         let new = (self.display_offset as isize + delta).clamp(0, max) as usize;
         if new != self.display_offset {
             self.display_offset = new;
+            self.full_damage = true;
+        }
+    }
+
+    /// Scrolls the viewport so absolute line `line` is visible, centering it when it was not.
+    pub fn scroll_to_line(&mut self, line: i64) {
+        let top = self.viewport_line(0);
+        if (top..top + self.rows as i64).contains(&line) {
+            return;
+        }
+        let wanted_top = line - self.rows as i64 / 2;
+        let offset = (self.history - wanted_top).clamp(0, self.base() as i64) as usize;
+        if offset != self.display_offset {
+            self.display_offset = offset;
             self.full_damage = true;
         }
     }

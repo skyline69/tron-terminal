@@ -378,8 +378,7 @@ impl Graphics {
         let rows = if control.rows > 0 { control.rows } else { (height + control.offset_y).div_ceil(cell_h).max(1) };
 
         if control.placement != 0 {
-            self.placements
-                .retain(|p| !(p.image_id == id && p.placement_id == control.placement));
+            self.placements.retain(|p| !(p.image_id == id && p.placement_id == control.placement));
         }
         self.placements.push(Placement {
             image_id: id,
@@ -461,8 +460,7 @@ impl Graphics {
             return;
         }
         let before = self.placements.len();
-        self.placements
-            .retain(|p| p.alt_screen != alt_screen || p.line + i64::from(p.rows) > oldest_line);
+        self.placements.retain(|p| p.alt_screen != alt_screen || p.line + i64::from(p.rows) > oldest_line);
         if self.placements.len() != before {
             self.generation += 1;
         }
@@ -517,11 +515,18 @@ fn respond(control: &Control, result: Result<(), String>) -> Outcome {
 }
 
 fn read_file(path: &str, control: &Control) -> Result<Vec<u8>, String> {
-    let metadata = std::fs::metadata(path).map_err(|e| format!("EBADF:{e}"))?;
+    // Never read device or kernel files, whatever an application asks for.
+    let canonical = std::fs::canonicalize(path).map_err(|e| format!("EBADF:{e}"))?;
+    let denied = ["/proc", "/sys", "/dev"].iter().any(|prefix| canonical.starts_with(prefix))
+        && !canonical.starts_with("/dev/shm");
+    if denied {
+        return Err("EPERM:refusing to read system files".into());
+    }
+    let metadata = std::fs::metadata(&canonical).map_err(|e| format!("EBADF:{e}"))?;
     if !metadata.is_file() {
         return Err("EINVAL:not a regular file".into());
     }
-    let mut file = std::fs::File::open(path).map_err(|e| format!("EBADF:{e}"))?;
+    let mut file = std::fs::File::open(&canonical).map_err(|e| format!("EBADF:{e}"))?;
     let mut data = Vec::new();
     if control.offset > 0 {
         std::io::copy(&mut (&mut file).take(control.offset as u64), &mut std::io::sink())
@@ -532,7 +537,9 @@ fn read_file(path: &str, control: &Control) -> Result<Vec<u8>, String> {
     if control.medium == b't' {
         // Temporary files must be deleted after reading, but only obvious ones.
         let temp = std::env::temp_dir();
-        let in_temp = path.starts_with(temp.to_string_lossy().as_ref()) || path.starts_with("/tmp/") || path.starts_with("/dev/shm/");
+        let in_temp = path.starts_with(temp.to_string_lossy().as_ref())
+            || path.starts_with("/tmp/")
+            || path.starts_with("/dev/shm/");
         if in_temp && path.contains("tty-graphics-protocol") {
             let _ = std::fs::remove_file(path);
         }
@@ -555,7 +562,9 @@ fn decode_png(data: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let rgba = match info.color_type {
         png::ColorType::Rgba => buffer,
         png::ColorType::Rgb => buffer.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => buffer.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::GrayscaleAlpha => {
+            buffer.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect()
+        }
         png::ColorType::Grayscale => buffer.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::Indexed => return Err("EINVAL:unexpanded palette PNG".into()),
     };

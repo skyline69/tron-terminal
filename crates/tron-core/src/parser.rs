@@ -213,10 +213,7 @@ impl Parser {
         while i < bytes.len() {
             if self.state == State::Ground && self.utf8_need == 0 {
                 let rest = &bytes[i..];
-                let run = rest
-                    .iter()
-                    .position(|&b| !(0x20..0x7f).contains(&b))
-                    .unwrap_or(rest.len());
+                let run = rest.iter().position(|&b| !(0x20..0x7f).contains(&b)).unwrap_or(rest.len());
                 if run > 0 {
                     performer.print_ascii(&rest[..run]);
                     i += run;
@@ -542,10 +539,7 @@ impl Parser {
                 self.next_is_sub = b == b':';
             }
             _ => {
-                self.current = self
-                    .current
-                    .saturating_mul(10)
-                    .saturating_add(u16::from(b - b'0'));
+                self.current = self.current.saturating_mul(10).saturating_add(u16::from(b - b'0'));
             }
         }
     }
@@ -654,10 +648,7 @@ mod tests {
 
     #[test]
     fn plain_text_and_controls() {
-        assert_eq!(
-            parse(b"hi\r\n"),
-            vec![Action::Print("hi".into()), Action::Exec(b'\r'), Action::Exec(b'\n')]
-        );
+        assert_eq!(parse(b"hi\r\n"), vec![Action::Print("hi".into()), Action::Exec(b'\r'), Action::Exec(b'\n')]);
     }
 
     #[test]
@@ -674,21 +665,14 @@ mod tests {
 
     #[test]
     fn csi_empty_params_are_zero() {
-        assert_eq!(
-            parse(b"\x1b[;5H"),
-            vec![Action::Csi(vec![vec![0], vec![5]], vec![], b'H')]
-        );
+        assert_eq!(parse(b"\x1b[;5H"), vec![Action::Csi(vec![vec![0], vec![5]], vec![], b'H')]);
     }
 
     #[test]
     fn csi_subparams() {
         assert_eq!(
             parse(b"\x1b[4:3;38:2::10:20:30m"),
-            vec![Action::Csi(
-                vec![vec![4, 3], vec![38, 2, 0, 10, 20, 30]],
-                vec![],
-                b'm'
-            )]
+            vec![Action::Csi(vec![vec![4, 3], vec![38, 2, 0, 10, 20, 30]], vec![], b'm')]
         );
     }
 
@@ -765,9 +749,6 @@ mod tests {
 
     #[test]
     fn can_aborts_sequence() {
-        assert_eq!(
-            parse(b"\x1b[12\x18x"),
-            vec![Action::Exec(0x18), Action::Print("x".into())]
-        );
+        assert_eq!(parse(b"\x1b[12\x18x"), vec![Action::Exec(0x18), Action::Print("x".into())]);
     }
 }

@@ -101,11 +101,8 @@ impl Selection {
     /// Resolves the selection against grid content. `separators` are the
     /// characters, besides whitespace, that end a word.
     pub fn range(&self, grid: &Grid, separators: &str) -> Option<SelectionRange> {
-        let (mut start, mut end) = if self.anchor <= self.head {
-            (self.anchor, self.head)
-        } else {
-            (self.head, self.anchor)
-        };
+        let (mut start, mut end) =
+            if self.anchor <= self.head { (self.anchor, self.head) } else { (self.head, self.anchor) };
         let (oldest, newest) = (grid.oldest_line(), grid.last_line());
         if end.line < oldest || start.line > newest {
             return None;
@@ -124,11 +121,7 @@ impl Selection {
             SelectionKind::Simple => SelectionRange { start, end, block: false },
             SelectionKind::Block => {
                 let (left, right) = min_max(self.anchor.col.min(last_col), self.head.col.min(last_col));
-                SelectionRange {
-                    start: Point::new(start.line, left),
-                    end: Point::new(end.line, right),
-                    block: true,
-                }
+                SelectionRange { start: Point::new(start.line, left), end: Point::new(end.line, right), block: true }
             }
             SelectionKind::Word => SelectionRange {
                 start: word_start(grid, start, separators),
@@ -144,11 +137,7 @@ impl Selection {
                 while last < newest && grid.line(last).is_some_and(|r| r.wrapped) {
                     last += 1;
                 }
-                SelectionRange {
-                    start: Point::new(first, 0),
-                    end: Point::new(last, last_col),
-                    block: false,
-                }
+                SelectionRange { start: Point::new(first, 0), end: Point::new(last, last_col), block: false }
             }
         };
         Some(range)

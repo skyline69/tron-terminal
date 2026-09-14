@@ -13,7 +13,12 @@ use tron_pty::{Pty, SpawnOptions, WindowSize};
 fn main() {
     let mut args = std::env::args().skip(1);
     let program = args.next().unwrap_or_else(|| "fish".into());
-    let options = SpawnOptions { program: Some(program), args: args.collect(), term: "xterm-256color".into(), ..Default::default() };
+    let options = SpawnOptions {
+        program: Some(program),
+        args: args.collect(),
+        term: "xterm-256color".into(),
+        ..Default::default()
+    };
     let rows = 12;
     let size = |cols| WindowSize { cols, rows: rows as u16, cell_width: 10, cell_height: 20 };
     let pty = Pty::spawn(&options, size(80)).expect("spawn");
@@ -47,7 +52,13 @@ fn main() {
     };
     let dump = |term: &Terminal, label: &str| {
         let grid = term.grid();
-        println!("--- {label}: {}x{}, cursor {:?}, scrollback {}", grid.cols(), grid.rows(), term.cursor(), grid.scrollback_len());
+        println!(
+            "--- {label}: {}x{}, cursor {:?}, scrollback {}",
+            grid.cols(),
+            grid.rows(),
+            term.cursor(),
+            grid.scrollback_len()
+        );
         for line in grid.oldest_line().max(grid.screen_line(0) - 3)..=grid.last_line() {
             let row = grid.line(line).unwrap();
             let mut text = String::new();

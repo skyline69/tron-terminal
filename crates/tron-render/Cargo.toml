@@ -13,6 +13,7 @@ tron-core.workspace = true
 tron-font.workspace = true
 pollster.workspace = true
 png.workspace = true
+unicode-width.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
 log.workspace = true
