@@ -2,7 +2,8 @@
 //! before the shell. When it ends, the process replaces itself with the shell,
 //! so the session continues in the same pty.
 
-mod link;
+pub mod catalog;
+pub mod link;
 mod splash;
 
 use std::io;
@@ -16,6 +17,10 @@ pub const MARKER_ENV: &str = "TRON_STARTUP_MARKER";
 pub const ANIMATIONS_ENV: &str = "TRON_STARTUP_ANIMATIONS";
 /// Environment variable holding the token that authorizes startup screen commands.
 pub const TOKEN_ENV: &str = "TRON_STARTUP_TOKEN";
+/// Environment variable naming tron's configuration directory.
+pub const CONFIG_DIR_ENV: &str = "TRON_STARTUP_CONFIG_DIR";
+/// Variables for the startup screen only, removed before the shell starts.
+const ENV: [&str; 4] = [MARKER_ENV, ANIMATIONS_ENV, TOKEN_ENV, CONFIG_DIR_ENV];
 
 /// What the user chose on the startup screen.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -63,10 +68,16 @@ fn mark_shown(marker: &Path) {
 /// Replaces this process with the shell, falling back to `/bin/sh`.
 fn hand_off(shell: &[String]) -> ! {
     let (program, args) = shell.split_first().map_or(("/bin/sh", &[][..]), |(p, a)| (p.as_str(), a));
-    let error =
-        Command::new(program).args(args).env_remove(MARKER_ENV).env_remove(ANIMATIONS_ENV).env_remove(TOKEN_ENV).exec();
+    let command = |program: &str| {
+        let mut command = Command::new(program);
+        for name in ENV {
+            command.env_remove(name);
+        }
+        command
+    };
+    let error = command(program).args(args).exec();
     eprintln!("tron: cannot run {program}: {error}");
-    let error = Command::new("/bin/sh").env_remove(MARKER_ENV).env_remove(ANIMATIONS_ENV).exec();
+    let error = command("/bin/sh").exec();
     eprintln!("tron: cannot run /bin/sh: {error}");
     std::process::exit(127)
 }

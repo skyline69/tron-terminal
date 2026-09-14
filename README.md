@@ -101,6 +101,12 @@ changes while running. Every key is optional; see
   shaders/<name>.wgsl   post-processing shaders
 ```
 
+Built-in themes: `tron` (default), `tron-light`, `catppuccin-mocha`, `dracula`,
+`gruvbox-dark`, `nord`, `one-dark`, `rose-pine`, `solarized-dark` and
+`tokyo-night`. The example shaders are built in too, so
+`files = ["crt.wgsl"]` works without copying anything; a file of the same
+name in `shaders/` takes precedence.
+
 Key bindings override the defaults:
 
 ```toml

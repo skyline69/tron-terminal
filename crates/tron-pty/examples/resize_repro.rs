@@ -14,6 +14,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let program = args.next().unwrap_or_else(|| "fish".into());
     let options = SpawnOptions {
+        remove_env: Vec::new(),
         program: Some(program),
         args: args.collect(),
         term: "xterm-256color".into(),

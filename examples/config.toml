@@ -13,7 +13,9 @@
 # Animate it. false for reduced motion.
 # startup_animations = true
 
-# Theme from themes/<name>.toml. "tron" is built in.
+# Theme from themes/<name>.toml, or a built-in one: tron, tron-light,
+# catppuccin-mocha, dracula, gruvbox-dark, nord, one-dark, rose-pine,
+# solarized-dark, tokyo-night.
 # theme = "tron-light"
 
 [font]
@@ -93,7 +95,8 @@ copy_on_select = true
 osc52 = "copy"
 
 [shader]
-# WGSL files from shaders/, applied in order. See examples/shaders.
+# WGSL files from shaders/, applied in order. Built in, no file needed:
+# crt.wgsl, bloom.wgsl, cursor-glow.wgsl, cursor-trail.wgsl, afterglow.wgsl.
 files = []
 # auto redraws continuously when a shader reads tron.time or tron.frame.
 # always or never force it.

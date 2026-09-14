@@ -45,6 +45,8 @@ pub struct SpawnOptions {
     pub term: String,
     /// Extra environment variables, applied after the defaults.
     pub env: Vec<(OsString, OsString)>,
+    /// Variables of this process the child must not see.
+    pub remove_env: Vec<OsString>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +90,9 @@ impl Pty {
             .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
             .env_remove("DESKTOP_STARTUP_ID")
             .env_remove("XDG_ACTIVATION_TOKEN");
+        for key in &options.remove_env {
+            command.env_remove(key);
+        }
         for (key, value) in &options.env {
             command.env(key, value);
         }
@@ -167,6 +172,7 @@ mod tests {
     #[test]
     fn runs_command_and_reads_output() {
         let options = SpawnOptions {
+            remove_env: Vec::new(),
             program: Some("/bin/sh".into()),
             args: vec![
                 "-c".into(),

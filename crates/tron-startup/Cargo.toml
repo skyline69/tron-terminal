@@ -12,3 +12,5 @@ workspace = true
 ratatui.workspace = true
 tachyonfx.workspace = true
 log.workspace = true
+base64.workspace = true
+tron-config.workspace = true

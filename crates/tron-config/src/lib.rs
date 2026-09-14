@@ -37,6 +37,30 @@ pub enum ConfigError {
     ThemeNotFound(String),
 }
 
+/// Themes shipped with tron, as (name, TOML). "tron" is the default colors.
+pub const BUILTIN_THEMES: &[(&str, &str)] = &[
+    ("tron", ""),
+    ("tron-light", include_str!("../../../examples/themes/tron-light.toml")),
+    ("catppuccin-mocha", include_str!("../../../examples/themes/catppuccin-mocha.toml")),
+    ("dracula", include_str!("../../../examples/themes/dracula.toml")),
+    ("gruvbox-dark", include_str!("../../../examples/themes/gruvbox-dark.toml")),
+    ("nord", include_str!("../../../examples/themes/nord.toml")),
+    ("one-dark", include_str!("../../../examples/themes/one-dark.toml")),
+    ("rose-pine", include_str!("../../../examples/themes/rose-pine.toml")),
+    ("solarized-dark", include_str!("../../../examples/themes/solarized-dark.toml")),
+    ("tokyo-night", include_str!("../../../examples/themes/tokyo-night.toml")),
+];
+
+/// Shaders shipped with tron, as (file name, WGSL). Files in `shaders/` with the
+/// same name take precedence.
+pub const BUILTIN_SHADERS: &[(&str, &str)] = &[
+    ("crt.wgsl", include_str!("../../../examples/shaders/crt.wgsl")),
+    ("bloom.wgsl", include_str!("../../../examples/shaders/bloom.wgsl")),
+    ("cursor-glow.wgsl", include_str!("../../../examples/shaders/cursor-glow.wgsl")),
+    ("cursor-trail.wgsl", include_str!("../../../examples/shaders/cursor-trail.wgsl")),
+    ("afterglow.wgsl", include_str!("../../../examples/shaders/afterglow.wgsl")),
+];
+
 /// Locations of configuration and data files.
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -130,6 +154,28 @@ impl Config {
         (map.into_iter().map(|(combo, action)| Binding { combo, action }).collect(), errors)
     }
 
+    /// `config.toml` with `overlay`, a partial TOML document, layered on top.
+    /// Tables are merged key by key; other values in the overlay replace the file's.
+    pub fn with_overlay(paths: Option<&Paths>, overlay: &str) -> Result<Self, ConfigError> {
+        let base = match paths.map(|p| std::fs::read_to_string(&p.config_file)) {
+            Some(Ok(text)) => text,
+            Some(Err(error)) if error.kind() != std::io::ErrorKind::NotFound => {
+                let path = paths.map(|p| p.config_file.clone()).unwrap_or_default();
+                return Err(ConfigError::Read { path, source: error });
+            }
+            _ => String::new(),
+        };
+        let parse = |text: &str, path: PathBuf| {
+            text.parse::<toml::Table>().map_err(|source| ConfigError::Parse { path, source: Box::new(source) })
+        };
+        let file = paths.map(|p| p.config_file.clone()).unwrap_or_default();
+        let mut merged = parse(&base, file.clone())?;
+        merge_tables(&mut merged, parse(overlay, PathBuf::from("<preview>"))?);
+        toml::Value::Table(merged)
+            .try_into()
+            .map_err(|source| ConfigError::Parse { path: PathBuf::from("<preview>"), source: Box::new(source) })
+    }
+
     pub fn load(paths: &Paths) -> Result<Self, ConfigError> {
         match std::fs::read_to_string(&paths.config_file) {
             Ok(text) => Self::parse(&text)
@@ -142,15 +188,17 @@ impl Config {
     /// Final colors: built-in defaults, then the theme, then `[colors]`.
     pub fn colors(&self, paths: Option<&Paths>) -> Result<Colors, ConfigError> {
         let mut colors = Colors::default();
-        if let Some(name) = &self.theme
-            && name != "tron"
-        {
-            let path = paths
-                .map(|p| p.themes_dir.join(format!("{name}.toml")))
-                .filter(|p| p.exists())
-                .ok_or_else(|| ConfigError::ThemeNotFound(name.clone()))?;
-            let text =
-                std::fs::read_to_string(&path).map_err(|source| ConfigError::Read { path: path.clone(), source })?;
+        if let Some(name) = &self.theme {
+            let file = paths.map(|p| p.themes_dir.join(format!("{name}.toml"))).filter(|p| p.exists());
+            let (path, text) = match (file, BUILTIN_THEMES.iter().find(|(builtin, _)| builtin == name)) {
+                (Some(path), _) => {
+                    let text = std::fs::read_to_string(&path)
+                        .map_err(|source| ConfigError::Read { path: path.clone(), source })?;
+                    (path, text)
+                }
+                (None, Some((_, text))) => (PathBuf::from(format!("<built-in theme {name}>")), (*text).to_owned()),
+                (None, None) => return Err(ConfigError::ThemeNotFound(name.clone())),
+            };
             let theme: ColorOverrides =
                 toml::from_str(&text).map_err(|source| ConfigError::Parse { path, source: Box::new(source) })?;
             theme.apply(&mut colors);
@@ -170,11 +218,59 @@ impl Config {
                     Some(paths) if path.is_relative() => paths.shaders_dir.join(path),
                     _ => path,
                 };
-                let source = std::fs::read_to_string(&path)
-                    .map_err(|source| ConfigError::Read { path: path.clone(), source })?;
+                let source = match std::fs::read_to_string(&path) {
+                    Ok(source) => source,
+                    Err(error) => match BUILTIN_SHADERS.iter().find(|(name, _)| name == file) {
+                        Some((_, source)) if error.kind() == std::io::ErrorKind::NotFound => (*source).to_owned(),
+                        _ => return Err(ConfigError::Read { path, source: error }),
+                    },
+                };
                 Ok(ShaderSource { name: file.clone(), path, source })
             })
             .collect()
+    }
+}
+
+/// Names of the built-in themes followed by the themes in `themes/`, without duplicates.
+pub fn theme_names(paths: Option<&Paths>) -> Vec<String> {
+    let mut names: Vec<String> = BUILTIN_THEMES.iter().map(|(name, _)| (*name).to_owned()).collect();
+    names.extend(files_with_extension(paths.map(|p| p.themes_dir.as_path()), "toml"));
+    dedup_keep_order(names)
+}
+
+/// File names of the built-in shaders followed by the shaders in `shaders/`, without duplicates.
+pub fn shader_names(paths: Option<&Paths>) -> Vec<String> {
+    let mut names: Vec<String> = BUILTIN_SHADERS.iter().map(|(name, _)| (*name).to_owned()).collect();
+    let files = files_with_extension(paths.map(|p| p.shaders_dir.as_path()), "wgsl");
+    names.extend(files.into_iter().map(|stem| format!("{stem}.wgsl")));
+    dedup_keep_order(names)
+}
+
+fn files_with_extension(dir: Option<&Path>, extension: &str) -> Vec<String> {
+    let Some(entries) = dir.and_then(|dir| std::fs::read_dir(dir).ok()) else { return Vec::new() };
+    let mut stems: Vec<String> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.extension().is_some_and(|e| e == extension))
+        .filter_map(|path| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .collect();
+    stems.sort();
+    stems
+}
+
+fn dedup_keep_order(names: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    names.into_iter().filter(|name| seen.insert(name.clone())).collect()
+}
+
+/// Merges `overlay` into `base`: nested tables recursively, everything else replaced.
+fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
+    for (key, value) in overlay {
+        match (base.get_mut(&key), value) {
+            (Some(toml::Value::Table(existing)), toml::Value::Table(nested)) => merge_tables(existing, nested),
+            (_, value) => {
+                base.insert(key, value);
+            }
+        }
     }
 }
 
@@ -894,6 +990,31 @@ mod tests {
         assert_eq!(find("super+k"), Some(Action::SendText("\u{15}".into())));
         assert_eq!(find("ctrl+shift+z"), Some(Action::ScrollToPreviousPrompt));
         assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn overlay_merges_over_the_file_and_builtins_resolve() {
+        let paths = temp_paths("overlay");
+        std::fs::write(&paths.config_file, "# my config\n[font]\nsize = 15.0\nfamily = \"Iosevka\"\n").unwrap();
+        std::fs::write(paths.themes_dir.join("mine.toml"), "background = \"#123456\"").unwrap();
+        let config = Config::with_overlay(
+            Some(&paths),
+            "theme = \"nord\"\n[font]\nsize = 18.0\n[shader]\nfiles = [\"crt.wgsl\"]",
+        )
+        .unwrap();
+        assert_eq!((config.font.size, config.font.family.as_str()), (18.0, "Iosevka"));
+        assert_eq!(config.colors(Some(&paths)).unwrap().background, Rgb::new(0x2e, 0x34, 0x40));
+        assert!(config.shader_sources(Some(&paths))[0].as_ref().unwrap().source.contains("fn shade"));
+        assert!(Config::with_overlay(Some(&paths), "[font]\nsize = \"big\"").is_err());
+        let themes = theme_names(Some(&paths));
+        assert_eq!(themes.first().map(String::as_str), Some("tron"));
+        assert!(themes.iter().any(|t| t == "mine") && themes.iter().any(|t| t == "dracula"));
+        assert_eq!(shader_names(None).len(), BUILTIN_SHADERS.len());
+        for (name, _) in BUILTIN_THEMES {
+            let config = Config { theme: Some((*name).to_owned()), ..Config::default() };
+            assert!(config.colors(None).is_ok(), "built-in theme {name}");
+        }
+        let _ = std::fs::remove_dir_all(&paths.config_dir);
     }
 
     #[test]

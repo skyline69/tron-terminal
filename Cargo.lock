@@ -3745,6 +3745,7 @@ dependencies = [
  "accesskit_unix",
  "anyhow",
  "arboard",
+ "base64 0.23.1",
  "clap",
  "clap_complete",
  "env_logger",
@@ -3832,9 +3833,11 @@ dependencies = [
 name = "tron-startup"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "log",
  "ratatui",
  "tachyonfx",
+ "tron-config",
 ]
 
 [[package]]

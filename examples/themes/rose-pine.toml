@@ -1,0 +1,7 @@
+# Rosé Pine.
+foreground = "#e0def4"
+background = "#191724"
+cursor = "#524f67"
+selection_background = "#403d52"
+normal = ["#26233a", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4"]
+bright = ["#6e6a86", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4"]

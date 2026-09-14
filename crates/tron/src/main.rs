@@ -47,6 +47,8 @@ use clipboard::Clipboard;
 const SYNC_POLL: Duration = Duration::from_millis(8);
 /// Maximum time between clicks of a double or triple click.
 const MULTI_CLICK: Duration = Duration::from_millis(400);
+/// Debug aid: a token accepted for startup screen commands in any session.
+const DEBUG_STARTUP_TOKEN_ENV: &str = "TRON_DEBUG_STARTUP_TOKEN";
 /// Longest the startup screen's shader may run without being turned off.
 const STARTUP_SHADER_LIMIT: Duration = Duration::from_secs(60);
 /// How long configuration errors stay on screen.
@@ -116,6 +118,7 @@ fn main() -> anyhow::Result<()> {
         config_error,
         show_startup,
         startup_token,
+        preview: None,
         proxy,
         config_dirty,
         _watcher: watcher,
@@ -143,6 +146,8 @@ struct App {
     show_startup: bool,
     /// Secret the startup screen sends with its commands.
     startup_token: String,
+    /// TOML the startup screen is previewing on top of `config`.
+    preview: Option<String>,
     proxy: EventLoopProxy,
     config_dirty: Arc<AtomicBool>,
     _watcher: Option<Watcher>,
@@ -187,6 +192,16 @@ impl Settings {
             notify_command: config.notifications.command.clone(),
         }
     }
+}
+
+/// What the startup screen asked for with its config preview.
+enum PreviewRequest {
+    /// Apply this TOML over the configuration, without saving it.
+    Show(String),
+    /// Go back to the saved configuration.
+    Restore,
+    /// Keep what was saved to disk and stop previewing.
+    Commit,
 }
 
 #[derive(Default)]
@@ -237,6 +252,8 @@ struct Session {
     startup_token: Option<String>,
     /// When the startup shader was turned on and how many prompt marks existed then.
     startup_shader: Option<(Instant, usize)>,
+    /// A config preview change from the startup screen, carried out by the `App`.
+    preview_request: Option<PreviewRequest>,
     /// Configuration problems shown at the top of the window, and until when.
     config_errors: Vec<String>,
     config_errors_until: Option<Instant>,
@@ -388,8 +405,12 @@ impl App {
             scroll_accumulator: 0.0,
             config_errors: Vec::new(),
             config_errors_until: None,
-            startup_token: self.show_startup.then(|| self.startup_token.clone()),
+            startup_token: self
+                .show_startup
+                .then(|| self.startup_token.clone())
+                .or_else(|| std::env::var(DEBUG_STARTUP_TOKEN_ENV).ok().filter(|t| !t.is_empty())),
             startup_shader: None,
+            preview_request: None,
         };
         session.apply_config(config, self.paths.as_ref());
         if let Some(error) = self.config_error.take() {
@@ -416,6 +437,7 @@ impl App {
             term: shell.term.clone(),
             cwd: self.cli.working_directory.clone(),
             env: Vec::new(),
+            remove_env: vec![DEBUG_STARTUP_TOKEN_ENV.into()],
         };
         if options.term == "xterm-tron" {
             match self.paths.as_ref().and_then(|p| terminfo::install(&p.data_dir)) {
@@ -444,6 +466,9 @@ impl App {
                 options.env.push((tron_startup::MARKER_ENV.into(), paths.data_dir.join(cli::STARTUP_MARKER).into()));
             }
             options.env.push((tron_startup::TOKEN_ENV.into(), self.startup_token.clone().into()));
+            if let Some(paths) = &self.paths {
+                options.env.push((tron_startup::CONFIG_DIR_ENV.into(), paths.config_dir.clone().into()));
+            }
             if self.config.startup_animations == Some(false) {
                 options.env.push((tron_startup::ANIMATIONS_ENV.into(), "0".into()));
             }
@@ -457,8 +482,11 @@ impl App {
             Ok(config) => {
                 log::info!("configuration reloaded");
                 self.config = config;
+                // A running preview stays on top of the reloaded file.
+                let previewed =
+                    self.preview.as_deref().and_then(|overlay| Config::with_overlay(Some(paths), overlay).ok());
                 if let Some(session) = &mut self.session {
-                    session.apply_config(&self.config, self.paths.as_ref());
+                    session.apply_config(previewed.as_ref().unwrap_or(&self.config), self.paths.as_ref());
                 }
             }
             Err(error) => {
@@ -466,6 +494,34 @@ impl App {
                 if let Some(session) = &mut self.session {
                     session.show_config_errors(vec![error.to_string()]);
                 }
+            }
+        }
+    }
+}
+
+impl App {
+    /// Carries out a config preview request from the startup screen.
+    fn preview(&mut self, request: PreviewRequest) {
+        match request {
+            PreviewRequest::Show(overlay) => match Config::with_overlay(self.paths.as_ref(), &overlay) {
+                Ok(config) => {
+                    if let Some(session) = &mut self.session {
+                        session.apply_config(&config, self.paths.as_ref());
+                    }
+                    self.preview = Some(overlay);
+                }
+                Err(error) => log::warn!("ignoring startup screen preview: {error}"),
+            },
+            PreviewRequest::Restore => {
+                if self.preview.take().is_some()
+                    && let Some(session) = &mut self.session
+                {
+                    session.apply_config(&self.config, self.paths.as_ref());
+                }
+            }
+            PreviewRequest::Commit => {
+                self.preview = None;
+                self.reload_config();
             }
         }
     }
@@ -520,6 +576,9 @@ impl ApplicationHandler for App {
         session.handle_events(events);
         session.update_pointer_icon(modes);
         session.schedule_redraw(event_loop);
+        if let Some(request) = session.preview_request.take() {
+            self.preview(request);
+        }
     }
 
     fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -528,6 +587,11 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
                 session.redraw(event_loop);
+                if let Some(request) = session.preview_request.take() {
+                    self.preview(request);
+                    return;
+                }
+                let Some(session) = self.session.as_mut() else { return };
                 if session.renderer.is_device_lost() {
                     let config = &self.config;
                     if let Err(error) = session.recreate_renderer(config, self.paths.as_ref()) {
@@ -780,7 +844,25 @@ impl Session {
         }
         let (mut scene, mut params) = self.renderer.startup_params();
         for command in payload.split(',') {
+            match command {
+                "restore" => {
+                    self.preview_request = Some(PreviewRequest::Restore);
+                    continue;
+                }
+                "commit" => {
+                    self.preview_request = Some(PreviewRequest::Commit);
+                    continue;
+                }
+                _ => {}
+            }
             match command.split_once('=') {
+                Some(("preview", encoded)) => {
+                    use base64::Engine;
+                    match base64::engine::general_purpose::STANDARD.decode(encoded).map(String::from_utf8) {
+                        Ok(Ok(toml)) => self.preview_request = Some(PreviewRequest::Show(toml)),
+                        _ => log::debug!("startup screen sent an undecodable preview"),
+                    }
+                }
                 Some(("shader", "on")) => {
                     if self.renderer.set_startup_shader(true) && self.startup_shader.is_none() {
                         let marks = self.shared.term.lock().command_marks().count();
@@ -910,6 +992,7 @@ impl Session {
                 self.startup_shader = None;
                 self.startup_token = None;
                 self.renderer.set_startup_shader(false);
+                self.preview_request = Some(PreviewRequest::Restore);
             }
         }
         let now = Instant::now();

@@ -9,12 +9,20 @@ pub struct Link<W: Write> {
     out: W,
     shader_on: bool,
     last_params: String,
+    /// A preview was sent and not yet restored or committed.
+    previewing: bool,
 }
 
 impl<W: Write> Link<W> {
     /// Without a token (not running inside tron) nothing is sent.
     pub fn new(token: Option<String>, out: W) -> Self {
-        Self { token: token.filter(|t| !t.is_empty()), out, shader_on: false, last_params: String::new() }
+        Self {
+            token: token.filter(|t| !t.is_empty()),
+            out,
+            shader_on: false,
+            last_params: String::new(),
+            previewing: false,
+        }
     }
 
     pub fn shader_on(&mut self, scene: u32) {
@@ -37,6 +45,26 @@ impl<W: Write> Link<W> {
         }
     }
 
+    /// Shows the window with `toml` layered over the saved configuration.
+    pub fn preview(&mut self, toml: &str) {
+        use base64::Engine;
+        self.previewing = true;
+        self.send(&format!("preview={}", base64::engine::general_purpose::STANDARD.encode(toml)));
+    }
+
+    /// Drops the preview and returns to the saved configuration.
+    pub fn restore(&mut self) {
+        if std::mem::take(&mut self.previewing) {
+            self.send("restore");
+        }
+    }
+
+    /// Stops previewing after the configuration was saved.
+    pub fn commit(&mut self) {
+        self.previewing = false;
+        self.send("commit");
+    }
+
     fn send(&mut self, payload: &str) {
         let Some(token) = &self.token else { return };
         let _ = write!(self.out, "\x1b]7777;{token};{payload}\x07");
@@ -46,6 +74,7 @@ impl<W: Write> Link<W> {
 
 impl<W: Write> Drop for Link<W> {
     fn drop(&mut self) {
+        self.restore();
         self.shader_off();
     }
 }
@@ -67,6 +96,15 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "\x1b]7777;t0k;shader=on,scene=1\x07\x1b]7777;t0k;params=1.000:0.500:0.000:0.250\x07\
              \x1b]7777;t0k;params=0:0:0:0,shader=off\x07"
+        );
+        let mut out = Vec::new();
+        {
+            let mut link = Link::new(Some("t".into()), &mut out);
+            link.preview("theme = \"nord\"");
+        }
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b]7777;t;preview=dGhlbWUgPSAibm9yZCI=\x07\x1b]7777;t;restore\x07"
         );
         let mut silent = Vec::new();
         Link::new(None, &mut silent).shader_on(1);

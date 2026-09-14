@@ -16,6 +16,7 @@ tron-render.workspace = true
 tron-config.workspace = true
 tron-startup.workspace = true
 clap.workspace = true
+base64.workspace = true
 clap_complete.workspace = true
 winit.workspace = true
 pollster.workspace = true
