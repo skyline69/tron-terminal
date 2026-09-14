@@ -1,0 +1,10 @@
+# Urple.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#877a9b"
+background = "#1b1b23"
+cursor = "#a063eb"
+cursor_text = "#1b1b22"
+selection_background = "#a063eb"
+selection_foreground = "#1b1b22"
+normal = ["#000000", "#b0425b", "#37a415", "#ad5c42", "#564d9b", "#6c3ca1", "#808080", "#87799c"]
+bright = ["#6a3f32", "#ff6388", "#29e620", "#f08161", "#867aed", "#a05eee", "#eaeaea", "#bfa3ff"]

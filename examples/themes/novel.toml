@@ -1,0 +1,10 @@
+# Novel.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#3b2322"
+background = "#dfdbc3"
+cursor = "#73635a"
+cursor_text = "#000000"
+selection_background = "#a4a390"
+selection_foreground = "#000000"
+normal = ["#000000", "#cc0000", "#009600", "#d06b00", "#0000cc", "#cc00cc", "#0087cc", "#a6a6a6"]
+bright = ["#808080", "#cc0000", "#009600", "#d06b00", "#0000cc", "#cc00cc", "#0087cc", "#ffffff"]

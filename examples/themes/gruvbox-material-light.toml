@@ -1,0 +1,10 @@
+# Gruvbox Material Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#654735"
+background = "#fbf1c7"
+cursor = "#654735"
+cursor_text = "#fbf1c7"
+selection_background = "#654735"
+selection_foreground = "#fbf1c7"
+normal = ["#fbf1c7", "#c14a4a", "#6c782e", "#b47109", "#45707a", "#945e80", "#4c7a5d", "#654735"]
+bright = ["#a89984", "#c14a4a", "#6c782e", "#b47109", "#45707a", "#945e80", "#4c7a5d", "#4f3829"]

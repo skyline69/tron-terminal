@@ -1,0 +1,10 @@
+# IR Black.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#f1f1f1"
+background = "#000000"
+cursor = "#808080"
+cursor_text = "#ffffff"
+selection_background = "#b5d5ff"
+selection_foreground = "#000000"
+normal = ["#4f4f4f", "#fa6c60", "#a8ff60", "#fffeb7", "#96cafe", "#fa73fd", "#c6c5fe", "#efedef"]
+bright = ["#7b7b7b", "#fcb6b0", "#cfffab", "#ffffcc", "#b5dcff", "#fb9cfe", "#e0e0fe", "#ffffff"]

@@ -1,0 +1,10 @@
+# TokyoNight Moon.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c8d3f5"
+background = "#222436"
+cursor = "#c8d3f5"
+cursor_text = "#222436"
+selection_background = "#2d3f76"
+selection_foreground = "#c8d3f5"
+normal = ["#1b1d2b", "#ff757f", "#c3e88d", "#ffc777", "#82aaff", "#c099ff", "#86e1fc", "#828bb8"]
+bright = ["#444a73", "#ff757f", "#c3e88d", "#ffc777", "#82aaff", "#c099ff", "#86e1fc", "#c8d3f5"]

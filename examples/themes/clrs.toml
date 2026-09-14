@@ -1,0 +1,10 @@
+# CLRS.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#262626"
+background = "#ffffff"
+cursor = "#62c6ef"
+cursor_text = "#ffffff"
+selection_background = "#6fd3fc"
+selection_foreground = "#041730"
+normal = ["#000000", "#f8282a", "#328a5d", "#fa701d", "#135cd0", "#9f00bd", "#33c3c1", "#b3b3b3"]
+bright = ["#555753", "#fb0416", "#2cc631", "#e3bd0e", "#1670ff", "#e900b0", "#3ad5ce", "#eeeeec"]

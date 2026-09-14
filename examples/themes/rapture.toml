@@ -1,0 +1,10 @@
+# Rapture.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c0c9e5"
+background = "#111e2a"
+cursor = "#ffffff"
+cursor_text = "#111e2a"
+selection_background = "#304b66"
+selection_foreground = "#ffffff"
+normal = ["#000000", "#fc644d", "#7afde1", "#fff09b", "#6c9bf5", "#ff4fa1", "#64e0ff", "#c0c9e5"]
+bright = ["#304b66", "#fc644d", "#7afde1", "#fff09b", "#6c9bf5", "#ff4fa1", "#64e0ff", "#ffffff"]

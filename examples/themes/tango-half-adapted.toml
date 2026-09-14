@@ -1,0 +1,10 @@
+# Tango Half Adapted.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#000000"
+background = "#ffffff"
+cursor = "#000000"
+cursor_text = "#ffffff"
+selection_background = "#c1deff"
+selection_foreground = "#000000"
+normal = ["#000000", "#ff0000", "#4cc300", "#e2c000", "#008ef6", "#a96cb3", "#00bdc3", "#babfb5"]
+bright = ["#797d76", "#ff0013", "#70dc00", "#d9c600", "#76bfff", "#d898d1", "#00d0d4", "#f4f4f2"]

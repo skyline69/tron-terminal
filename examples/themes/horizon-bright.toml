@@ -1,0 +1,10 @@
+# Horizon Bright.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#16161d"
+background = "#fdf0ed"
+cursor = "#d3a89d"
+cursor_text = "#ffe8dc"
+selection_background = "#f9cec3"
+selection_foreground = "#16161d"
+normal = ["#16161d", "#fc4777", "#00ca86", "#f2a682", "#00bedd", "#ff58b1", "#00cdcb", "#bfafac"]
+bright = ["#1a1c24", "#fe5f87", "#00d193", "#e5a688", "#00c9e2", "#ff6cba", "#00c3c2", "#fff2ef"]

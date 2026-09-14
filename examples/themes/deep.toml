@@ -1,0 +1,10 @@
+# Deep.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#cdcdcd"
+background = "#090909"
+cursor = "#d0d0d0"
+cursor_text = "#151515"
+selection_background = "#780002"
+selection_foreground = "#ececec"
+normal = ["#000000", "#d70005", "#1cd915", "#d9bd26", "#5665ff", "#b052da", "#50d2da", "#e0e0e0"]
+bright = ["#535353", "#fb0007", "#22ff18", "#fedc2b", "#9fa9ff", "#e09aff", "#8df9ff", "#ffffff"]

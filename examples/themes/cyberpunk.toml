@@ -1,0 +1,10 @@
+# Cyberpunk.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e5e5e5"
+background = "#332a57"
+cursor = "#21f6bc"
+cursor_text = "#999999"
+selection_background = "#c1deff"
+selection_foreground = "#000000"
+normal = ["#000000", "#ff7092", "#00fbac", "#fffa6a", "#00bfff", "#df95ff", "#86cbfe", "#ffffff"]
+bright = ["#595959", "#ff8aa4", "#21f6bc", "#fff787", "#1bccfd", "#e6aefe", "#99d6fc", "#ffffff"]

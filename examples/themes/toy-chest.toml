@@ -1,0 +1,10 @@
+# Toy Chest.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#31d07b"
+background = "#24364b"
+cursor = "#d5d5d5"
+cursor_text = "#141c25"
+selection_background = "#5f217a"
+selection_foreground = "#d5d5d5"
+normal = ["#2c3f58", "#be2d26", "#1a9172", "#db8e27", "#325d96", "#8a5edc", "#35a08f", "#23d183"]
+bright = ["#336889", "#dd5944", "#31d07b", "#e7d84b", "#34a6da", "#ae6bdc", "#42c3ae", "#d5d5d5"]

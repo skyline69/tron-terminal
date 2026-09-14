@@ -1,0 +1,10 @@
+# Elegant.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ced2d6"
+background = "#292b31"
+cursor = "#00beff"
+cursor_text = "#ffffff"
+selection_background = "#d5d5d5"
+selection_foreground = "#144385"
+normal = ["#0a1222", "#ff0257", "#85cc95", "#ffcb8b", "#8dabe1", "#c792eb", "#78ccf0", "#ffffff"]
+bright = ["#575656", "#ff0057", "#85cc95", "#ffcb8b", "#8dabe1", "#c792eb", "#3facef", "#ffffff"]

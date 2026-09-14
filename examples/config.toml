@@ -1,6 +1,7 @@
 # tron configuration.
 #
-# Copy to ~/.config/tron/config.toml. Every key is optional.
+# Lives in ~/.config/tron/config.toml, written on the first launch. Every key is
+# optional: remove one to get its default.
 # tron watches the config directory and applies changes while running.
 #
 #   ~/.config/tron/config.toml          this file

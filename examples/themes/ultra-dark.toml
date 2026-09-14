@@ -1,0 +1,10 @@
+# Ultra Dark.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#000000"
+cursor = "#fefefe"
+cursor_text = "#000000"
+selection_background = "#222222"
+selection_foreground = "#cccccc"
+normal = ["#000000", "#f07178", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#cccccc"]
+bright = ["#404040", "#f6a9ae", "#dbf1ba", "#ffdfa6", "#b4ccff", "#ddbdf2", "#b8eaff", "#ffffff"]

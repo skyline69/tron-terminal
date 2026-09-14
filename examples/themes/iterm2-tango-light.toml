@@ -1,0 +1,10 @@
+# iTerm2 Tango Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#000000"
+background = "#ffffff"
+cursor = "#000000"
+cursor_text = "#ffffff"
+selection_background = "#c1deff"
+selection_foreground = "#000000"
+normal = ["#000000", "#d81e00", "#5ea702", "#cfae00", "#427ab3", "#89658e", "#00a7aa", "#c1c4be"]
+bright = ["#686a66", "#f54235", "#8cd636", "#d7c53b", "#84b0d8", "#bc94b7", "#1eccce", "#f1f1f0"]

@@ -1,0 +1,10 @@
+# Aura.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#edecee"
+background = "#15141b"
+cursor = "#a277ff"
+cursor_text = "#edecee"
+selection_background = "#a277ff"
+selection_foreground = "#edecee"
+normal = ["#110f18", "#ff6767", "#61ffca", "#ffca85", "#a277ff", "#a277ff", "#61ffca", "#edecee"]
+bright = ["#4d4d4d", "#ffca85", "#a277ff", "#ffca85", "#a277ff", "#a277ff", "#61ffca", "#edecee"]

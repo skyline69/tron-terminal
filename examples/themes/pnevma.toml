@@ -1,0 +1,10 @@
+# Pnevma.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#d0d0d0"
+background = "#1c1c1c"
+cursor = "#e4c9af"
+cursor_text = "#000000"
+selection_background = "#4d4d4d"
+selection_foreground = "#ffffff"
+normal = ["#2f2e2d", "#a36666", "#90a57d", "#d7af87", "#7fa5bd", "#c79ec4", "#8adbb4", "#d0d0d0"]
+bright = ["#4a4845", "#d78787", "#afbea2", "#e4c9af", "#a1bdce", "#d7beda", "#b1e7dd", "#efefef"]

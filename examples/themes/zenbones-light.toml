@@ -1,0 +1,10 @@
+# Zenbones Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#2c363c"
+background = "#f0edec"
+cursor = "#2c363c"
+cursor_text = "#f0edec"
+selection_background = "#cbd9e3"
+selection_foreground = "#2c363c"
+normal = ["#f0edec", "#a8334c", "#4f6c31", "#944927", "#286486", "#88507d", "#3b8992", "#2c363c"]
+bright = ["#b5a7a0", "#94253e", "#3f5a22", "#803d1c", "#1d5573", "#7b3b70", "#2b747c", "#4f5e68"]

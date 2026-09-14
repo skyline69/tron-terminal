@@ -1,0 +1,10 @@
+# Treehouse.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#786b53"
+background = "#191919"
+cursor = "#fac814"
+cursor_text = "#191919"
+selection_background = "#786b53"
+selection_foreground = "#fac800"
+normal = ["#321300", "#b2270e", "#44a900", "#aa820c", "#58859a", "#97363d", "#b25a1e", "#786b53"]
+bright = ["#504333", "#ed5d20", "#55f238", "#f2b732", "#85cfed", "#e14c5a", "#f07d14", "#ffc800"]

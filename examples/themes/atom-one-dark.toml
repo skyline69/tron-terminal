@@ -1,0 +1,10 @@
+# Atom One Dark.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#abb2bf"
+background = "#21252b"
+cursor = "#abb2bf"
+cursor_text = "#21252b"
+selection_background = "#323844"
+selection_foreground = "#abb2bf"
+normal = ["#21252b", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf"]
+bright = ["#767676", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf"]

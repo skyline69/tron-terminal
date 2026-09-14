@@ -1,0 +1,10 @@
+# Fun Forrest.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#dec165"
+background = "#251200"
+cursor = "#e5591c"
+cursor_text = "#000000"
+selection_background = "#e5591c"
+selection_foreground = "#000000"
+normal = ["#000000", "#d6262b", "#919c00", "#be8a13", "#4699a3", "#8d4331", "#da8213", "#ddc265"]
+bright = ["#7f6a55", "#e55a1c", "#bfc65a", "#ffcb1b", "#7cc9cf", "#d26349", "#e6a96b", "#ffeaa3"]

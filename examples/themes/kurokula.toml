@@ -1,0 +1,10 @@
+# Kurokula.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e0cfc2"
+background = "#141515"
+cursor = "#7a1c1c"
+cursor_text = "#fffbf2"
+selection_background = "#515151"
+selection_foreground = "#ffc34c"
+normal = ["#333333", "#c35a52", "#78b3a9", "#e1b917", "#5c91dd", "#8b79a6", "#867268", "#e0cfc2"]
+bright = ["#515151", "#ffc34c", "#afffa5", "#fff700", "#90dbff", "#ad93ff", "#ffcdb6", "#ffffff"]

@@ -1,0 +1,10 @@
+# Kitty Low Contrast.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#333333"
+cursor = "#cccccc"
+cursor_text = "#111111"
+selection_background = "#fffacd"
+selection_foreground = "#000000"
+normal = ["#000000", "#cc0403", "#19cb00", "#cecb00", "#0d73cc", "#cb1ed1", "#0dcdcd", "#dddddd"]
+bright = ["#767676", "#f2201f", "#23fd00", "#fffd00", "#1a8fff", "#fd28ff", "#14ffff", "#ffffff"]

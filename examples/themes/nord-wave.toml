@@ -1,0 +1,10 @@
+# Nord Wave.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#d8dee9"
+background = "#212121"
+cursor = "#ebcb8b"
+cursor_text = "#b89858"
+selection_background = "#d8dee9"
+selection_foreground = "#212121"
+normal = ["#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0"]
+bright = ["#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4"]

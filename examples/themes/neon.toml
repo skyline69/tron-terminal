@@ -1,0 +1,10 @@
+# Neon.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#00fffc"
+background = "#14161a"
+cursor = "#c7c7c7"
+cursor_text = "#8c8c8c"
+selection_background = "#0013ff"
+selection_foreground = "#08d2cf"
+normal = ["#000000", "#ff3045", "#5ffa74", "#fffc7e", "#0f15d8", "#f924e7", "#00fffc", "#c7c7c7"]
+bright = ["#686868", "#ff5a5a", "#75ff88", "#fffd96", "#3c40cb", "#f15be5", "#88fffe", "#ffffff"]

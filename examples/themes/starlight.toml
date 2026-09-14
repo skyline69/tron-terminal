@@ -1,0 +1,10 @@
+# Starlight.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#242424"
+cursor = "#ffffff"
+cursor_text = "#242424"
+selection_background = "#ffffff"
+selection_foreground = "#242424"
+normal = ["#242424", "#f62b5a", "#47b413", "#e3c401", "#24acd4", "#f2affd", "#13c299", "#e6e6e6"]
+bright = ["#616161", "#ff4d51", "#35d450", "#e9e836", "#5dc5f8", "#feabf2", "#24dfc4", "#ffffff"]

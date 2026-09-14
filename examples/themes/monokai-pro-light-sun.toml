@@ -1,0 +1,10 @@
+# Monokai Pro Light Sun.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#2c232e"
+background = "#f8efe7"
+cursor = "#72696d"
+cursor_text = "#a59ca0"
+selection_background = "#beb5b3"
+selection_foreground = "#2c232e"
+normal = ["#f8efe7", "#ce4770", "#218871", "#b16803", "#d4572b", "#6851a2", "#2473b6", "#2c232e"]
+bright = ["#a59c9c", "#ce4770", "#218871", "#b16803", "#d4572b", "#6851a2", "#2473b6", "#2c232e"]

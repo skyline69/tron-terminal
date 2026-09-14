@@ -1,0 +1,10 @@
+# Fahrenheit.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffce"
+background = "#000000"
+cursor = "#bbbbbb"
+cursor_text = "#ffffff"
+selection_background = "#4e739f"
+selection_foreground = "#ffffce"
+normal = ["#1d1d1d", "#cda074", "#9e744d", "#fecf75", "#7f0e0f", "#734c4d", "#979797", "#ffffce"]
+bright = ["#404040", "#fecea0", "#cc734d", "#fd9f4d", "#cb4a05", "#4e739f", "#fed04d", "#ffffff"]

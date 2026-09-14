@@ -1,0 +1,10 @@
+# Selenized Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#53676d"
+background = "#fbf3db"
+cursor = "#53676d"
+cursor_text = "#fbf3db"
+selection_background = "#ece3cc"
+selection_foreground = "#00978a"
+normal = ["#ece3cc", "#d2212d", "#489100", "#ad8900", "#0072d4", "#ca4898", "#009c8f", "#53676d"]
+bright = ["#909995", "#cc1729", "#428b00", "#a78300", "#006dce", "#c44392", "#00978a", "#3a4d53"]

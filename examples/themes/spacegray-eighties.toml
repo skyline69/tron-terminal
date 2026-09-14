@@ -1,0 +1,10 @@
+# Spacegray Eighties.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#bdbaae"
+background = "#222222"
+cursor = "#bbbbbb"
+cursor_text = "#ffffff"
+selection_background = "#272e35"
+selection_foreground = "#ffffff"
+normal = ["#15171c", "#ec5f67", "#81a764", "#fec254", "#5486c0", "#bf83c1", "#57c2c1", "#efece7"]
+bright = ["#555555", "#ff6973", "#93d493", "#ffd256", "#4d84d1", "#ff55ff", "#83e9e4", "#ffffff"]

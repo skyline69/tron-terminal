@@ -1,0 +1,10 @@
+# Dayfox.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#3d2b5a"
+background = "#f6f2ee"
+cursor = "#3d2b5a"
+cursor_text = "#f6f2ee"
+selection_background = "#e7d2be"
+selection_foreground = "#3d2b5a"
+normal = ["#352c24", "#a5222f", "#396847", "#ac5402", "#2848a9", "#6e33ce", "#287980", "#bfb6ae"]
+bright = ["#534c45", "#b3434e", "#577f63", "#b86e28", "#4863b6", "#8452d5", "#488d93", "#f4ece6"]

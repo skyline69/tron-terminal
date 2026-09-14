@@ -1,0 +1,10 @@
+# Monokai Pro Octagon.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#eaf2f1"
+background = "#282a3a"
+cursor = "#b2b9bd"
+cursor_text = "#f2f9fd"
+selection_background = "#535763"
+selection_foreground = "#eaf2f1"
+normal = ["#282a3a", "#ff657a", "#bad761", "#ffd76d", "#ff9b5e", "#c39ac9", "#9cd1bb", "#eaf2f1"]
+bright = ["#696d77", "#ff657a", "#bad761", "#ffd76d", "#ff9b5e", "#c39ac9", "#9cd1bb", "#eaf2f1"]

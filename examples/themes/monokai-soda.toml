@@ -1,0 +1,10 @@
+# Monokai Soda.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c4c5b5"
+background = "#1a1a1a"
+cursor = "#f6f7ec"
+cursor_text = "#b7b8a8"
+selection_background = "#343434"
+selection_foreground = "#c4c5b5"
+normal = ["#1a1a1a", "#f4005f", "#98e024", "#fa8419", "#9d65ff", "#f4005f", "#58d1eb", "#c4c5b5"]
+bright = ["#625e4c", "#f4005f", "#98e024", "#e0d561", "#9d65ff", "#f4005f", "#58d1eb", "#f6f6ef"]

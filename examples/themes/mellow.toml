@@ -1,0 +1,10 @@
+# Mellow.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c9c7cd"
+background = "#161617"
+cursor = "#cac9dd"
+cursor_text = "#161617"
+selection_background = "#2a2a2d"
+selection_foreground = "#c1c0d4"
+normal = ["#27272a", "#f5a191", "#90b99f", "#e6b99d", "#aca1cf", "#e29eca", "#ea83a5", "#c1c0d4"]
+bright = ["#424246", "#ffae9f", "#9dc6ac", "#f0c5a9", "#b9aeda", "#ecaad6", "#f591b2", "#cac9dd"]

@@ -1,0 +1,10 @@
+# Liquid Carbon Transparent.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#afc2c2"
+background = "#000000"
+cursor = "#ffffff"
+cursor_text = "#000000"
+selection_background = "#7dbeff"
+selection_foreground = "#000000"
+normal = ["#000000", "#ff3030", "#559a70", "#ccac00", "#0099cc", "#cc69c8", "#7ac4cc", "#bccccc"]
+bright = ["#404040", "#ff3030", "#559a70", "#ccac00", "#0099cc", "#cc69c8", "#7ac4cc", "#bccccc"]

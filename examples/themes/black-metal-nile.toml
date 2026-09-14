@@ -1,0 +1,10 @@
+# Black Metal (Nile).
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c1c1c1"
+background = "#000000"
+cursor = "#c1c1c1"
+cursor_text = "#8e8e8e"
+selection_background = "#c1c1c1"
+selection_foreground = "#000000"
+normal = ["#000000", "#5f8787", "#aa9988", "#777755", "#888888", "#999999", "#aaaaaa", "#c1c1c1"]
+bright = ["#404040", "#5f8787", "#aa9988", "#777755", "#888888", "#999999", "#aaaaaa", "#c1c1c1"]

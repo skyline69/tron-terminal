@@ -1,0 +1,10 @@
+# Mirage.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#a6b2c0"
+background = "#1b2738"
+cursor = "#ddb3ff"
+cursor_text = "#ffffff"
+selection_background = "#273951"
+selection_foreground = "#d3dbe5"
+normal = ["#011627", "#ff9999", "#85cc95", "#ffd700", "#7fb5ff", "#ddb3ff", "#21c7a8", "#ffffff"]
+bright = ["#575656", "#ff9999", "#85cc95", "#ffd700", "#7fb5ff", "#ddb3ff", "#85cc95", "#ffffff"]

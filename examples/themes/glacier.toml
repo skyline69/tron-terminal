@@ -1,0 +1,10 @@
+# Glacier.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#0c1115"
+cursor = "#6c6c6c"
+cursor_text = "#9f9f9f"
+selection_background = "#bd2523"
+selection_foreground = "#ffffff"
+normal = ["#2e343c", "#bd0f2f", "#35a770", "#fb9435", "#1f5872", "#bd2523", "#778397", "#ffffff"]
+bright = ["#404a55", "#bd0f2f", "#49e998", "#fddf6e", "#2a8bc1", "#ea4727", "#a0b6d3", "#ffffff"]

@@ -1,0 +1,10 @@
+# Modus Operandi Tinted.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#000000"
+background = "#fbf7f0"
+cursor = "#d00000"
+cursor_text = "#fbf7f0"
+selection_background = "#c2bcb5"
+selection_foreground = "#000000"
+normal = ["#000000", "#a60000", "#006800", "#6f5500", "#0031a9", "#721045", "#005e8b", "#a6a6a6"]
+bright = ["#595959", "#972500", "#00663f", "#884900", "#3548cf", "#531ab6", "#005f5f", "#595959"]

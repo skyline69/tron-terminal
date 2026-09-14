@@ -1,0 +1,10 @@
+# Rouge 2.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#a2a3aa"
+background = "#17182b"
+cursor = "#969e92"
+cursor_text = "#ffffff"
+selection_background = "#5d5d6b"
+selection_foreground = "#dfe5ee"
+normal = ["#5d5d6b", "#c6797e", "#969e92", "#dbcdab", "#6e94b9", "#4c4e78", "#8ab6c1", "#e8e8ea"]
+bright = ["#616274", "#c6797e", "#e6dcc4", "#e6dcc4", "#98b3cd", "#8283a1", "#abcbd3", "#e8e8ea"]

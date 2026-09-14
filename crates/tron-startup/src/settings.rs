@@ -326,6 +326,15 @@ fn insert_path(table: &mut toml::Table, key: &str, value: toml::Value) {
 
 /// Sets or, with `None`, removes a dotted key, creating tables on the way.
 fn set_path(document: &mut toml_edit::DocumentMut, key: &str, item: Option<toml_edit::Item>) {
+    if !key.contains('.') {
+        match item {
+            Some(item) => insert_top_level(document, key, item),
+            None => {
+                document.as_table_mut().remove(key);
+            }
+        }
+        return;
+    }
     let mut parts: Vec<&str> = key.split('.').collect();
     let Some(last) = parts.pop() else { return };
     let mut table: &mut dyn toml_edit::TableLike = document.as_table_mut();
@@ -348,6 +357,32 @@ fn set_path(document: &mut toml_edit::DocumentMut, key: &str, item: Option<toml_
         None => {
             table.remove(last);
         }
+    }
+}
+
+/// Inserts a top-level value. The first one in a file that has only tables would be
+/// written above the file's leading comments, which belong to its first table. It
+/// takes those comments over instead, so it sits below them, next to its commented example.
+fn insert_top_level(document: &mut toml_edit::DocumentMut, key: &str, item: toml_edit::Item) {
+    let root = document.as_table_mut();
+    let first_value = !root.iter().any(|(_, item)| item.is_value());
+    root.insert(key, item);
+    if !first_value {
+        return;
+    }
+    let first_table =
+        root.iter().filter_map(|(name, item)| Some((item.as_table()?.position()?, name.to_owned()))).min();
+    let Some((_, name)) = first_table else { return };
+    let Some(table) = root.get_mut(&name).and_then(toml_edit::Item::as_table_mut) else { return };
+    let Some(prefix) = table.decor().prefix().and_then(|prefix| prefix.as_str()).map(|prefix| {
+        // No blank line between the comments and the value.
+        format!("{}\n", prefix.trim_end_matches('\n'))
+    }) else {
+        return;
+    };
+    table.decor_mut().set_prefix("\n");
+    if let Some(mut key) = root.key_mut(key) {
+        key.leaf_decor_mut().set_prefix(prefix);
     }
 }
 
@@ -392,6 +427,26 @@ mod tests {
         assert_eq!((config.theme.as_deref(), config.font.size), (Some("nord"), 16.5));
         assert_eq!(config.shader.files, ["crt.wgsl"]);
         assert_eq!(config.startup, None, "startup is not previewed");
+    }
+
+    #[test]
+    fn saving_into_the_example_config_keeps_its_header_and_comments() {
+        let paths = temp_paths("example");
+        assert!(paths.create_config().unwrap());
+        assert!(!paths.create_config().unwrap(), "an existing file stays");
+        let config = Config::load(&paths).unwrap();
+        let saved = Choices::from_config(&config);
+        let mut choices = saved.clone();
+        choices.theme = "nord".into();
+        choices.shaders = vec!["crt.wgsl".into(), "bloom.wgsl".into()];
+        choices.settings.insert("font.size", toml::Value::Float(14.0));
+        choices.save(&saved, &paths).unwrap();
+        let text = std::fs::read_to_string(&paths.config_file).unwrap();
+        assert!(text.starts_with("# tron configuration."), "{text}");
+        assert!(text.contains("# theme = \"tron-light\"\ntheme = \"nord\"\n\n[font]"), "{text}");
+        assert!(text.contains("# Theme from themes/<name>.toml"), "{text}");
+        let written = Config::load(&paths).unwrap();
+        assert_eq!(Choices::from_config(&written), choices);
     }
 
     #[test]

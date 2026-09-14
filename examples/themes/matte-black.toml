@@ -1,0 +1,10 @@
+# Matte Black.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#bebebe"
+background = "#121212"
+cursor = "#eaeaea"
+cursor_text = "#121212"
+selection_background = "#333333"
+selection_foreground = "#eaeaea"
+normal = ["#333333", "#d35f5f", "#ffc107", "#b91c1c", "#e68e0d", "#d35f5f", "#bebebe", "#bebebe"]
+bright = ["#8a8a8d", "#891c1c", "#ffc107", "#b90a0a", "#f59e0b", "#b91c1c", "#eaeaea", "#ffffff"]

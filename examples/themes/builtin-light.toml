@@ -1,0 +1,10 @@
+# Builtin Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#000000"
+background = "#ffffff"
+cursor = "#000000"
+cursor_text = "#ffffff"
+selection_background = "#b5d5ff"
+selection_foreground = "#000000"
+normal = ["#000000", "#bb0000", "#00bb00", "#bbbb00", "#0000bb", "#bb00bb", "#00bbbb", "#bbbbbb"]
+bright = ["#555555", "#ff5555", "#2fd92f", "#bfbf15", "#5555ff", "#ff55ff", "#22cccc", "#ffffff"]

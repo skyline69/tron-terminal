@@ -1,0 +1,10 @@
+# Selenized Black.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#b9b9b9"
+background = "#181818"
+cursor = "#777777"
+cursor_text = "#181818"
+selection_background = "#3b3b3b"
+selection_foreground = "#646464"
+normal = ["#252525", "#ed4a46", "#70b433", "#dbb32d", "#368aeb", "#eb6eb7", "#3fc5b7", "#b9b9b9"]
+bright = ["#777777", "#ff5e56", "#83c746", "#efc541", "#4f9cfe", "#ff81ca", "#56d8c9", "#dedede"]

@@ -34,6 +34,45 @@ impl WindowSize {
     }
 }
 
+/// Variables set by terminal multiplexers and other terminals, removed from the
+/// child's environment.
+const INHERITED_TERMINAL_ENV: [&str; 34] = [
+    "TMUX",
+    "TMUX_PANE",
+    "STY",
+    "ZELLIJ",
+    "ZELLIJ_SESSION_NAME",
+    "ZELLIJ_PANE_ID",
+    "ZELLIJ_VERSION",
+    "KITTY_PID",
+    "KITTY_PUBLIC_KEY",
+    "KITTY_INSTALLATION_DIR",
+    "KITTY_LISTEN_ON",
+    "WEZTERM_EXECUTABLE",
+    "WEZTERM_EXECUTABLE_DIR",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "WEZTERM_VERSION",
+    "GHOSTTY_RESOURCES_DIR",
+    "GHOSTTY_BIN_DIR",
+    "GHOSTTY_SHELL_FEATURES",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "TERM_SESSION_ID",
+    "VTE_VERSION",
+    "KONSOLE_VERSION",
+    "KONSOLE_DBUS_SESSION",
+    "KONSOLE_DBUS_SERVICE",
+    "KONSOLE_DBUS_WINDOW",
+    "ALACRITTY_SOCKET",
+    "ALACRITTY_LOG",
+    "ALACRITTY_WINDOW_ID",
+    "WT_SESSION",
+    "GNOME_TERMINAL_SCREEN",
+    "GNOME_TERMINAL_SERVICE",
+    "WINDOWID",
+];
+
 /// What to run inside the terminal.
 #[derive(Clone, Debug, Default)]
 pub struct SpawnOptions {
@@ -90,6 +129,14 @@ impl Pty {
             .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
             .env_remove("DESKTOP_STARTUP_ID")
             .env_remove("XDG_ACTIVATION_TOKEN");
+        // tron runs outside whatever tron itself was started from: programs must
+        // not think they are inside tmux (Codex turns pets off there) or another terminal.
+        for key in INHERITED_TERMINAL_ENV {
+            command.env_remove(key);
+        }
+        // Programs that look for kitty before using the kitty graphics protocol,
+        // like Codex pets and image viewers, find it. tron speaks the protocol.
+        command.env("KITTY_WINDOW_ID", "1");
         for key in &options.remove_env {
             command.env_remove(key);
         }

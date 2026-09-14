@@ -1,0 +1,10 @@
+# Framer.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#777777"
+background = "#111111"
+cursor = "#fcdc08"
+cursor_text = "#161616"
+selection_background = "#666666"
+selection_foreground = "#ffffff"
+normal = ["#141414", "#ff5555", "#98ec65", "#ffcc33", "#00aaff", "#aa88ff", "#88ddff", "#cccccc"]
+bright = ["#414141", "#ff8888", "#b6f292", "#ffd966", "#33bbff", "#cebbff", "#bbecff", "#ffffff"]

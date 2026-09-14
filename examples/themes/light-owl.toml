@@ -1,0 +1,10 @@
+# Light Owl.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#403f53"
+background = "#fbfbfb"
+cursor = "#403f53"
+cursor_text = "#f6f6f6"
+selection_background = "#e0e0e0"
+selection_foreground = "#403f53"
+normal = ["#403f53", "#de3d3b", "#08916a", "#e0af02", "#288ed7", "#d6438a", "#2aa298", "#bdbdbd"]
+bright = ["#989fb1", "#de3d3b", "#08916a", "#daaa01", "#288ed7", "#d6438a", "#2aa298", "#f0f0f0"]

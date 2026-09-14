@@ -1,0 +1,10 @@
+# Catppuccin Latte.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#4c4f69"
+background = "#eff1f5"
+cursor = "#dc8a78"
+cursor_text = "#eff1f5"
+selection_background = "#dc8a78"
+selection_foreground = "#eff1f5"
+normal = ["#bcc0cc", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#5c5f77"]
+bright = ["#acb0be", "#e7103f", "#46b02f", "#e49931", "#3878f6", "#ef95d7", "#19a1a8", "#6c6f85"]

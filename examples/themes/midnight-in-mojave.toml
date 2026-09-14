@@ -1,0 +1,10 @@
+# Midnight In Mojave.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#1e1e1e"
+cursor = "#32d74b"
+cursor_text = "#1c1c1c"
+selection_background = "#4a504d"
+selection_foreground = "#ffffff"
+normal = ["#1e1e1e", "#ff453a", "#32d74b", "#ffd60a", "#0a84ff", "#bf5af2", "#5ac8fa", "#ffffff"]
+bright = ["#515151", "#ff453a", "#32d74b", "#ffd60a", "#0a84ff", "#bf5af2", "#5ac8fa", "#ffffff"]

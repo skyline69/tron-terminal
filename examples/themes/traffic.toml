@@ -1,0 +1,10 @@
+# traffic.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#cfb9a8"
+background = "#272c30"
+cursor = "#cfb9a8"
+cursor_text = "#272c30"
+selection_background = "#cfb9a8"
+selection_foreground = "#272c30"
+normal = ["#282d31", "#934e46", "#637268", "#c79e84", "#515e67", "#715f5e", "#5c6f7d", "#cfb9a8"]
+bright = ["#4e575e", "#934e46", "#637270", "#c79e84", "#515e67", "#715f5e", "#5c6f7d", "#ddcec2"]

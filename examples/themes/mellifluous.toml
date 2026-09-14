@@ -1,0 +1,10 @@
+# Mellifluous.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#dadada"
+background = "#1a1a1a"
+cursor = "#bfad9e"
+cursor_text = "#1a1a1a"
+selection_background = "#2d2d2d"
+selection_foreground = "#c0af8c"
+normal = ["#1a1a1a", "#d29393", "#b3b393", "#cbaa89", "#a8a1be", "#b39fb0", "#c0af8c", "#dadada"]
+bright = ["#5b5b5b", "#c95954", "#828040", "#a6794c", "#5a6599", "#9c6995", "#74a39e", "#ffffff"]

@@ -1,0 +1,10 @@
+# Violet Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#536870"
+background = "#fcf4dc"
+cursor = "#536870"
+cursor_text = "#fcf4dc"
+selection_background = "#595ab7"
+selection_foreground = "#fcf4dc"
+normal = ["#56595c", "#c94c22", "#85981c", "#b4881d", "#2e8bce", "#d13a82", "#32a198", "#b9b6af"]
+bright = ["#45484b", "#bd3613", "#738a04", "#a57705", "#2176c7", "#c61c6f", "#259286", "#c9c6bd"]

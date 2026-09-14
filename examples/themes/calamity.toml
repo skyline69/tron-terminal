@@ -1,0 +1,10 @@
+# Calamity.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#d5ced9"
+background = "#2f2833"
+cursor = "#d5ced9"
+cursor_text = "#2f2833"
+selection_background = "#7e6c88"
+selection_foreground = "#d5ced9"
+normal = ["#2f2833", "#fc644d", "#a5f69c", "#e9d7a5", "#3b79c7", "#f92672", "#74d3de", "#d5ced9"]
+bright = ["#7e6c88", "#fc644d", "#a5f69c", "#e9d7a5", "#3b79c7", "#f92672", "#74d3de", "#ffffff"]

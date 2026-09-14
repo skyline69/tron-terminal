@@ -1,0 +1,10 @@
+# Idle Toes.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#323232"
+cursor = "#d6d6d6"
+cursor_text = "#000000"
+selection_background = "#5b5b5b"
+selection_foreground = "#000000"
+normal = ["#323232", "#d25252", "#7fe173", "#ffc66d", "#4099ff", "#f680ff", "#bed6ff", "#eeeeec"]
+bright = ["#606060", "#f07070", "#9dff91", "#ffe48b", "#5eb7f7", "#ff9dff", "#dcf4ff", "#ffffff"]

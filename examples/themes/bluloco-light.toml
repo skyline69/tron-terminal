@@ -1,0 +1,10 @@
+# Bluloco Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#373a41"
+background = "#f9f9f9"
+cursor = "#f32759"
+cursor_text = "#ffffff"
+selection_background = "#daf0ff"
+selection_foreground = "#373a41"
+normal = ["#373a41", "#d52753", "#23974a", "#df631c", "#275fe4", "#823ff1", "#27618d", "#babbc2"]
+bright = ["#676a77", "#ff6480", "#3cbc66", "#c5a332", "#0099e1", "#ce33c0", "#6d93bb", "#d3d3d3"]

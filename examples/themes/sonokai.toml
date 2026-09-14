@@ -1,0 +1,10 @@
+# Sonokai.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e2e2e3"
+background = "#2c2e34"
+cursor = "#e2e2e3"
+cursor_text = "#2c2e34"
+selection_background = "#414550"
+selection_foreground = "#e2e2e3"
+normal = ["#181819", "#fc5d7c", "#9ed072", "#e7c664", "#76cce0", "#b39df3", "#f39660", "#e2e2e3"]
+bright = ["#7f8490", "#fc5d7c", "#9ed072", "#e7c664", "#76cce0", "#b39df3", "#f39660", "#e2e2e3"]

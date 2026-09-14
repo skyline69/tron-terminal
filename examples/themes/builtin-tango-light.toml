@@ -1,0 +1,10 @@
+# Builtin Tango Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#000000"
+background = "#ffffff"
+cursor = "#000000"
+cursor_text = "#ffffff"
+selection_background = "#b5d5ff"
+selection_foreground = "#000000"
+normal = ["#000000", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b", "#06989a", "#b9bdb5"]
+bright = ["#555753", "#ef2929", "#7dd527", "#d6c329", "#729fcf", "#ad7fa8", "#27d5d5", "#eeeeec"]

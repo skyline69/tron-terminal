@@ -1,0 +1,10 @@
+# Whimsy.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#b3b0d6"
+background = "#29283b"
+cursor = "#b3b0d6"
+cursor_text = "#535178"
+selection_background = "#3d3c58"
+selection_foreground = "#ffffff"
+normal = ["#535178", "#ef6487", "#5eca89", "#fdd877", "#65aef7", "#aa7ff0", "#43c1be", "#ffffff"]
+bright = ["#535178", "#ef6487", "#5eca89", "#fdd877", "#65aef7", "#aa7ff0", "#43c1be", "#ffffff"]

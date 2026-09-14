@@ -1,0 +1,10 @@
+# Subliminal.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#d4d4d4"
+background = "#282c35"
+cursor = "#c7c7c7"
+cursor_text = "#8c8c8c"
+selection_background = "#484e5b"
+selection_foreground = "#ffffff"
+normal = ["#7f7f7f", "#e15a60", "#a9cfa4", "#ffe2a9", "#6699cc", "#f1a5ab", "#5fb3b3", "#d4d4d4"]
+bright = ["#7f7f7f", "#e15a60", "#a9cfa4", "#ffe2a9", "#6699cc", "#f1a5ab", "#5fb3b3", "#d4d4d4"]

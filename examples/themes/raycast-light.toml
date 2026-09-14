@@ -1,0 +1,10 @@
+# Raycast Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#000000"
+background = "#ffffff"
+cursor = "#000000"
+cursor_text = "#404040"
+selection_background = "#e5e5e5"
+selection_foreground = "#000000"
+normal = ["#000000", "#b12424", "#006b4f", "#f8a300", "#138af2", "#9a1b6e", "#3eb8bf", "#bfbfbf"]
+bright = ["#000000", "#b12424", "#006b4f", "#f8a300", "#138af2", "#9a1b6e", "#3eb8bf", "#ffffff"]

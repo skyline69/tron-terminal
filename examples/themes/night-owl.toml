@@ -1,0 +1,10 @@
+# Night Owl.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#d6deeb"
+background = "#011627"
+cursor = "#7e57c2"
+cursor_text = "#ffffff"
+selection_background = "#5f7e97"
+selection_foreground = "#dfe5ee"
+normal = ["#011627", "#ef5350", "#22da6e", "#addb67", "#82aaff", "#c792ea", "#21c7a8", "#ffffff"]
+bright = ["#575656", "#ef5350", "#22da6e", "#ffeb95", "#82aaff", "#c792ea", "#7fdbca", "#ffffff"]

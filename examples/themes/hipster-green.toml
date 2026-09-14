@@ -1,0 +1,10 @@
+# Hipster Green.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#84c138"
+background = "#100b05"
+cursor = "#23ff18"
+cursor_text = "#ff0018"
+selection_background = "#083905"
+selection_foreground = "#ffffff"
+normal = ["#000000", "#b6214a", "#00a600", "#bfbf00", "#246eb2", "#b200b2", "#00a6b2", "#bfbfbf"]
+bright = ["#666666", "#e50000", "#86a93e", "#e5e500", "#0000ff", "#e500e5", "#00e5e5", "#e5e5e5"]

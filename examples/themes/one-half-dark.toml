@@ -1,0 +1,10 @@
+# One Half Dark.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#dcdfe4"
+background = "#282c34"
+cursor = "#a3b3cc"
+cursor_text = "#e9ecf1"
+selection_background = "#474e5d"
+selection_foreground = "#dcdfe4"
+normal = ["#282c34", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#dcdfe4"]
+bright = ["#5d677a", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#dcdfe4"]

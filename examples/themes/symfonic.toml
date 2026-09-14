@@ -1,0 +1,10 @@
+# Symfonic.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#000000"
+cursor = "#dc322f"
+cursor_text = "#ffffff"
+selection_background = "#073642"
+selection_foreground = "#ffffff"
+normal = ["#000000", "#dc322f", "#56db3a", "#ff8400", "#0084d4", "#b729d9", "#ccccff", "#ffffff"]
+bright = ["#414347", "#dc322f", "#56db3a", "#ff8400", "#0084d4", "#b729d9", "#ccccff", "#ffffff"]

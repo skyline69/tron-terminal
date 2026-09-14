@@ -1,0 +1,10 @@
+# Kanagawa Wave.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#dcd7ba"
+background = "#1f1f28"
+cursor = "#dcd7ba"
+cursor_text = "#1f1f28"
+selection_background = "#dcd7ba"
+selection_foreground = "#1f1f28"
+normal = ["#090618", "#c34043", "#76946a", "#c0a36e", "#7e9cd8", "#957fb8", "#6a9589", "#c8c093"]
+bright = ["#727169", "#e82424", "#98bb6c", "#e6c384", "#7fb4ca", "#938aa9", "#7aa89f", "#dcd7ba"]

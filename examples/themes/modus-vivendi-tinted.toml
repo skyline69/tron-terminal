@@ -1,0 +1,10 @@
+# Modus Vivendi Tinted.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#0d0e1c"
+cursor = "#ff66ff"
+cursor_text = "#0d0e1c"
+selection_background = "#555a66"
+selection_foreground = "#ffffff"
+normal = ["#0d0e1c", "#ff5f59", "#44bc44", "#d0bc00", "#2fafff", "#feacd0", "#00d3d0", "#a6a6a6"]
+bright = ["#595959", "#ff6b55", "#00c06f", "#fec43f", "#79a8ff", "#b6a0ff", "#6ae4b9", "#ffffff"]

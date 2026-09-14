@@ -1,0 +1,10 @@
+# Rebecca.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e8e6ed"
+background = "#292a44"
+cursor = "#b89bf9"
+cursor_text = "#292a44"
+selection_background = "#663399"
+selection_foreground = "#f4f2f9"
+normal = ["#12131e", "#dd7755", "#04dbb5", "#f2e7b7", "#7aa5ff", "#bf9cf9", "#56d3c2", "#e4e3e9"]
+bright = ["#666699", "#ff92cd", "#01eac0", "#fffca8", "#69c0fa", "#c17ff8", "#8bfde1", "#f4f2f9"]

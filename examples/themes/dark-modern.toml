@@ -1,0 +1,10 @@
+# Dark Modern.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#cccccc"
+background = "#1f1f1f"
+cursor = "#ffffff"
+cursor_text = "#000000"
+selection_background = "#3a3d41"
+selection_foreground = "#e0e0e0"
+normal = ["#272727", "#f74949", "#2ea043", "#9e6a03", "#0078d4", "#d01273", "#1db4d6", "#cccccc"]
+bright = ["#5d5d5d", "#dc5452", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#e5e5e5"]

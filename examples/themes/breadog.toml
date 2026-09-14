@@ -1,0 +1,10 @@
+# Breadog.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#362c24"
+background = "#f1ebe6"
+cursor = "#362c24"
+cursor_text = "#f1ebe6"
+selection_background = "#362c24"
+selection_foreground = "#f1ebe6"
+normal = ["#362c24", "#b10b00", "#007232", "#8b4c00", "#005cb4", "#9b0097", "#006a78", "#baa99d"]
+bright = ["#514337", "#de1100", "#008f40", "#ae6000", "#0074e1", "#c300bd", "#008697", "#eae1da"]

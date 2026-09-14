@@ -1,0 +1,10 @@
+# Darkmatrix.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#3e5715"
+background = "#070c0e"
+cursor = "#9fa86e"
+cursor_text = "#00ff87"
+selection_background = "#0f191c"
+selection_foreground = "#00ff87"
+normal = ["#091013", "#006536", "#6fa64c", "#7e8000", "#2c9a84", "#523a60", "#114d53", "#006536"]
+bright = ["#404040", "#00733d", "#90d762", "#e2e500", "#46d8b8", "#573d66", "#12545a", "#006536"]

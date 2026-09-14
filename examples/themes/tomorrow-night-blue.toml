@@ -1,0 +1,10 @@
+# Tomorrow Night Blue.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#002451"
+cursor = "#ffffff"
+cursor_text = "#003f8e"
+selection_background = "#003f8e"
+selection_foreground = "#ffffff"
+normal = ["#000000", "#ff9da4", "#d1f1a9", "#ffeead", "#bbdaff", "#ebbbff", "#99ffff", "#ffffff"]
+bright = ["#4c4c4c", "#ff9da4", "#d1f1a9", "#ffeead", "#bbdaff", "#ebbbff", "#99ffff", "#ffffff"]

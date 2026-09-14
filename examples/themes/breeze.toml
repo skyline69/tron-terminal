@@ -1,0 +1,10 @@
+# Breeze.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#eff0f1"
+background = "#31363b"
+cursor = "#eff0f1"
+cursor_text = "#31363b"
+selection_background = "#eff0f1"
+selection_foreground = "#31363b"
+normal = ["#31363b", "#ed1515", "#11d116", "#f67400", "#1d99f3", "#9b59b6", "#1abc9c", "#eff0f1"]
+bright = ["#7f8c8d", "#c0392b", "#1cdc9a", "#fdbc4b", "#3daee9", "#8e44ad", "#16a085", "#fcfcfc"]

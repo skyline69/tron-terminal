@@ -1,0 +1,10 @@
+# Konsolas.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c8c1c1"
+background = "#060606"
+cursor = "#c8c1c1"
+cursor_text = "#060606"
+selection_background = "#060606"
+selection_foreground = "#c8c1c1"
+normal = ["#000000", "#aa1717", "#18b218", "#ebae1f", "#2323a5", "#ad1edc", "#42b0c8", "#c8c1c1"]
+bright = ["#7b716e", "#ff4141", "#5fff5f", "#ffff55", "#4b4bff", "#ff54ff", "#69ffff", "#ffffff"]

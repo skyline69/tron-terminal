@@ -1,0 +1,10 @@
+# Xcode WWDC.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e7e8eb"
+background = "#292c36"
+cursor = "#e7e8eb"
+cursor_text = "#292c36"
+selection_background = "#494d5c"
+selection_foreground = "#e7e8eb"
+normal = ["#494d5c", "#bb383a", "#94c66e", "#d28e5d", "#8884c5", "#b73999", "#00aba4", "#e7e8eb"]
+bright = ["#7f869e", "#bb383a", "#94c66e", "#d28e5d", "#8884c5", "#b73999", "#00aba4", "#e7e8eb"]

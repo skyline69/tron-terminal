@@ -1,0 +1,10 @@
+# Spring.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#4d4d4c"
+background = "#ffffff"
+cursor = "#4d4d4c"
+cursor_text = "#ffffff"
+selection_background = "#d6d6d6"
+selection_foreground = "#4d4d4c"
+normal = ["#000000", "#ff4d83", "#1f8c3b", "#1fc95b", "#1dd3ee", "#8959a8", "#3e999f", "#bfbfbf"]
+bright = ["#000000", "#ff0021", "#1fc231", "#d5b807", "#15a9fd", "#8959a8", "#3e999f", "#ffffff"]

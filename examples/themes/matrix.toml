@@ -1,0 +1,10 @@
+# Matrix.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#426644"
+background = "#0f191c"
+cursor = "#384545"
+cursor_text = "#00ff00"
+selection_background = "#18282e"
+selection_foreground = "#00ff87"
+normal = ["#0f191c", "#23755a", "#82d967", "#ffd700", "#3f5242", "#409931", "#50b45a", "#507350"]
+bright = ["#688060", "#2fc079", "#90d762", "#faff00", "#4f7e7e", "#11ff25", "#c1ff8a", "#678c61"]

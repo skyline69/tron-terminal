@@ -1,0 +1,10 @@
+# Monokai Classic.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#fdfff1"
+background = "#272822"
+cursor = "#c0c1b5"
+cursor_text = "#8d8e82"
+selection_background = "#57584f"
+selection_foreground = "#fdfff1"
+normal = ["#272822", "#f92672", "#a6e22e", "#e6db74", "#fd971f", "#ae81ff", "#66d9ef", "#fdfff1"]
+bright = ["#6e7066", "#f92672", "#a6e22e", "#e6db74", "#fd971f", "#ae81ff", "#66d9ef", "#fdfff1"]

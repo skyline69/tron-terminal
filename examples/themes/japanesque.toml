@@ -1,0 +1,10 @@
+# Japanesque.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#f7f6ec"
+background = "#1e1e1e"
+cursor = "#edcf4f"
+cursor_text = "#343935"
+selection_background = "#175877"
+selection_foreground = "#f7f6ec"
+normal = ["#343935", "#cf3f61", "#7bb75b", "#e9b32a", "#4c9ad4", "#a57fc4", "#389aad", "#fafaf6"]
+bright = ["#595b59", "#d18fa6", "#767f2c", "#78592f", "#135979", "#604291", "#76bbca", "#b2b5ae"]

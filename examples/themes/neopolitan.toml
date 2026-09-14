@@ -1,0 +1,10 @@
+# Neopolitan.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#271f19"
+cursor = "#ffffff"
+cursor_text = "#bfbfbf"
+selection_background = "#253b76"
+selection_foreground = "#ffffff"
+normal = ["#000000", "#9a1a1a", "#61ce3c", "#fbde2d", "#324883", "#ff0080", "#8da6ce", "#f8f8f8"]
+bright = ["#4c4c4c", "#9a1a1a", "#61ce3c", "#fbde2d", "#324883", "#ff0080", "#8da6ce", "#f8f8f8"]

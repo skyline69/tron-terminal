@@ -18,6 +18,7 @@ use ratatui::{DefaultTerminal, Frame};
 use tachyonfx::{Effect, Interpolation, fx};
 
 use crate::catalog::Catalog;
+use crate::credits;
 use crate::link::Link;
 use crate::motion::{lerp, pulse, smooth};
 use crate::pickers::{self, Item, Picker};
@@ -47,12 +48,13 @@ pub enum Tab {
     Shaders,
     Keys,
     Tour,
+    Credits,
     About,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] =
-        [Tab::Overview, Tab::Settings, Tab::Themes, Tab::Shaders, Tab::Keys, Tab::Tour, Tab::About];
+    pub const ALL: [Tab; 8] =
+        [Tab::Overview, Tab::Settings, Tab::Themes, Tab::Shaders, Tab::Keys, Tab::Tour, Tab::Credits, Tab::About];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -62,6 +64,7 @@ impl Tab {
             Tab::Shaders => "Shaders",
             Tab::Keys => "Keys",
             Tab::Tour => "Tour",
+            Tab::Credits => "Credits",
             Tab::About => "About",
         }
     }
@@ -105,6 +108,8 @@ enum Target {
     StartTerminal,
     /// A row of the Themes, Shaders or Settings list, by index.
     Item(usize),
+    /// The checkbox of a Shaders row, by index.
+    Toggle(usize),
     /// The unsaved changes note in the status bar.
     SaveButton,
     DialogButton(DialogButton),
@@ -130,7 +135,7 @@ enum Dialog {
 const TOAST: Duration = Duration::from_secs(4);
 
 /// Wait before previewing, so holding an arrow key does not reload the config for every row.
-const PREVIEW_DELAY: Duration = Duration::from_millis(90);
+const PREVIEW_DELAY: Duration = Duration::from_millis(40);
 
 /// Length of the hover fade in and out.
 const HOVER_MS: u32 = 160;
@@ -146,6 +151,10 @@ enum Command {
     Pick(usize),
     /// Choose the highlighted theme, or turn the highlighted shader on or off.
     Activate,
+    /// Check or uncheck a shader, by index.
+    Toggle(usize),
+    /// Move the highlighted checked shader earlier or later in the chain.
+    Reorder(isize),
     /// Change the highlighted setting by steps.
     Change(isize),
     OpenSave,
@@ -199,6 +208,8 @@ pub struct App {
     tour_image_sent: bool,
     /// Screen size of the last frame, to repaint the tour after a resize.
     last_screen: Rect,
+    credits: Vec<credits::Credit>,
+    credits_picker: Picker,
     /// A painted tour page to blank before the next frame.
     tour_erase: Option<Rect>,
     tour_painted: bool,
@@ -230,6 +241,8 @@ impl App {
             tour_paint_at: None,
             tour_image_sent: false,
             last_screen: Rect::default(),
+            credits: credits::all(),
+            credits_picker: Picker::default(),
             tour_erase: None,
             tour_painted: false,
             tour_link: None,
@@ -330,6 +343,10 @@ impl App {
                     }
                     Tab::Themes => self.themes.move_by(delta, self.catalog.themes.len()),
                     Tab::Shaders => self.shaders.move_by(delta, self.catalog.shaders.len()),
+                    Tab::Credits => {
+                        self.credits_picker.move_by(delta, self.credits.len());
+                        false
+                    }
                     _ => false,
                 };
                 if moved {
@@ -339,6 +356,13 @@ impl App {
             Command::Pick(index) if self.tab == Tab::Tour => {
                 if self.tour.set(index, Page::ALL.len()) {
                     self.repaint_tour(false);
+                }
+            }
+            Command::Pick(index) if self.tab == Tab::Credits => {
+                if self.credits_picker.selected == index {
+                    self.apply(Command::Activate, content);
+                } else {
+                    self.credits_picker.set(index, self.credits.len());
                 }
             }
             Command::Pick(index) if self.tab == Tab::Settings => {
@@ -394,19 +418,47 @@ impl App {
                         self.choices.theme = theme.name.clone();
                     }
                 }
-                Tab::Shaders => {
-                    if let Some(shader) = self.catalog.shaders.get(self.shaders.selected) {
-                        match self.choices.shaders.iter().position(|file| *file == shader.file) {
-                            Some(index) => {
-                                self.choices.shaders.remove(index);
-                            }
-                            None => self.choices.shaders.push(shader.file.clone()),
-                        }
-                        self.schedule_preview();
+                Tab::Shaders => self.toggle_shader(),
+                Tab::Credits => {
+                    if let Some(credit) = self.credits.get(self.credits_picker.selected) {
+                        open_link(&self.catalog.config.links.open_command, &credit.source_url);
                     }
                 }
                 _ => {}
             },
+            Command::Toggle(index) => {
+                if self.tab == Tab::Shaders {
+                    self.shaders.set(index, self.catalog.shaders.len());
+                    self.toggle_shader();
+                }
+            }
+            Command::Reorder(delta) => {
+                let len = self.choices.shaders.len();
+                if self.tab == Tab::Shaders
+                    && let Some(shader) = self.catalog.shaders.get(self.shaders.selected)
+                    && let Some(from) = self.choices.shaders.iter().position(|file| *file == shader.file)
+                {
+                    let to = (from as isize + delta).clamp(0, len as isize - 1) as usize;
+                    if to != from {
+                        let file = self.choices.shaders.remove(from);
+                        self.choices.shaders.insert(to, file);
+                        self.schedule_preview();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Checks or unchecks the highlighted shader. Checked shaders run in the order they were checked.
+    fn toggle_shader(&mut self) {
+        if let Some(shader) = self.catalog.shaders.get(self.shaders.selected) {
+            match self.choices.shaders.iter().position(|file| *file == shader.file) {
+                Some(index) => {
+                    self.choices.shaders.remove(index);
+                }
+                None => self.choices.shaders.push(shader.file.clone()),
+            }
+            self.schedule_preview();
         }
     }
 
@@ -591,7 +643,17 @@ impl App {
                 _ => {}
             }
         }
-        if matches!(self.tab, Tab::Themes | Tab::Shaders) {
+        if self.tab == Tab::Shaders {
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+            match key.code {
+                KeyCode::Up if shift => return Command::Reorder(-1),
+                KeyCode::Down if shift => return Command::Reorder(1),
+                KeyCode::Char('K') => return Command::Reorder(-1),
+                KeyCode::Char('J') => return Command::Reorder(1),
+                _ => {}
+            }
+        }
+        if matches!(self.tab, Tab::Themes | Tab::Shaders | Tab::Credits) {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => return Command::Move(-1),
                 KeyCode::Down | KeyCode::Char('j') => return Command::Move(1),
@@ -609,7 +671,7 @@ impl App {
             KeyCode::Enter if self.tab == Tab::Overview => self.leave(),
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => Command::Select(self.tab.offset(1)),
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => Command::Select(self.tab.offset(-1)),
-            KeyCode::Char(digit @ '1'..='7') => Command::Select(Tab::ALL[digit as usize - '1' as usize]),
+            KeyCode::Char(digit @ '1'..='8') => Command::Select(Tab::ALL[digit as usize - '1' as usize]),
             _ => Command::None,
         }
     }
@@ -633,6 +695,7 @@ impl App {
             (Some(Target::Tab(tab)), None) => Command::Select(tab),
             (Some(Target::StartTerminal), None) => self.leave(),
             (Some(Target::Item(index)), None) => Command::Pick(index),
+            (Some(Target::Toggle(index)), None) => Command::Toggle(index),
             (Some(Target::SaveButton), None) => Command::OpenSave,
             (None, None) => Command::None,
         }
@@ -704,6 +767,7 @@ impl App {
             Tab::Themes => self.draw_themes(frame, inner),
             Tab::Shaders => self.draw_shaders(frame, inner),
             Tab::Keys => draw_keys(frame, inner),
+            Tab::Credits => self.draw_credits(frame, inner),
             Tab::About => draw_about(frame, inner),
             Tab::Tour => self.draw_tour(frame, inner),
         }
@@ -773,7 +837,16 @@ impl App {
                 vec![key("↑/↓"), label(" browse  "), key("Enter"), label(" choose  "), key("←/→"), label(" tabs")]
             }
             Tab::Shaders => {
-                vec![key("↑/↓"), label(" browse  "), key("Space"), label(" on/off  "), key("←/→"), label(" tabs")]
+                vec![
+                    key("↑/↓"),
+                    label(" browse  "),
+                    key("Space"),
+                    label(" check  "),
+                    key("Shift+↑/↓"),
+                    label(" order  "),
+                    key("←/→"),
+                    label(" tabs"),
+                ]
             }
             Tab::Settings => {
                 vec![key("↑/↓"), label(" select  "), key("←/→"), label(" change  "), key("Tab"), label(" tabs")]
@@ -781,7 +854,10 @@ impl App {
             Tab::Tour => {
                 vec![key("↑/↓"), label(" pages  "), key("←/→"), label(" tabs  "), key("click"), label(" select")]
             }
-            _ => vec![key("←/→"), label(" switch  "), key("1-7"), label(" jump  "), key("click"), label(" select")],
+            Tab::Credits => {
+                vec![key("↑/↓"), label(" browse  "), key("Enter"), label(" open source  "), key("←/→"), label(" tabs")]
+            }
+            _ => vec![key("←/→"), label(" switch  "), key("1-8"), label(" jump  "), key("click"), label(" select")],
         };
         frame.render_widget(Paragraph::new(Line::from(hints)), area);
         let toast = self.toast.as_ref().filter(|(since, _)| since.elapsed() < TOAST).map(|(_, text)| text.clone());
@@ -825,8 +901,10 @@ impl App {
     fn draw_tour(&mut self, frame: &mut Frame, area: Rect) {
         let [list_area, _, page_area] =
             Layout::horizontal([Constraint::Length(24), Constraint::Length(2), Constraint::Fill(1)]).areas(area);
-        let items: Vec<Item> =
-            Page::ALL.iter().map(|page| Item { name: page.title(), tag: "", chosen: false }).collect();
+        let items: Vec<Item> = Page::ALL
+            .iter()
+            .map(|page| Item { name: page.title(), tag: String::new(), chosen: false, check: false })
+            .collect();
         let hover = match self.hover {
             Some(Target::Item(index)) => Some(index),
             _ => None,
@@ -994,8 +1072,9 @@ impl App {
             .iter()
             .map(|theme| Item {
                 name: &theme.name,
-                tag: if theme.builtin { "" } else { "custom" },
+                tag: if theme.builtin { String::new() } else { "custom".into() },
                 chosen: theme.name == self.choices.theme,
+                check: false,
             })
             .collect();
         let hover = match self.hover {
@@ -1009,25 +1088,55 @@ impl App {
         }
     }
 
-    fn draw_shaders(&mut self, frame: &mut Frame, area: Rect) {
+    fn draw_credits(&mut self, frame: &mut Frame, area: Rect) {
         let [list_area, _, details_area] =
-            Layout::horizontal([Constraint::Length(28), Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+            Layout::horizontal([Constraint::Length(36), Constraint::Length(2), Constraint::Fill(1)]).areas(area);
         let items: Vec<Item> = self
-            .catalog
-            .shaders
+            .credits
             .iter()
-            .map(|shader| Item {
-                name: &shader.file,
-                tag: if shader.builtin { "" } else { "custom" },
-                chosen: self.choices.shaders.contains(&shader.file),
-            })
+            .map(|credit| Item { name: &credit.title, tag: credit.kind.clone(), chosen: false, check: false })
             .collect();
         let hover = match self.hover {
             Some(Target::Item(index)) => Some(index),
             _ => None,
         };
-        let rows = pickers::draw_list(frame, list_area, &items, &mut self.shaders, hover, true);
+        let rows = pickers::draw_list(frame, list_area, &items, &mut self.credits_picker, hover, true);
         self.hits.extend(rows.into_iter().map(|(rect, index)| (rect, Target::Item(index))));
+        if let Some(credit) = self.credits.get(self.credits_picker.selected) {
+            credits::draw_details(frame, details_area, credit);
+        }
+    }
+
+    fn draw_shaders(&mut self, frame: &mut Frame, area: Rect) {
+        let [list_area, _, details_area] =
+            Layout::horizontal([Constraint::Length(36), Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+        let items: Vec<Item> = self
+            .catalog
+            .shaders
+            .iter()
+            .map(|shader| {
+                let position = self.choices.shaders.iter().position(|file| *file == shader.file);
+                let custom = if shader.builtin { "" } else { " custom" };
+                Item {
+                    name: &shader.file,
+                    tag: position.map_or_else(|| custom.trim().to_owned(), |index| format!("#{}{custom}", index + 1)),
+                    chosen: position.is_some(),
+                    check: true,
+                }
+            })
+            .collect();
+        let hover = match self.hover {
+            Some(Target::Item(index) | Target::Toggle(index)) => Some(index),
+            _ => None,
+        };
+        let rows = pickers::draw_list(frame, list_area, &items, &mut self.shaders, hover, true);
+        for (rect, index) in rows {
+            // The checkbox toggles right away; the rest of the row selects first.
+            let (offset, width) = pickers::CHECKBOX;
+            let checkbox = Rect { x: rect.x + offset, width: width.min(rect.width.saturating_sub(offset)), ..rect };
+            self.hits.push((checkbox, Target::Toggle(index)));
+            self.hits.push((rect, Target::Item(index)));
+        }
         if let Some(shader) = self.catalog.shaders.get(self.shaders.selected) {
             let position = self.choices.shaders.iter().position(|file| *file == shader.file);
             pickers::draw_shader_details(frame, details_area, shader, position, &self.choices.shaders);
@@ -1435,7 +1544,14 @@ mod tests {
         app.apply(Command::Activate, Rect::default());
         assert_eq!(app.choices.shaders.len(), 2);
         let text = screen(&mut app);
-        assert!(text.contains("runs 2nd"), "{text}");
+        assert!(text.contains("runs 2nd") && text.contains("[✓]") && text.contains("#2"), "{text}");
+        let second = app.catalog.shaders[1].file.clone();
+        assert_eq!(app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)), Command::Reorder(-1));
+        app.apply(Command::Reorder(-1), Rect::default());
+        assert_eq!(app.choices.shaders, vec![second.clone(), first.clone()], "moved earlier in the chain");
+        app.apply(Command::Toggle(0), Rect::default());
+        assert_eq!(app.choices.shaders, vec![second], "the checkbox unchecks without selecting first");
+        app.apply(Command::Toggle(0), Rect::default());
         app.apply(Command::Select(Tab::Keys), Rect::default());
         assert!(app.wants_startup_shader());
         let back = app.take_preview(Instant::now() + PREVIEW_DELAY).unwrap();

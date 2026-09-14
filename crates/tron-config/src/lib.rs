@@ -37,29 +37,10 @@ pub enum ConfigError {
     ThemeNotFound(String),
 }
 
-/// Themes shipped with tron, as (name, TOML). "tron" is the default colors.
-pub const BUILTIN_THEMES: &[(&str, &str)] = &[
-    ("tron", ""),
-    ("tron-light", include_str!("../../../examples/themes/tron-light.toml")),
-    ("catppuccin-mocha", include_str!("../../../examples/themes/catppuccin-mocha.toml")),
-    ("dracula", include_str!("../../../examples/themes/dracula.toml")),
-    ("gruvbox-dark", include_str!("../../../examples/themes/gruvbox-dark.toml")),
-    ("nord", include_str!("../../../examples/themes/nord.toml")),
-    ("one-dark", include_str!("../../../examples/themes/one-dark.toml")),
-    ("rose-pine", include_str!("../../../examples/themes/rose-pine.toml")),
-    ("solarized-dark", include_str!("../../../examples/themes/solarized-dark.toml")),
-    ("tokyo-night", include_str!("../../../examples/themes/tokyo-night.toml")),
-];
+include!(concat!(env!("OUT_DIR"), "/builtin.rs"));
 
-/// Shaders shipped with tron, as (file name, WGSL). Files in `shaders/` with the
-/// same name take precedence.
-pub const BUILTIN_SHADERS: &[(&str, &str)] = &[
-    ("crt.wgsl", include_str!("../../../examples/shaders/crt.wgsl")),
-    ("bloom.wgsl", include_str!("../../../examples/shaders/bloom.wgsl")),
-    ("cursor-glow.wgsl", include_str!("../../../examples/shaders/cursor-glow.wgsl")),
-    ("cursor-trail.wgsl", include_str!("../../../examples/shaders/cursor-trail.wgsl")),
-    ("afterglow.wgsl", include_str!("../../../examples/shaders/afterglow.wgsl")),
-];
+/// The documented example configuration, written as `config.toml` when there is none.
+pub const EXAMPLE_CONFIG: &str = include_str!("../../../examples/config.toml");
 
 /// Locations of configuration and data files.
 #[derive(Debug, Clone)]
@@ -83,6 +64,24 @@ impl Paths {
         let config_dir =
             std::env::var_os("TRON_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| strategy.config_dir());
         Some(Self::with_dirs(config_dir, strategy.data_dir()))
+    }
+
+    /// Writes the example configuration when `config.toml` does not exist yet.
+    /// Returns whether it was written.
+    pub fn create_config(&self) -> std::io::Result<bool> {
+        if self.config_file.exists() {
+            return Ok(false);
+        }
+        std::fs::create_dir_all(&self.config_dir)?;
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&self.config_file);
+        match file {
+            Ok(mut file) => {
+                std::io::Write::write_all(&mut file, EXAMPLE_CONFIG.as_bytes())?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn with_dirs(config_dir: PathBuf, data_dir: PathBuf) -> Self {

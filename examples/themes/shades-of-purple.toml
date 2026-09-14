@@ -1,0 +1,10 @@
+# Shades Of Purple.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#1e1d40"
+cursor = "#fad000"
+cursor_text = "#98998e"
+selection_background = "#b362ff"
+selection_foreground = "#c2c2c2"
+normal = ["#000000", "#d90429", "#3ad900", "#ffe700", "#6943ff", "#ff2c70", "#00c5c7", "#c7c7c7"]
+bright = ["#686868", "#f92a1c", "#43d426", "#f1d000", "#6871ff", "#ff77ff", "#79e8fb", "#ffffff"]

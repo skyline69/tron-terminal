@@ -1,0 +1,10 @@
+# HaX0R R3D.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#b10e0e"
+background = "#200101"
+cursor = "#b00d0d"
+cursor_text = "#ffffff"
+selection_background = "#ebc1ff"
+selection_foreground = "#979797"
+normal = ["#1f0000", "#b00d0d", "#b00d0d", "#b00d0d", "#b00d0d", "#b00d0d", "#b00d0d", "#fafafa"]
+bright = ["#554040", "#ff1111", "#ff1010", "#ff1010", "#ff1010", "#ff1010", "#ff1010", "#fefefe"]

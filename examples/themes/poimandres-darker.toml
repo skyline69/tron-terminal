@@ -1,0 +1,10 @@
+# Poimandres Darker.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#a6accd"
+background = "#16161e"
+cursor = "#ffffff"
+cursor_text = "#16161e"
+selection_background = "#a6accd"
+selection_foreground = "#ffffff"
+normal = ["#16161e", "#d0679d", "#5de4c7", "#fffac2", "#89ddff", "#fcc5e9", "#add7ff", "#ffffff"]
+bright = ["#a6accd", "#d0679d", "#5de4c7", "#fffac2", "#add7ff", "#fae4fc", "#89ddff", "#ffffff"]

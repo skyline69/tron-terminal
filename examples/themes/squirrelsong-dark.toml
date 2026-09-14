@@ -1,0 +1,10 @@
+# Squirrelsong Dark.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#b19b89"
+background = "#372920"
+cursor = "#b19b89"
+cursor_text = "#372920"
+selection_background = "#5b402e"
+selection_foreground = "#b19b89"
+normal = ["#372920", "#ba4138", "#468336", "#d4b139", "#4395c6", "#855fb8", "#2f9794", "#d3b9a2"]
+bright = ["#704f39", "#df4d43", "#659a4c", "#e8c23f", "#4ca4db", "#9d70da", "#60aca9", "#f2d4bb"]

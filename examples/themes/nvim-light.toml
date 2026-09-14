@@ -1,0 +1,10 @@
+# Nvim Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#14161b"
+background = "#e0e2ea"
+cursor = "#9b9ea4"
+cursor_text = "#14161b"
+selection_background = "#9b9ea4"
+selection_foreground = "#14161b"
+normal = ["#07080d", "#590008", "#005523", "#6b5300", "#004c73", "#470045", "#007373", "#a1a4ab"]
+bright = ["#4f5258", "#590008", "#005523", "#6b5300", "#004c73", "#470045", "#007373", "#eef1f8"]

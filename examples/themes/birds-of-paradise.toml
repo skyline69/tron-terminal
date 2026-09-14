@@ -1,0 +1,10 @@
+# Birds Of Paradise.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e0dbb7"
+background = "#2a1f1d"
+cursor = "#644a33"
+cursor_text = "#8a7059"
+selection_background = "#563c27"
+selection_foreground = "#e0dbbb"
+normal = ["#573d26", "#be2d26", "#6ba18a", "#e99d2a", "#5a86ad", "#ac80a6", "#74a6ad", "#e0dbb7"]
+bright = ["#9b6c4a", "#e84627", "#95d8ba", "#d0d150", "#b8d3ed", "#d19ecb", "#93cfd7", "#fff9d5"]

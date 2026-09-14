@@ -1,0 +1,10 @@
+# Cyberdyne.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#00ff92"
+background = "#151144"
+cursor = "#00ff9c"
+cursor_text = "#a6a6a6"
+selection_background = "#454d96"
+selection_foreground = "#f4f4f4"
+normal = ["#080808", "#ff8373", "#00c172", "#d2a700", "#0071cf", "#ff90fe", "#6bffdd", "#f1f1f1"]
+bright = ["#484848", "#ffc4be", "#d6fcba", "#fffed5", "#c2e3ff", "#ffb2fe", "#e6e7fe", "#ffffff"]

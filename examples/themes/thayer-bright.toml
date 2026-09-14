@@ -1,0 +1,10 @@
+# Thayer Bright.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#f8f8f8"
+background = "#1b1d1e"
+cursor = "#fc971f"
+cursor_text = "#000000"
+selection_background = "#4d4d4d"
+selection_foreground = "#ffffff"
+normal = ["#1b1d1e", "#f92672", "#4df840", "#f4fd22", "#2757d6", "#8c54fe", "#38c8b5", "#ccccc6"]
+bright = ["#505354", "#ff5995", "#b6e354", "#feed6c", "#3f78ff", "#9e6ffe", "#23cfd5", "#f8f8f2"]

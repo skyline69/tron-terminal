@@ -1,0 +1,10 @@
+# Havn Skumring.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#d6dbeb"
+background = "#111522"
+cursor = "#277a6f"
+cursor_text = "#e0e4f3"
+selection_background = "#2b514b"
+selection_foreground = "#dce0ef"
+normal = ["#252c47", "#ea563e", "#6ead7b", "#f8b330", "#596cf7", "#7c719e", "#d588c1", "#dce0ee"]
+bright = ["#38425c", "#d17264", "#8c9e8f", "#eac58c", "#5186cb", "#9b7cee", "#d17ab6", "#fff6e1"]

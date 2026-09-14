@@ -1,0 +1,10 @@
+# Grey Green.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#002a1a"
+cursor = "#fff400"
+cursor_text = "#aeb1b0"
+selection_background = "#517e50"
+selection_foreground = "#e2e2e2"
+normal = ["#000000", "#fe1414", "#74ff00", "#f1ff01", "#00deff", "#ff00f0", "#00ffbc", "#ffffff"]
+bright = ["#666666", "#ff3939", "#00ff44", "#ffd100", "#00afff", "#ff008a", "#00ffd3", "#f5ecec"]

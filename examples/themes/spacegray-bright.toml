@@ -1,0 +1,10 @@
+# Spacegray Bright.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#f3f3f3"
+background = "#2a2e3a"
+cursor = "#c6c6c6"
+cursor_text = "#8c8c8c"
+selection_background = "#cacaca"
+selection_foreground = "#000000"
+normal = ["#080808", "#bc5553", "#a0b56c", "#f6c987", "#7baec1", "#b98aae", "#85c9b8", "#d8d8d8"]
+bright = ["#626262", "#bc5553", "#a0b56c", "#f6c987", "#7baec1", "#b98aae", "#85c9b8", "#f7f7f7"]

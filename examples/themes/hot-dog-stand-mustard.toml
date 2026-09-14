@@ -1,0 +1,10 @@
+# Hot Dog Stand (Mustard).
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#000000"
+background = "#ffff54"
+cursor = "#ea3323"
+cursor_text = "#ffff54"
+selection_background = "#ea3323"
+selection_foreground = "#ffffff"
+normal = ["#000000", "#ea3323", "#ea3323", "#ea3323", "#000000", "#ea3323", "#000000", "#b9b9b9"]
+bright = ["#000000", "#ea3323", "#ea3323", "#ea3323", "#000000", "#ea3323", "#000000", "#c6c6c6"]

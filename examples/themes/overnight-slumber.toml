@@ -1,0 +1,10 @@
+# Overnight Slumber.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ced2d6"
+background = "#0e1729"
+cursor = "#ffa7c4"
+cursor_text = "#ffffff"
+selection_background = "#1f2b41"
+selection_foreground = "#ced2d6"
+normal = ["#0a1222", "#ffa7c4", "#85cc95", "#ffcb8b", "#8dabe1", "#c792eb", "#78ccf0", "#ffffff"]
+bright = ["#575656", "#ffa7c4", "#85cc95", "#ffcb8b", "#8dabe1", "#c792eb", "#ffa7c4", "#ffffff"]

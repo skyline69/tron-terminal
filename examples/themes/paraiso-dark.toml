@@ -1,0 +1,10 @@
+# Paraiso Dark.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#a39e9b"
+background = "#2f1e2e"
+cursor = "#a39e9b"
+cursor_text = "#2f1e2e"
+selection_background = "#4f424c"
+selection_foreground = "#a39e9b"
+normal = ["#2f1e2e", "#ef6155", "#48b685", "#fec418", "#06b6ef", "#815ba4", "#5bc4bf", "#a39e9b"]
+bright = ["#776e71", "#ef6155", "#48b685", "#fec418", "#06b6ef", "#815ba4", "#5bc4bf", "#e7e9db"]

@@ -1,0 +1,10 @@
+# Andromeda.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e5e5e5"
+background = "#262a33"
+cursor = "#f8f8f0"
+cursor_text = "#b5b5a8"
+selection_background = "#5a5c62"
+selection_foreground = "#ece7e7"
+normal = ["#000000", "#cd3131", "#05bc79", "#e5e512", "#2472c8", "#bc3fbc", "#0fa8cd", "#e5e5e5"]
+bright = ["#666666", "#cd3131", "#05bc79", "#e5e512", "#2472c8", "#bc3fbc", "#0fa8cd", "#e5e5e5"]

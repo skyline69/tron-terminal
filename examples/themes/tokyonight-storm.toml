@@ -1,0 +1,10 @@
+# TokyoNight Storm.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c0caf5"
+background = "#24283b"
+cursor = "#c0caf5"
+cursor_text = "#1d202f"
+selection_background = "#364a82"
+selection_foreground = "#c0caf5"
+normal = ["#1d202f", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6"]
+bright = ["#4e5575", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5"]

@@ -73,14 +73,24 @@ fn main() -> anyhow::Result<()> {
         Some(cli::Command::StartupScreen { shell }) => tron_startup::run(shell),
         None => {}
     }
+    // Inside a tron window the startup screen takes over that window instead of opening another.
+    if cli.startup && tron_startup::inside_tron() {
+        let config = Paths::discover().and_then(|paths| Config::load(&paths).ok()).unwrap_or_default();
+        return Ok(tron_startup::run_here(config.startup_animations != Some(false))?);
+    }
     let gpu = thread::Builder::new().name("gpu-init".into()).spawn(|| pollster::block_on(Gpu::new())).ok();
     let paths = match (Paths::discover(), &cli.config_dir) {
         (Some(paths), Some(dir)) => Some(Paths::with_dirs(dir.clone(), paths.data_dir)),
         (None, Some(dir)) => Some(Paths::with_dirs(dir.clone(), dir.join("data"))),
         (paths, None) => paths,
     };
-    if paths.is_none() {
-        log::warn!("no home directory found, using the default configuration");
+    match &paths {
+        None => log::warn!("no home directory found, using the default configuration"),
+        Some(paths) => match paths.create_config() {
+            Ok(true) => log::info!("wrote {}", paths.config_file.display()),
+            Ok(false) => {}
+            Err(error) => log::warn!("cannot write {}: {error}", paths.config_file.display()),
+        },
     }
     let mut config_error = None;
     let config = match paths.as_ref().map(Config::load) {
@@ -236,6 +246,9 @@ struct DropState {
     dropped: bool,
 }
 
+/// A compiled shader chain: (name, source) per shader, the animation mode, and compile errors.
+type AppliedShaders = (Vec<(String, String)>, Option<bool>, Vec<String>);
+
 struct Session {
     // Declared before `window`: it must be dropped before the Wayland display.
     clipboard: Clipboard,
@@ -249,13 +262,19 @@ struct Session {
     pty: Pty,
     input: mpsc::Sender<Vec<u8>>,
     settings: Settings,
-    /// Token accepted for startup screen commands, until the shell's first prompt.
+    /// Token accepted for startup screen commands, from this window's processes.
     startup_token: Option<String>,
     /// When the startup screen last sent a command while its shader runs, and how
     /// many prompt marks existed when the shader was turned on.
     startup_shader: Option<(Instant, usize)>,
     /// A config preview change from the startup screen, carried out by the `App`.
     preview_request: Option<PreviewRequest>,
+    /// Font settings last applied, to skip rebuilding glyphs when they did not change.
+    applied_font: String,
+    /// Shader chain last compiled, with its animation mode and compile errors.
+    applied_shaders: Option<AppliedShaders>,
+    /// Window transparency and blur last set.
+    applied_translucency: Option<(bool, bool)>,
     /// Configuration problems shown at the top of the window, and until when.
     config_errors: Vec<String>,
     config_errors_until: Option<Instant>,
@@ -410,12 +429,17 @@ impl App {
             scroll_accumulator: 0.0,
             config_errors: Vec::new(),
             config_errors_until: None,
-            startup_token: self
-                .show_startup
-                .then(|| self.startup_token.clone())
-                .or_else(|| std::env::var(DEBUG_STARTUP_TOKEN_ENV).ok().filter(|t| !t.is_empty())),
+            startup_token: Some(
+                std::env::var(DEBUG_STARTUP_TOKEN_ENV)
+                    .ok()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| self.startup_token.clone()),
+            ),
             startup_shader: None,
             preview_request: None,
+            applied_font: String::new(),
+            applied_shaders: None,
+            applied_translucency: None,
         };
         session.apply_config(config, self.paths.as_ref());
         if let Some(error) = self.config_error.take() {
@@ -454,6 +478,11 @@ impl App {
             }
         }
         options.env.extend(shell.env.iter().map(|(k, v)| (k.into(), v.into())));
+        // Lets `tron --startup` in this window talk to it.
+        options.env.push((tron_startup::TOKEN_ENV.into(), self.startup_token.clone().into()));
+        if let Some(paths) = &self.paths {
+            options.env.push((tron_startup::CONFIG_DIR_ENV.into(), paths.config_dir.clone().into()));
+        }
         if self.show_startup
             && let Ok(exe) = std::env::current_exe()
         {
@@ -469,10 +498,6 @@ impl App {
             options.program = Some(exe.to_string_lossy().into_owned());
             if let Some(paths) = &self.paths {
                 options.env.push((tron_startup::MARKER_ENV.into(), paths.data_dir.join(cli::STARTUP_MARKER).into()));
-            }
-            options.env.push((tron_startup::TOKEN_ENV.into(), self.startup_token.clone().into()));
-            if let Some(paths) = &self.paths {
-                options.env.push((tron_startup::CONFIG_DIR_ENV.into(), paths.config_dir.clone().into()));
             }
             if self.config.startup_animations == Some(false) {
                 options.env.push((tron_startup::ANIMATIONS_ENV.into(), "0".into()));
@@ -510,9 +535,11 @@ impl App {
         match request {
             PreviewRequest::Show(overlay) => match Config::with_overlay(self.paths.as_ref(), &overlay) {
                 Ok(config) => {
+                    let started = Instant::now();
                     if let Some(session) = &mut self.session {
                         session.apply_config(&config, self.paths.as_ref());
                     }
+                    log::debug!("preview applied in {:?}", started.elapsed());
                     self.preview = Some(overlay);
                 }
                 Err(error) => log::warn!("ignoring startup screen preview: {error}"),
@@ -742,6 +769,92 @@ impl Session {
         }
         self.bindings = bindings;
 
+        // Font changes rebuild the glyph atlases, which is slow. Previews that only
+        // change colors or shaders, like browsing themes, keep them.
+        let font_key = format!("{:?} {} {}", config.font, config.window.padding_x, config.window.padding_y);
+        if font_key != self.applied_font {
+            self.applied_font = font_key;
+            self.apply_font_config(config, &mut problems);
+        }
+        self.renderer.set_bidi(config.font.bidi);
+
+        match config.colors(paths) {
+            Ok(colors) => {
+                let palette = Palette::from_ansi(
+                    colors.foreground.to_array(),
+                    colors.background.to_array(),
+                    colors.cursor.to_array(),
+                    colors.ansi(),
+                );
+                self.shared.term.lock().set_default_palette(palette);
+                self.renderer.set_theme(Theme {
+                    cursor_text: colors.cursor_text.map(|c| c.to_array()),
+                    selection_background: colors.selection_background.to_array(),
+                    selection_foreground: colors.selection_foreground.map(|c| c.to_array()),
+                    opacity: config.window.opacity.clamp(0.0, 1.0),
+                    bold_is_bright: colors.bold_is_bright,
+                });
+            }
+            Err(error) => problems.push(error.to_string()),
+        }
+
+        let translucent = config.window.opacity < 1.0 && self.renderer.supports_transparency();
+        let blur = translucent && config.window.blur;
+        if self.applied_translucency != Some((translucent, blur)) {
+            self.applied_translucency = Some((translucent, blur));
+            self.window.set_transparent(translucent);
+            self.window.set_blur(blur);
+        }
+
+        let shaders: Vec<PostShader> = config
+            .shader_sources(paths)
+            .into_iter()
+            .filter_map(|source| match source {
+                Ok(source) => Some(PostShader { name: source.name, source: source.source }),
+                Err(error) => {
+                    problems.push(error.to_string());
+                    None
+                }
+            })
+            .collect();
+        let animation = match config.shader.animation {
+            Animation::Auto => None,
+            Animation::Always => Some(true),
+            Animation::Never => Some(false),
+        };
+        // Compiling pipelines takes long; an unchanged chain keeps its pipelines and errors.
+        let chain: Vec<(String, String)> = shaders.iter().map(|s| (s.name.clone(), s.source.clone())).collect();
+        if self
+            .applied_shaders
+            .as_ref()
+            .is_none_or(|(applied, applied_animation, _)| *applied != chain || *applied_animation != animation)
+        {
+            let errors = self.renderer.set_shaders(&shaders, animation);
+            self.applied_shaders = Some((chain, animation, errors));
+        }
+        if let Some((_, _, errors)) = &self.applied_shaders {
+            problems.extend(errors.iter().cloned());
+        }
+
+        {
+            let mut term = self.shared.term.lock();
+            term.set_scrollback_limit(config.scrollback.lines);
+            term.set_word_separators(&config.selection.word_separators);
+            term.set_default_cursor_shape(match config.cursor.shape {
+                tron_config::CursorShape::Block => CursorShape::Block,
+                tron_config::CursorShape::Beam => CursorShape::Beam,
+                tron_config::CursorShape::Underline => CursorShape::Underline,
+            });
+            let limit = config.images.memory_limit as usize * 1024 * 1024;
+            term.graphics_mut().set_limits(limit, config.images.file_transfer);
+            term.grid_mut().damage_all();
+        }
+        self.show_config_errors(problems);
+        self.window.request_redraw();
+    }
+
+    /// Loads the fonts, features and size from `config`.
+    fn apply_font_config(&mut self, config: &Config, problems: &mut Vec<String>) {
         if config.font.family != self.font_family {
             match FontSystem::new(&config.font.family, config.font.size, self.scale_factor) {
                 Ok(fonts) => {
@@ -767,69 +880,9 @@ impl Session {
             tron_config::Hinting::Off => tron_font::Hinting::Off,
         });
         self.set_font_size(config.font.size);
-        self.renderer.set_bidi(config.font.bidi);
-
-        match config.colors(paths) {
-            Ok(colors) => {
-                let palette = Palette::from_ansi(
-                    colors.foreground.to_array(),
-                    colors.background.to_array(),
-                    colors.cursor.to_array(),
-                    colors.ansi(),
-                );
-                self.shared.term.lock().set_default_palette(palette);
-                self.renderer.set_theme(Theme {
-                    cursor_text: colors.cursor_text.map(|c| c.to_array()),
-                    selection_background: colors.selection_background.to_array(),
-                    selection_foreground: colors.selection_foreground.map(|c| c.to_array()),
-                    opacity: config.window.opacity.clamp(0.0, 1.0),
-                    bold_is_bright: colors.bold_is_bright,
-                });
-            }
-            Err(error) => problems.push(error.to_string()),
-        }
-
-        let translucent = config.window.opacity < 1.0 && self.renderer.supports_transparency();
-        self.window.set_transparent(translucent);
-        self.window.set_blur(translucent && config.window.blur);
-
-        let shaders: Vec<PostShader> = config
-            .shader_sources(paths)
-            .into_iter()
-            .filter_map(|source| match source {
-                Ok(source) => Some(PostShader { name: source.name, source: source.source }),
-                Err(error) => {
-                    problems.push(error.to_string());
-                    None
-                }
-            })
-            .collect();
-        let animation = match config.shader.animation {
-            Animation::Auto => None,
-            Animation::Always => Some(true),
-            Animation::Never => Some(false),
-        };
-        problems.extend(self.renderer.set_shaders(&shaders, animation));
-
-        {
-            let mut term = self.shared.term.lock();
-            term.set_scrollback_limit(config.scrollback.lines);
-            term.set_word_separators(&config.selection.word_separators);
-            term.set_default_cursor_shape(match config.cursor.shape {
-                tron_config::CursorShape::Block => CursorShape::Block,
-                tron_config::CursorShape::Beam => CursorShape::Beam,
-                tron_config::CursorShape::Underline => CursorShape::Underline,
-            });
-            let limit = config.images.memory_limit as usize * 1024 * 1024;
-            term.graphics_mut().set_limits(limit, config.images.file_transfer);
-            term.grid_mut().damage_all();
-        }
-        self.show_config_errors(problems);
-        self.window.request_redraw();
     }
 
-    /// Logs configuration problems and shows them at the top of the window for a while.
-    /// An empty list removes earlier ones.
+    /// Logs configuration problems and shows them at the top of the window for a while.    /// An empty list removes earlier ones.
     fn show_config_errors(&mut self, errors: Vec<String>) {
         for error in &errors {
             log::error!("{error}");
@@ -1000,7 +1053,6 @@ impl Session {
                 && (since.elapsed() > STARTUP_SHADER_IDLE || term.command_marks().count() > marks)
             {
                 self.startup_shader = None;
-                self.startup_token = None;
                 self.renderer.set_startup_shader(false);
                 self.preview_request = Some(PreviewRequest::Restore);
             }

@@ -1,0 +1,10 @@
+# Synthwave Alpha.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#f2f2e3"
+background = "#241b30"
+cursor = "#f2f2e3"
+cursor_text = "#241b30"
+selection_background = "#6e29ad"
+selection_foreground = "#f2f2e3"
+normal = ["#241b30", "#e60a70", "#00986c", "#adad3e", "#6e29ad", "#b300ad", "#00b0b1", "#b9b1bc"]
+bright = ["#7f7094", "#e60a70", "#0ae4a4", "#f9f972", "#aa54f9", "#ff00f6", "#00fbfd", "#f2f2e3"]

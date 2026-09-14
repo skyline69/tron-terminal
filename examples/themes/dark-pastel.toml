@@ -1,0 +1,10 @@
+# Dark Pastel.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#000000"
+cursor = "#bbbbbb"
+cursor_text = "#ffffff"
+selection_background = "#b5d5ff"
+selection_foreground = "#000000"
+normal = ["#000000", "#ff5555", "#55ff55", "#ffff55", "#5555ff", "#ff55ff", "#55ffff", "#bbbbbb"]
+bright = ["#555555", "#ff5555", "#55ff55", "#ffff55", "#5555ff", "#ff55ff", "#55ffff", "#ffffff"]

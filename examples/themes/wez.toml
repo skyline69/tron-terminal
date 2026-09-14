@@ -1,0 +1,10 @@
+# Wez.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#b3b3b3"
+background = "#000000"
+cursor = "#53ae71"
+cursor_text = "#000000"
+selection_background = "#4d52f8"
+selection_foreground = "#000000"
+normal = ["#000000", "#cc5555", "#55cc55", "#cdcd55", "#5555cc", "#cc55cc", "#7acaca", "#cccccc"]
+bright = ["#555555", "#ff5555", "#55ff55", "#ffff55", "#5555ff", "#ff55ff", "#55ffff", "#ffffff"]

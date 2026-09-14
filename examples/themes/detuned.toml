@@ -1,0 +1,10 @@
+# Detuned.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c7c7c7"
+background = "#000000"
+cursor = "#c7c7c7"
+cursor_text = "#8c8c8c"
+selection_background = "#c1deff"
+selection_foreground = "#000000"
+normal = ["#171717", "#fe4386", "#a6e32d", "#e6da73", "#0094d9", "#9b37ff", "#50b7d9", "#c7c7c7"]
+bright = ["#686868", "#fa80ac", "#bde371", "#fff27f", "#00beff", "#be9eff", "#5ed7ff", "#ffffff"]

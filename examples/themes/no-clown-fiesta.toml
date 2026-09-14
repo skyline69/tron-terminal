@@ -1,0 +1,10 @@
+# No Clown Fiesta.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e0e1e4"
+background = "#101010"
+cursor = "#e0e1e4"
+cursor_text = "#18191b"
+selection_background = "#696d79"
+selection_foreground = "#e0e1e4"
+normal = ["#151515", "#b46958", "#90a959", "#f4bf75", "#bad7ff", "#aa759f", "#88afa2", "#e1e1e1"]
+bright = ["#727272", "#7e97ab", "#90a959", "#f4bf75", "#bad7ff", "#aa759f", "#88afa2", "#afafaf"]

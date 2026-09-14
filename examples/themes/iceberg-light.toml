@@ -1,0 +1,10 @@
+# Iceberg Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#33374c"
+background = "#e8e9ec"
+cursor = "#33374c"
+cursor_text = "#e8e9ec"
+selection_background = "#33374c"
+selection_foreground = "#e8e9ec"
+normal = ["#dcdfe7", "#cc517a", "#668e3d", "#c57339", "#2d539e", "#7759b4", "#3f83a6", "#33374c"]
+bright = ["#8389a3", "#cc3768", "#598030", "#b6662d", "#22478e", "#6845ad", "#327698", "#262a3f"]

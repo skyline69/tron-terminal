@@ -1,0 +1,10 @@
+# Guezwhoz.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#d9d9d9"
+background = "#1d1d1d"
+cursor = "#99d4b1"
+cursor_text = "#1d1d1d"
+selection_background = "#245354"
+selection_foreground = "#58d6ce"
+normal = ["#333333", "#e85181", "#7ad694", "#b7d074", "#5aa0d6", "#9a90e0", "#58d6ce", "#d9d9d9"]
+bright = ["#808080", "#e85181", "#afd7af", "#d1ed85", "#64b2ed", "#a398ed", "#61ede4", "#ededed"]

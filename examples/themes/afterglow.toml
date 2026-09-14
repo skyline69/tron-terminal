@@ -1,0 +1,10 @@
+# Afterglow.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#d0d0d0"
+background = "#212121"
+cursor = "#d0d0d0"
+cursor_text = "#151515"
+selection_background = "#303030"
+selection_foreground = "#d0d0d0"
+normal = ["#151515", "#ac4142", "#7e8e50", "#e5b567", "#6c99bb", "#9f4e85", "#7dd6cf", "#d0d0d0"]
+bright = ["#505050", "#ac4142", "#7e8e50", "#e5b567", "#6c99bb", "#9f4e85", "#7dd6cf", "#f5f5f5"]

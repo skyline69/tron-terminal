@@ -1,0 +1,10 @@
+# Mariana.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#d8dee9"
+background = "#343d46"
+cursor = "#fcbb6a"
+cursor_text = "#8c8c8c"
+selection_background = "#4e5a65"
+selection_foreground = "#d8dee9"
+normal = ["#000000", "#ec5f66", "#99c794", "#f9ae58", "#6699cc", "#c695c6", "#5fb4b4", "#f7f7f7"]
+bright = ["#666666", "#f97b58", "#acd1a8", "#fac761", "#85add6", "#d8b6d8", "#82c4c4", "#ffffff"]

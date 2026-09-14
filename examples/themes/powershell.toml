@@ -1,0 +1,10 @@
+# Powershell.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#f6f6f7"
+background = "#052454"
+cursor = "#f6f6f7"
+cursor_text = "#052454"
+selection_background = "#f6f6f7"
+selection_foreground = "#052454"
+normal = ["#000000", "#981a22", "#098003", "#c4a000", "#4140c3", "#d33682", "#0e807f", "#7f7c7f"]
+bright = ["#808080", "#ef2929", "#1cfe3c", "#fefe45", "#268ad2", "#fe13fa", "#29fffe", "#c2c1c3"]

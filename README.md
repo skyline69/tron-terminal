@@ -83,6 +83,13 @@ keys and the Hyper modifier; application keypad mode and SGR-Pixels mouse
 reports (mode 1016) work too. The clipboard and primary selection work on
 Wayland and X11.
 
+### Environment
+
+Programs in tron see `TERM_PROGRAM=tron` and `KITTY_WINDOW_ID`, so tools that
+look for kitty before using the kitty graphics protocol (Codex pets, image
+viewers) use it. Variables from a tmux session or another terminal tron was
+started from, such as `TMUX`, are removed.
+
 ### Accessibility
 
 tron exposes the screen to screen readers such as Orca over AT-SPI. Set
@@ -91,8 +98,11 @@ tron exposes the screen to screen readers such as Orca over AT-SPI. Set
 ## Configuration
 
 tron reads `~/.config/tron/config.toml` (the XDG config directory) and applies
-changes while running. Every key is optional; see
-[`examples/config.toml`](examples/config.toml) for all of them.
+changes while running. The first launch writes the documented
+[`examples/config.toml`](examples/config.toml) there. Every key is optional.
+
+The startup screen (`tron --startup`) previews and saves themes, shaders and
+settings. Run inside a tron window, it opens in that window.
 
 ```
 ~/.config/tron/
@@ -101,11 +111,16 @@ changes while running. Every key is optional; see
   shaders/<name>.wgsl   post-processing shaders
 ```
 
-Built-in themes: `tron` (default), `tron-light`, `catppuccin-mocha`, `dracula`,
-`gruvbox-dark`, `nord`, `one-dark`, `rose-pine`, `solarized-dark` and
-`tokyo-night`. The example shaders are built in too, so
-`files = ["crt.wgsl"]` works without copying anything; a file of the same
-name in `shaders/` takes precedence.
+Built-in themes: `tron` (default), `tron-light` and about 460 more from
+[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes),
+named in lower case with hyphens (`catppuccin-mocha`, `gruvbox-dark`,
+`tokyonight-storm`, ...). Every file in [`examples/shaders`](examples/shaders)
+is built in too, including WGSL ports of
+[hackr-sh/ghostty-shaders](https://github.com/hackr-sh/ghostty-shaders) and
+[sahaj-b/ghostty-cursor-shaders](https://github.com/sahaj-b/ghostty-cursor-shaders),
+so `files = ["crt.wgsl"]` works without copying anything; a file of the same
+name in `shaders/` takes precedence. The startup screen's Credits tab lists
+their authors and licenses.
 
 Key bindings override the defaults:
 

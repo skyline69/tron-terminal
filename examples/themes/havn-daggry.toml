@@ -1,0 +1,10 @@
+# Havn Daggry.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#3b4a7a"
+background = "#f8f9fb"
+cursor = "#226c4f"
+cursor_text = "#d6dbeb"
+selection_background = "#cfe9dd"
+selection_foreground = "#313c64"
+normal = ["#1f2842", "#985248", "#577159", "#be6b00", "#3a577d", "#7c5c97", "#925780", "#b0b5c5"]
+bright = ["#1f2842", "#cc4a35", "#719679", "#f1a527", "#6089c0", "#7d7396", "#aa869d", "#d6dbeb"]

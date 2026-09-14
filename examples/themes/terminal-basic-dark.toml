@@ -1,0 +1,10 @@
+# Terminal Basic Dark.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#1d1e1d"
+cursor = "#9d9d9d"
+cursor_text = "#1d1e1d"
+selection_background = "#3f638a"
+selection_foreground = "#ffffff"
+normal = ["#000000", "#c65339", "#6ac44b", "#b8b74a", "#6444ed", "#d357db", "#69c1cf", "#d1d1d1"]
+bright = ["#909090", "#eb5a3a", "#77ea51", "#efef53", "#d09af9", "#eb5af7", "#78f1f2", "#ededed"]

@@ -62,8 +62,9 @@ fn shade(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
     let opened_y = max(smoothstep(0.3, 1.0, power), 0.004);
     let screen = vec2<f32>((uv.x - 0.5) / opened_x + 0.5, (uv.y - 0.5) / opened_y + 0.5);
     let line = (1.0 - smoothstep(0.35, 0.7, power)) * exp(-abs(uv.y - 0.5) * 600.0) * step(abs(uv.x - 0.5), opened_x * 0.5);
+    // Around the opening screen the window shows its background color, not black.
     if screen.x < 0.0 || screen.x > 1.0 || screen.y < 0.0 || screen.y > 1.0 {
-        return vec4<f32>(vec3<f32>(line), max(tron.background.a, line));
+        return vec4<f32>(tron.background.rgb + vec3<f32>(line), max(tron.background.a, line));
     }
 
     // Glitch: rows jump sideways and the color channels split.
@@ -82,7 +83,8 @@ fn shade(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
 
     let scanlines = 0.94 + 0.06 * sin(frag_coord.y * 3.14159);
     let vignette = smoothstep(1.25, 0.3, length(uv - 0.5));
-    color = color * scanlines * vignette + vec3<f32>(line);
+    // The vignette fades toward the background color, so the edges match the window around it.
+    color = mix(tron.background.rgb, color * scanlines, vignette) + vec3<f32>(line);
     let alpha = max(base.a, max(max(color.r, color.g), color.b));
     return vec4<f32>(color, alpha);
 }

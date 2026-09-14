@@ -1,0 +1,10 @@
+# Pale Night Hc.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#cccccc"
+background = "#3e4251"
+cursor = "#ffcb6b"
+cursor_text = "#323232"
+selection_background = "#717cb4"
+selection_foreground = "#80cbc4"
+normal = ["#000000", "#f07178", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#ffffff"]
+bright = ["#737373", "#f6a9ae", "#dbf1ba", "#ffdfa6", "#b4ccff", "#ddbdf2", "#b8eaff", "#999999"]

@@ -1,0 +1,10 @@
+# owl.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#dedede"
+background = "#2f2b2c"
+cursor = "#dedede"
+cursor_text = "#2f2b2c"
+selection_background = "#dedede"
+selection_foreground = "#2f2b2c"
+normal = ["#302c2c", "#5a5a5a", "#989898", "#cacaca", "#656565", "#b1b1b1", "#7f7f7f", "#dedede"]
+bright = ["#5d595b", "#da5b2c", "#989898", "#cacaca", "#656565", "#b1b1b1", "#7f7f7f", "#ffffff"]

@@ -1,0 +1,10 @@
+# Tomorrow.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#4d4d4c"
+background = "#ffffff"
+cursor = "#4d4d4c"
+cursor_text = "#ffffff"
+selection_background = "#d6d6d6"
+selection_foreground = "#4d4d4c"
+normal = ["#000000", "#c82829", "#718c00", "#eab700", "#4271ae", "#8959a8", "#3e999f", "#bfbfbf"]
+bright = ["#000000", "#c82829", "#718c00", "#eab700", "#4271ae", "#8959a8", "#3e999f", "#ffffff"]

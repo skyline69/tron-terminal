@@ -1,0 +1,10 @@
+# Cyberpunk Scarlet Protocol.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e41951"
+background = "#101116"
+cursor = "#76ff9f"
+cursor_text = "#a6a6a6"
+selection_background = "#c1deff"
+selection_foreground = "#000000"
+normal = ["#101116", "#ff0051", "#01dc84", "#faf945", "#0271b6", "#c930c7", "#00c5c7", "#c7c7c7"]
+bright = ["#686868", "#ff6e67", "#60fa68", "#fffc67", "#6871ff", "#bd35ec", "#60fdff", "#ffffff"]

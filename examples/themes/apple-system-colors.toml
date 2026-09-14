@@ -1,0 +1,10 @@
+# Apple System Colors.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#1e1e1e"
+cursor = "#98989d"
+cursor_text = "#ffffff"
+selection_background = "#3f638b"
+selection_foreground = "#ffffff"
+normal = ["#1a1a1a", "#cc372e", "#26a439", "#cdac08", "#0869cb", "#9647bf", "#479ec2", "#98989d"]
+bright = ["#464646", "#ff453a", "#32d74b", "#ffd60a", "#0a84ff", "#bf5af2", "#76d6ff", "#ffffff"]

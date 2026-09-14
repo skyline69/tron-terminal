@@ -1,0 +1,10 @@
+# Popping And Locking.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ebdbb2"
+background = "#181921"
+cursor = "#c7c7c7"
+cursor_text = "#8c8c8c"
+selection_background = "#ebdbb2"
+selection_foreground = "#928374"
+normal = ["#1d2021", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984"]
+bright = ["#928374", "#f42c3e", "#b8bb26", "#fabd2f", "#99c6ca", "#d3869b", "#7ec16e", "#ebdbb2"]

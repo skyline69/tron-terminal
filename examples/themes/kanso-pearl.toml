@@ -1,0 +1,10 @@
+# Kanso Pearl.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#22262d"
+background = "#f2f1ef"
+cursor = "#22262d"
+cursor_text = "#f2f1ef"
+selection_background = "#e2e1df"
+selection_foreground = "#22262d"
+normal = ["#22262d", "#c84053", "#6f894e", "#77713f", "#4d699b", "#b35b79", "#597b75", "#545464"]
+bright = ["#6d6f6e", "#d7474b", "#6e915f", "#836f4a", "#6693bf", "#624c83", "#5e857a", "#43436c"]

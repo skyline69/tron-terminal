@@ -1,0 +1,10 @@
+# Abernathy.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#eeeeec"
+background = "#111416"
+cursor = "#bbbbbb"
+cursor_text = "#ffffff"
+selection_background = "#eeeeec"
+selection_foreground = "#333333"
+normal = ["#000000", "#cd0000", "#00cd00", "#cdcd00", "#1093f5", "#cd00cd", "#00cdcd", "#faebd7"]
+bright = ["#404040", "#ff0000", "#00ff00", "#ffff00", "#11b5f6", "#ff00ff", "#00ffff", "#ffffff"]

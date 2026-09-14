@@ -1,0 +1,360 @@
+# Credits shown in the startup screen's Credits tab. One [[credit]] per work tron
+# ships or builds on. Keys: title, kind, author, author_url, source_url, port_url,
+# license (as stated by the author, left out when none is stated), note.
+
+[[credit]]
+title = "iTerm2 Color Schemes"
+kind = "Themes"
+author = "Mark Badolato and contributors"
+author_url = "https://github.com/mbadolato"
+source_url = "https://github.com/mbadolato/iTerm2-Color-Schemes"
+license = "MIT"
+note = "The built-in color themes, from its Ghostty collection."
+
+[[credit]]
+title = "ratatui"
+kind = "Library"
+author = "The Ratatui developers"
+source_url = "https://github.com/ratatui/ratatui"
+license = "MIT"
+note = "Draws this startup screen."
+
+[[credit]]
+title = "tachyonfx"
+kind = "Library"
+author = "Adrian Papari (junkdog)"
+author_url = "https://github.com/junkdog"
+source_url = "https://github.com/junkdog/tachyonfx"
+license = "MIT"
+note = "The startup screen's animations."
+
+[[credit]]
+title = "wgpu"
+kind = "Library"
+author = "The gfx-rs developers"
+source_url = "https://github.com/gfx-rs/wgpu"
+license = "MIT OR Apache-2.0"
+note = "GPU rendering and the WGSL shader compiler."
+
+[[credit]]
+title = "winit"
+kind = "Library"
+author = "The winit contributors"
+source_url = "https://github.com/rust-windowing/winit"
+license = "Apache-2.0"
+note = "Windows and input."
+
+[[credit]]
+title = "HarfRust"
+kind = "Library"
+author = "The HarfBuzz project"
+source_url = "https://github.com/harfbuzz/harfrust"
+license = "MIT"
+note = "Text shaping."
+
+[[credit]]
+title = "swash"
+kind = "Library"
+author = "Chad Brokaw (dfrg)"
+author_url = "https://github.com/dfrg"
+source_url = "https://github.com/dfrg/swash"
+license = "Apache-2.0 OR MIT"
+note = "Glyph rasterization."
+
+# Shaders
+
+[[credit]]
+title = "Animated Gradient"
+kind = "Shader"
+author = "unkn0wncode"
+author_url = "https://github.com/unkn0wncode"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/animated-gradient-shader.glsl"
+note = "Built in as animated-gradient-shader.wgsl."
+
+[[credit]]
+title = "Better CRT"
+kind = "Shader"
+author = "April Hall (arithefirst)"
+author_url = "https://github.com/arithefirst"
+source_url = "https://www.shadertoy.com/view/WsVSzV"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/bettercrt.glsl"
+license = "CC BY NC SA 3.0 (Shadertoy's default since the original creator didn't provide any license)"
+note = "Built in as bettercrt.wgsl."
+
+[[credit]]
+title = "Bloom"
+kind = "Shader"
+author = "qwerasd205"
+author_url = "https://github.com/qwerasd205"
+source_url = "https://gist.github.com/qwerasd205/c3da6c610c8ffe17d6d2d3cc7068f17f"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/bloom.glsl"
+note = "Built in as bloom-spiral.wgsl."
+
+[[credit]]
+title = "CineShader Lava"
+kind = "Shader"
+source_url = "https://www.shadertoy.com/view/3sySRK"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/cineShader-Lava.glsl"
+note = "Built in as cineshader-lava.wgsl."
+
+[[credit]]
+title = "CRT (Lottes)"
+kind = "Shader"
+author = "Timothy Lottes, adapted for Ghostty by Qwerasd"
+author_url = "https://github.com/qwerasd205"
+source_url = "https://www.shadertoy.com/view/MtSfRK"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/crt.glsl"
+license = "Unlicense (public domain)"
+note = "Built in as crt-lottes.wgsl."
+
+[[credit]]
+title = "Cubes"
+kind = "Shader"
+author = "rymdlego"
+author_url = "https://github.com/rymdlego"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/cubes.glsl"
+note = "Built in as cubes.wgsl."
+
+[[credit]]
+title = "Dither"
+kind = "Shader"
+author = "moni-dz"
+author_url = "https://github.com/moni-dz"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/dither.glsl"
+license = "CC BY-NC-SA 4.0"
+note = "Built in as dither.wgsl."
+
+[[credit]]
+title = "Drunkard"
+kind = "Shader"
+author = "moni-dz"
+author_url = "https://github.com/moni-dz"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/drunkard.glsl"
+license = "CC BY-NC-SA 4.0"
+note = "Built in as drunkard.wgsl."
+
+[[credit]]
+title = "Fireworks"
+kind = "Shader"
+author = "Martijn Steinrucken aka BigWings"
+source_url = "https://www.shadertoy.com/view/lscGRl"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/fireworks.glsl"
+license = "Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License"
+note = "Built in as fireworks.wgsl."
+
+[[credit]]
+title = "Fireworks Rockets"
+kind = "Shader"
+source_url = "https://www.shadertoy.com/view/4dBGRw"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/fireworks-rockets.glsl"
+note = "Built in as fireworks-rockets.wgsl."
+
+[[credit]]
+title = "Galaxy"
+kind = "Shader"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/galaxy.glsl"
+note = "Built in as galaxy.wgsl."
+
+[[credit]]
+title = "Gears and Belts"
+kind = "Shader"
+source_url = "https://www.shadertoy.com/view/DsVSDV"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/gears-and-belts.glsl"
+note = "Built in as gears-and-belts.wgsl."
+
+[[credit]]
+title = "Glitchy"
+kind = "Shader"
+source_url = "https://www.shadertoy.com/view/wld3WN"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/glitchy.glsl"
+note = "Built in as glitchy.wgsl."
+
+[[credit]]
+title = "Glow RGB Split Twitchy"
+kind = "Shader"
+author = "Based on kalgynirae's glow shader and NickWest's Chromatic Aberration demo"
+author_url = "https://github.com/kalgynirae"
+source_url = "https://github.com/kalgynirae/dotfiles/blob/main/ghostty/glow.glsl"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/glow-rgbsplit-twitchy.glsl"
+note = "Built in as glow-rgbsplit-twitchy.wgsl."
+
+[[credit]]
+title = "Gradient Background"
+kind = "Shader"
+author = "unkn0wncode"
+author_url = "https://github.com/unkn0wncode"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/gradient-background.glsl"
+note = "Built in as gradient-background.wgsl."
+
+[[credit]]
+title = "In-Game CRT"
+kind = "Shader"
+author = "sarphiv"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/in-game-crt.glsl"
+license = "CC BY-NC-SA 4.0"
+note = "Built in as in-game-crt.wgsl."
+
+[[credit]]
+title = "Inside the Matrix"
+kind = "Shader"
+author = "@pkazmier (Ghostty adaptation); runes by FabriceNeyret2, based on otaviogood"
+source_url = "https://www.shadertoy.com/view/4ltyDM"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/inside-the-matrix.glsl"
+license = "Feel free to do anything you want with this code."
+note = "Built in as inside-the-matrix.wgsl."
+
+[[credit]]
+title = "Just Snow"
+kind = "Shader"
+author = "Andrew Baldwin (baldand)"
+author_url = "http://thndl.com"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/just-snow.glsl"
+license = "CC BY-NC-SA 3.0 (Attribution-NonCommercial-ShareAlike, http://creativecommons.org/licenses/by-nc-sa/3.0/deed.en_US)"
+note = "Built in as just-snow.wgsl."
+
+[[credit]]
+title = "Matrix Hallway"
+kind = "Shader"
+author = "Reinder Nijhoff (@reindernijhoff)"
+source_url = "https://www.shadertoy.com/view/ldjBW1"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/matrix-hallway.glsl"
+license = "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License"
+note = "Built in as matrix-hallway.wgsl."
+
+[[credit]]
+title = "Negative"
+kind = "Shader"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/negative.glsl"
+note = "Built in as negative.wgsl."
+
+[[credit]]
+title = "Retro Terminal"
+kind = "Shader"
+source_url = "https://www.shadertoy.com/view/WsVSzV"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/retro-terminal.glsl"
+license = "Shadertoy default (CC BY NC SA 3.0), the original creator didn't provide any license"
+note = "Built in as retro-terminal.wgsl."
+
+[[credit]]
+title = "Sine Interference"
+kind = "Shader"
+source_url = "https://www.shadertoy.com/view/ms3cWn"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/sin-interference.glsl"
+note = "Built in as sin-interference.wgsl."
+
+[[credit]]
+title = "Smoke and Ghost"
+kind = "Shader"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/smoke-and-ghost.glsl"
+note = "Built in as smoke-and-ghost.wgsl."
+
+[[credit]]
+title = "Sparks from Fire"
+kind = "Shader"
+author = "Jan Mróz (jaszunio15); adapted for Ghostty by Alex Sherwin"
+source_url = "https://www.shadertoy.com/view/wl2Gzc"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/sparks-from-fire.glsl"
+license = "CC BY 3.0"
+note = "Built in as sparks-from-fire.wgsl."
+
+[[credit]]
+title = "Spotlight"
+kind = "Shader"
+author = "Paul Robello"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/spotlight.glsl"
+note = "Built in as spotlight.wgsl."
+
+[[credit]]
+title = "Starfield"
+kind = "Shader"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/starfield.glsl"
+note = "Built in as starfield.wgsl."
+
+[[credit]]
+title = "Starfield Colors"
+kind = "Shader"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/starfield-colors.glsl"
+note = "Built in as starfield-colors.wgsl."
+
+[[credit]]
+title = "TFT"
+kind = "Shader"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/tft.glsl"
+note = "Built in as tft.wgsl."
+
+[[credit]]
+title = "Underwater"
+kind = "Shader"
+author = "Alex Sherwin (Ghostty adaptation)"
+source_url = "https://www.shadertoy.com/view/lljGDt"
+port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/underwater.glsl"
+note = "Built in as underwater.wgsl."
+
+[[credit]]
+title = "Water"
+kind = "Shader"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/water.glsl"
+note = "Built in as water.wgsl."
+
+[[credit]]
+title = "Cursor Sweep"
+kind = "Cursor shader"
+author = "Sahaj Bhatt (sahaj-b); SDF functions based on Inigo Quilez's 2D distance functions article (https://iquilezles.org/articles/distfunctions2d/)"
+author_url = "https://github.com/sahaj-b"
+source_url = "https://github.com/sahaj-b/ghostty-cursor-shaders/blob/main/cursor_sweep.glsl"
+license = "MIT"
+note = "Built in as cursor-sweep.wgsl."
+
+[[credit]]
+title = "Cursor Tail"
+kind = "Cursor shader"
+author = "Sahaj Bhatt (sahaj-b); SDF functions based on Inigo Quilez's 2D distance functions article (https://iquilezles.org/articles/distfunctions2d/)"
+author_url = "https://github.com/sahaj-b"
+source_url = "https://github.com/sahaj-b/ghostty-cursor-shaders/blob/main/cursor_tail.glsl"
+license = "MIT"
+note = "Built in as cursor-tail.wgsl."
+
+[[credit]]
+title = "Cursor Warp"
+kind = "Cursor shader"
+author = "Sahaj Bhatt (sahaj-b); SDF functions based on Inigo Quilez's 2D distance functions article (https://iquilezles.org/articles/distfunctions2d/)"
+author_url = "https://github.com/sahaj-b"
+source_url = "https://github.com/sahaj-b/ghostty-cursor-shaders/blob/main/cursor_warp.glsl"
+license = "MIT"
+note = "Built in as cursor-warp.wgsl."
+
+[[credit]]
+title = "Rectangle Boom Cursor"
+kind = "Cursor shader"
+author = "Sahaj Bhatt (sahaj-b)"
+author_url = "https://github.com/sahaj-b"
+source_url = "https://github.com/sahaj-b/ghostty-cursor-shaders/blob/main/rectangle_boom_cursor.glsl"
+license = "MIT"
+note = "Built in as rectangle-boom-cursor.wgsl."
+
+[[credit]]
+title = "Ripple Cursor"
+kind = "Cursor shader"
+author = "Sahaj Bhatt (sahaj-b)"
+author_url = "https://github.com/sahaj-b"
+source_url = "https://github.com/sahaj-b/ghostty-cursor-shaders/blob/main/ripple_cursor.glsl"
+license = "MIT"
+note = "Built in as ripple-cursor.wgsl."
+
+[[credit]]
+title = "Ripple Rectangle Cursor"
+kind = "Cursor shader"
+author = "Sahaj Bhatt (sahaj-b)"
+author_url = "https://github.com/sahaj-b"
+source_url = "https://github.com/sahaj-b/ghostty-cursor-shaders/blob/main/ripple_rectangle_cursor.glsl"
+license = "MIT"
+note = "Built in as ripple-rectangle-cursor.wgsl."
+
+[[credit]]
+title = "Sonic Boom Cursor"
+kind = "Cursor shader"
+author = "Sahaj Bhatt (sahaj-b)"
+author_url = "https://github.com/sahaj-b"
+source_url = "https://github.com/sahaj-b/ghostty-cursor-shaders/blob/main/sonic_boom_cursor.glsl"
+license = "MIT"
+note = "Built in as sonic-boom-cursor.wgsl."

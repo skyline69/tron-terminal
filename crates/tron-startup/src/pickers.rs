@@ -50,9 +50,14 @@ impl Picker {
 /// One list row: name, a short tag after it, and whether it is chosen.
 pub struct Item<'a> {
     pub name: &'a str,
-    pub tag: &'a str,
+    pub tag: String,
     pub chosen: bool,
+    /// Drawn as a checkbox, for lists where several rows can be chosen.
+    pub check: bool,
 }
+
+/// Columns of the checkbox in a checklist row, after the selection pointer.
+pub const CHECKBOX: (u16, u16) = (2, 3);
 
 /// Draws a list and returns the screen area of every visible row, by index.
 pub fn draw_list(
@@ -69,7 +74,12 @@ pub fn draw_list(
     for (row, index) in (picker.offset..items.len()).take(height).enumerate() {
         let item = &items[index];
         let selected = index == picker.selected;
-        let marker = if item.chosen { Span::styled("● ", Style::new().fg(MAGENTA)) } else { Span::raw("  ") };
+        let marker = match (item.check, item.chosen) {
+            (true, true) => Span::styled("[✓] ", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
+            (true, false) => Span::styled("[ ] ", Style::new().fg(DIM)),
+            (false, true) => Span::styled("● ", Style::new().fg(MAGENTA)),
+            (false, false) => Span::raw("  "),
+        };
         let pointer = if selected { Span::styled("› ", Style::new().fg(CYAN)) } else { Span::raw("  ") };
         let name_style = match (selected, hover == Some(index)) {
             (true, _) if focused => Style::new().fg(CYAN).add_modifier(Modifier::BOLD),
@@ -195,7 +205,7 @@ pub fn draw_shader_details(
     };
     let state = match position {
         Some(index) => Span::styled(format!("  ● on, runs {}", ordinal(index + 1)), Style::new().fg(MAGENTA)),
-        None => Span::styled("  Space to turn on", label),
+        None => Span::styled("  Space to check", label),
     };
     let motion = match shader.motion {
         Motion::EveryFrame => "every frame",
@@ -212,7 +222,8 @@ pub fn draw_shader_details(
         field("Redraws", motion.to_owned()),
         field("Chain", chain),
         Line::raw(""),
-        Line::styled("The window shows the highlighted shader on top of the ones already on.", label),
+        Line::styled("Checked shaders stack and run in order. Shift+↑/↓ moves a checked one.", label),
+        Line::styled("The window shows the highlighted shader on top of the checked ones.", label),
         Line::styled("The startup effects pause on this tab so you see shaders on their own.", label),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);

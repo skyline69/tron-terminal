@@ -1,0 +1,10 @@
+# Nord Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#414858"
+background = "#e5e9f0"
+cursor = "#7bb3c3"
+cursor_text = "#3b4252"
+selection_background = "#d8dee9"
+selection_foreground = "#4c556a"
+normal = ["#3b4252", "#bf616a", "#96b17f", "#c5a565", "#81a1c1", "#b48ead", "#7bb3c3", "#a5abb6"]
+bright = ["#4c566a", "#bf616a", "#96b17f", "#c5a565", "#81a1c1", "#b48ead", "#82afae", "#eceff4"]

@@ -1,0 +1,10 @@
+# Hurtado.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#dbdbdb"
+background = "#000000"
+cursor = "#bbbbbb"
+cursor_text = "#ffffff"
+selection_background = "#b5d5ff"
+selection_foreground = "#000000"
+normal = ["#575757", "#ff1b00", "#a5e055", "#fbe74a", "#496487", "#fd5ff1", "#86e9fe", "#cbcccb"]
+bright = ["#404040", "#d51d00", "#a5df55", "#fbe84a", "#89beff", "#c001c1", "#86eafe", "#dbdbdb"]

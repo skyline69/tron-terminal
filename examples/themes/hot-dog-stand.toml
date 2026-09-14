@@ -1,0 +1,10 @@
+# Hot Dog Stand.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#ea3323"
+cursor = "#ffff54"
+cursor_text = "#ea3323"
+selection_background = "#ffff54"
+selection_foreground = "#000000"
+normal = ["#000000", "#ffff54", "#ffff54", "#ffff54", "#000000", "#ffff54", "#ffffff", "#c6c6c6"]
+bright = ["#000000", "#ffff54", "#ffff54", "#ffff54", "#000000", "#ffff54", "#ffffff", "#c6c6c6"]

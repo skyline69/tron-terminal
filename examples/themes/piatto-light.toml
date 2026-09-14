@@ -1,0 +1,10 @@
+# Piatto Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#414141"
+background = "#ffffff"
+cursor = "#5e77c8"
+cursor_text = "#abbee5"
+selection_background = "#706b4e"
+selection_foreground = "#acbcdc"
+normal = ["#414141", "#b23771", "#66781e", "#cd6f34", "#3c5ea8", "#a454b2", "#66781e", "#bfbfbf"]
+bright = ["#3f3f3f", "#db3365", "#829429", "#cd6f34", "#3c5ea8", "#a454b2", "#829429", "#f2f2f2"]

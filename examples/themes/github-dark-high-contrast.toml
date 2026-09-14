@@ -1,0 +1,10 @@
+# GitHub Dark High Contrast.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#f0f3f6"
+background = "#0a0c10"
+cursor = "#71b7ff"
+cursor_text = "#b1f7ff"
+selection_background = "#f0f3f6"
+selection_foreground = "#0a0c10"
+normal = ["#7a828e", "#ff9492", "#26cd4d", "#f0b72f", "#71b7ff", "#cb9eff", "#39c5cf", "#d9dee3"]
+bright = ["#9ea7b3", "#ffb1af", "#4ae168", "#f7c843", "#91cbff", "#dbb7ff", "#56d4dd", "#ffffff"]

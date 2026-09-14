@@ -1,0 +1,10 @@
+# Violite.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#eef4f6"
+background = "#241c36"
+cursor = "#eef4f6"
+cursor_text = "#241c36"
+selection_background = "#49376d"
+selection_foreground = "#eef4f6"
+normal = ["#241c36", "#ec7979", "#79ecb3", "#ece279", "#a979ec", "#ec79ec", "#79ecec", "#eef4f6"]
+bright = ["#56447a", "#ef8f8f", "#9fefbf", "#efe78f", "#b78fef", "#ef8fcf", "#9fefef", "#f8fafc"]

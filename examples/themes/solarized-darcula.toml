@@ -1,0 +1,10 @@
+# Solarized Darcula.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#d2d8d9"
+background = "#3d3f41"
+cursor = "#708284"
+cursor_text = "#002831"
+selection_background = "#214283"
+selection_foreground = "#d2d8d9"
+normal = ["#25292a", "#f24840", "#629655", "#b68800", "#2075c7", "#797fd4", "#15968d", "#d2d8d9"]
+bright = ["#65696a", "#f24840", "#629655", "#b68800", "#2075c7", "#797fd4", "#15968d", "#d2d8d9"]

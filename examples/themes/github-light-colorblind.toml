@@ -1,0 +1,10 @@
+# GitHub Light Colorblind.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#24292f"
+background = "#ffffff"
+cursor = "#0969da"
+cursor_text = "#3c9cff"
+selection_background = "#24292f"
+selection_foreground = "#ffffff"
+normal = ["#24292f", "#b35900", "#0550ae", "#4d2d00", "#0969da", "#8250df", "#1b7c83", "#6e7781"]
+bright = ["#57606a", "#8a4600", "#0969da", "#633c01", "#218bff", "#a475f9", "#3192aa", "#8c959f"]

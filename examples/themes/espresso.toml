@@ -1,0 +1,10 @@
+# Espresso.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#323232"
+cursor = "#d6d6d6"
+cursor_text = "#999999"
+selection_background = "#5b5b5b"
+selection_foreground = "#ffffff"
+normal = ["#353535", "#d25252", "#a5c261", "#ffc66d", "#6c99bb", "#d197d9", "#bed6ff", "#eeeeec"]
+bright = ["#606060", "#f00c0c", "#c2e075", "#e1e48b", "#8ab7d9", "#efb5f7", "#dcf4ff", "#ffffff"]

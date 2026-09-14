@@ -1,0 +1,10 @@
+# Tomorrow Night Bright.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#eaeaea"
+background = "#000000"
+cursor = "#eaeaea"
+cursor_text = "#000000"
+selection_background = "#424242"
+selection_foreground = "#eaeaea"
+normal = ["#000000", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#ffffff"]
+bright = ["#404040", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#ffffff"]

@@ -1,0 +1,10 @@
+# Neutron.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e6e8ef"
+background = "#1c1e22"
+cursor = "#f6f7ec"
+cursor_text = "#b7b8a8"
+selection_background = "#2f363e"
+selection_foreground = "#7d8fa4"
+normal = ["#23252b", "#b54036", "#5ab977", "#deb566", "#6a7c93", "#a4799d", "#3f94a8", "#e6e8ef"]
+bright = ["#494b51", "#b54036", "#5ab977", "#deb566", "#6a7c93", "#a4799d", "#3f94a8", "#ebedf2"]

@@ -4,6 +4,7 @@
 
 mod app;
 pub mod catalog;
+mod credits;
 pub mod link;
 mod motion;
 mod pickers;
@@ -22,15 +23,16 @@ pub const MARKER_ENV: &str = "TRON_STARTUP_MARKER";
 /// Environment variable set to `0` to turn animations off.
 pub const ANIMATIONS_ENV: &str = "TRON_STARTUP_ANIMATIONS";
 /// Environment variable holding the token that authorizes startup screen commands.
-pub const TOKEN_ENV: &str = "TRON_STARTUP_TOKEN";
-/// Environment variable naming tron's configuration directory.
-pub const CONFIG_DIR_ENV: &str = "TRON_STARTUP_CONFIG_DIR";
+/// Set for everything in a tron window, so `tron --startup` can run in it.
+pub const TOKEN_ENV: &str = "TRON_WINDOW_TOKEN";
+/// Environment variable naming tron's configuration directory, kept for the shell.
+pub const CONFIG_DIR_ENV: &str = "TRON_CONFIG_DIR";
 /// Debug aid: skip the splash and open this tab (by title) directly.
 const DEBUG_TAB_ENV: &str = "TRON_STARTUP_DEBUG_TAB";
 /// Debug aid: open this tour page, by number from 1.
 pub(crate) const DEBUG_PAGE_ENV: &str = "TRON_STARTUP_DEBUG_PAGE";
 /// Variables for the startup screen only, removed before the shell starts.
-const ENV: [&str; 6] = [MARKER_ENV, ANIMATIONS_ENV, TOKEN_ENV, CONFIG_DIR_ENV, DEBUG_TAB_ENV, DEBUG_PAGE_ENV];
+const ENV: [&str; 4] = [MARKER_ENV, ANIMATIONS_ENV, DEBUG_TAB_ENV, DEBUG_PAGE_ENV];
 
 /// How the splash ended.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -52,6 +54,19 @@ pub fn run(shell: &[String]) -> ! {
         mark_shown(Path::new(&marker));
     }
     hand_off(shell)
+}
+
+/// Shows the startup screen in the terminal this process runs in, as
+/// `tron --startup` does inside a tron window, then returns to the caller.
+pub fn run_here(animations: bool) -> io::Result<()> {
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".to_owned());
+    show(animations, &[shell])
+}
+
+/// Whether this process runs in a tron window that accepts startup screen commands.
+pub fn inside_tron() -> bool {
+    std::env::var_os(TOKEN_ENV).is_some_and(|token| !token.is_empty())
+        && std::env::var_os("TERM_PROGRAM").is_some_and(|program| program == "tron")
 }
 
 fn show(animations: bool, shell: &[String]) -> io::Result<()> {

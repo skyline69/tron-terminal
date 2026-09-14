@@ -1,0 +1,10 @@
+# novmbr.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c7b8ac"
+background = "#241d1a"
+cursor = "#c7b8ac"
+cursor_text = "#241d1a"
+selection_background = "#c7b8ac"
+selection_foreground = "#241d1a"
+normal = ["#282a2e", "#9f6434", "#9dac5f", "#cca75f", "#2f7d7c", "#b5896e", "#52877f", "#c7b8ac"]
+bright = ["#5d4e47", "#9f6434", "#9dac5f", "#cca75f", "#2f7d7c", "#b5896e", "#52877f", "#c7b8ac"]

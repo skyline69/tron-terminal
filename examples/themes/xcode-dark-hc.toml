@@ -1,0 +1,10 @@
+# Xcode Dark hc.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ffffff"
+background = "#1f1f24"
+cursor = "#ffffff"
+cursor_text = "#1f1f24"
+selection_background = "#43454b"
+selection_foreground = "#ffffff"
+normal = ["#43454b", "#ff8a7a", "#83c9bc", "#d9c668", "#4ec4e6", "#ff85b8", "#cda1ff", "#ffffff"]
+bright = ["#838991", "#ff8a7a", "#b1faeb", "#ffa14f", "#6bdfff", "#ff85b8", "#e5cfff", "#ffffff"]

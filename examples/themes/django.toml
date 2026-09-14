@@ -1,0 +1,10 @@
+# Django.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#f8f8f8"
+background = "#0b2f20"
+cursor = "#336442"
+cursor_text = "#f8f8f8"
+selection_background = "#245032"
+selection_foreground = "#f8f8f8"
+normal = ["#000000", "#fd6209", "#41a83e", "#ffe862", "#315d3f", "#f8f8f8", "#9df39f", "#ffffff"]
+bright = ["#585858", "#ff943b", "#73da70", "#ffff94", "#568264", "#ffffff", "#cfffd1", "#ffffff"]

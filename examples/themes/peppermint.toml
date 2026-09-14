@@ -1,0 +1,10 @@
+# Peppermint.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c8c8c8"
+background = "#000000"
+cursor = "#bbbbbb"
+cursor_text = "#ffffff"
+selection_background = "#e6e6e6"
+selection_foreground = "#000000"
+normal = ["#353535", "#e74669", "#89d287", "#dab853", "#449fd0", "#da62dc", "#65aaaf", "#b4b4b4"]
+bright = ["#535353", "#e4859b", "#a3cca2", "#e1e487", "#6fbce2", "#e586e7", "#96dcdb", "#dfdfdf"]

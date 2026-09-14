@@ -1,0 +1,10 @@
+# Onenord.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e5e9f0"
+background = "#2e3440"
+cursor = "#81a1c1"
+cursor_text = "#3b4252"
+selection_background = "#434c5e"
+selection_foreground = "#d8dee9"
+normal = ["#3b4252", "#e06c75", "#9ec183", "#ebcb8b", "#81a1c1", "#b988b0", "#88c0d0", "#e5e9f0"]
+bright = ["#596377", "#e06c75", "#9ec183", "#ebcb8b", "#81a1c1", "#b988b0", "#8fbcbb", "#eceff4"]

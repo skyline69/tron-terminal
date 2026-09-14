@@ -1,0 +1,10 @@
+# Material Ocean.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#8f93a2"
+background = "#0f111a"
+cursor = "#ffcc00"
+cursor_text = "#0f111a"
+selection_background = "#1f2233"
+selection_foreground = "#8f93a2"
+normal = ["#546e7a", "#ff5370", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#ffffff"]
+bright = ["#546e7a", "#ff5370", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#ffffff"]

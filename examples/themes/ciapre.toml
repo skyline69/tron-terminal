@@ -1,0 +1,10 @@
+# Ciapre.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#aea47a"
+background = "#191c27"
+cursor = "#92805b"
+cursor_text = "#181818"
+selection_background = "#172539"
+selection_foreground = "#aea47f"
+normal = ["#181818", "#8e0d16", "#48513b", "#cc8b3f", "#576d8c", "#724d7c", "#5c4f4b", "#aea47f"]
+bright = ["#555555", "#ac3835", "#a6a75d", "#dcdf7c", "#3097c6", "#d33061", "#f3dbb2", "#f4f4f4"]

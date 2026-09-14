@@ -1,0 +1,10 @@
+# C64.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#7869c4"
+background = "#40318d"
+cursor = "#7869c4"
+cursor_text = "#40318d"
+selection_background = "#7869c4"
+selection_foreground = "#40318d"
+normal = ["#090300", "#a2524c", "#55a049", "#bfce72", "#6657b3", "#984ca3", "#67b6bd", "#ffffff"]
+bright = ["#000000", "#a2524c", "#55a049", "#bfce72", "#6657b3", "#984ca3", "#67b6bd", "#f7f7f7"]

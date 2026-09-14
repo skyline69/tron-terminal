@@ -1,0 +1,10 @@
+# Ryuuko.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#ececec"
+background = "#2c3941"
+cursor = "#ececec"
+cursor_text = "#002831"
+selection_background = "#002831"
+selection_foreground = "#819090"
+normal = ["#2c3941", "#865f5b", "#66907d", "#b1a990", "#6a8e95", "#b18a73", "#88b2ac", "#ececec"]
+bright = ["#5d7079", "#865f5b", "#66907d", "#b1a990", "#6a8e95", "#b18a73", "#88b2ac", "#ececec"]

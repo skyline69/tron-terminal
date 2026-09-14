@@ -1,0 +1,10 @@
+# Night Owlish Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#403f53"
+background = "#ffffff"
+cursor = "#403f53"
+cursor_text = "#fbfbfb"
+selection_background = "#f2f2f2"
+selection_foreground = "#403f53"
+normal = ["#011627", "#d3423e", "#2aa298", "#daaa01", "#4876d6", "#403f53", "#08916a", "#7a8181"]
+bright = ["#7a8181", "#f76e6e", "#49d0c5", "#dac26b", "#5ca7e4", "#697098", "#00c990", "#989fb1"]

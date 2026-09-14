@@ -1,0 +1,10 @@
+# Ollie.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#8a8dae"
+background = "#222125"
+cursor = "#5b6ea7"
+cursor_text = "#2a292d"
+selection_background = "#1e3a66"
+selection_foreground = "#8a8eac"
+normal = ["#000000", "#ac2e31", "#31ac61", "#ac4300", "#2d57ac", "#b08528", "#1fa6ac", "#8a8eac"]
+bright = ["#684432", "#ff3d48", "#3bff99", "#ff5e1e", "#4488ff", "#ffc21d", "#1ffaff", "#5b6ea7"]

@@ -286,8 +286,11 @@ impl FontSystem {
 
     /// Families tried before system fallback for characters the main font lacks.
     pub fn set_fallback(&mut self, families: &[String]) {
-        self.fallback = families.to_vec();
-        self.glyphs.clear();
+        // Clearing re-rasterizes every glyph, so a config reload that keeps the list keeps them.
+        if self.fallback != families {
+            self.fallback = families.to_vec();
+            self.glyphs.clear();
+        }
     }
 
     /// OpenType features such as `"-calt"` or `"ss01"`. Invalid entries are logged and skipped.

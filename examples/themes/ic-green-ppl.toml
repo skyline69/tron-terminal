@@ -1,0 +1,10 @@
+# IC Green PPL.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#e0f1dc"
+background = "#2c2c2c"
+cursor = "#47fa6b"
+cursor_text = "#292929"
+selection_background = "#116b41"
+selection_foreground = "#e0f1dc"
+normal = ["#014401", "#ff2736", "#41a638", "#76a831", "#2ec3b9", "#50a096", "#3ca078", "#e6fef2"]
+bright = ["#106910", "#b4fa5c", "#aefb86", "#dafa87", "#2efaeb", "#50fafa", "#3cfac8", "#e0f1dc"]

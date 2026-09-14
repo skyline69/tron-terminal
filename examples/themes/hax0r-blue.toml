@@ -1,0 +1,10 @@
+# HaX0R Blue.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#11b7ff"
+background = "#010515"
+cursor = "#10b6ff"
+cursor_text = "#ffffff"
+selection_background = "#c1e4ff"
+selection_foreground = "#a9a9a9"
+normal = ["#010921", "#10b6ff", "#10b6ff", "#10b6ff", "#10b6ff", "#10b6ff", "#10b6ff", "#fafafa"]
+bright = ["#484157", "#00b3f7", "#00b3f7", "#00b3f7", "#00b3f7", "#00b3f7", "#00b3f7", "#fefefe"]

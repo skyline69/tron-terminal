@@ -1,0 +1,10 @@
+# Red Planet.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#c2b790"
+background = "#222222"
+cursor = "#c2b790"
+cursor_text = "#202020"
+selection_background = "#1b324a"
+selection_foreground = "#bcb291"
+normal = ["#202020", "#8c3432", "#728271", "#e8bf6a", "#69819e", "#896492", "#5b8390", "#b9aa99"]
+bright = ["#676767", "#b55242", "#869985", "#ebeb91", "#60827e", "#de4974", "#38add8", "#d6bfb8"]

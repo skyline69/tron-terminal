@@ -1,0 +1,10 @@
+# Soft Server.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#99a3a2"
+background = "#242626"
+cursor = "#d2e0de"
+cursor_text = "#000000"
+selection_background = "#7f8786"
+selection_foreground = "#effffe"
+normal = ["#000000", "#a2686a", "#9aa56a", "#a3906a", "#6b8fa3", "#6a71a3", "#6ba58f", "#99a3a2"]
+bright = ["#666c6c", "#dd5c60", "#bfdf55", "#deb360", "#62b1df", "#606edf", "#64e39c", "#d2e0de"]

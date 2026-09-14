@@ -1,0 +1,10 @@
+# Aizen Light.
+# From iTerm2-Color-Schemes by Mark Badolato and contributors (MIT).
+foreground = "#4a4d66"
+background = "#f0f2f6"
+cursor = "#fc6008"
+cursor_text = "#f0f2f6"
+selection_background = "#bdc2cc"
+selection_foreground = "#4a4d66"
+normal = ["#f0f2f6", "#d00c36", "#3e9e28", "#dd8c1a", "#1c64f2", "#8636ec", "#159096", "#4a4d66"]
+bright = ["#adb2bc", "#d00c36", "#3e9e28", "#dd8c1a", "#1c64f2", "#8636ec", "#159096", "#4a4d66"]
