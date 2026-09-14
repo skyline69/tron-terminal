@@ -196,8 +196,18 @@ See `[notifications]` in the example config.
 
 ## Remote hosts
 
-tron sets `TERM=xterm-tron`. Hosts without that terminfo entry need it
-copied, or `term = "xterm-256color"` under `[shell]`:
+tron sets `TERM=xterm-tron`. Remote hosts rarely have that terminfo entry,
+so tron puts an `ssh` wrapper first in the shell's `PATH`. Before the first
+interactive session to a host, the wrapper copies the entry to
+`~/.terminfo` there with `tic`, then opens the session over the same
+connection, so you authenticate once. Hosts that have the entry are
+remembered in `ssh-terminfo-hosts` in the data directory. Hosts without
+`tic`, and non-interactive uses like `scp` or `ssh host command`, get
+`TERM=xterm-256color`. Nothing in `~/.ssh/config` changes.
+
+Other tools that carry `TERM` elsewhere, like `docker exec` or `sudo` into a
+minimal system, still need the entry copied, or `term = "xterm-256color"`
+under `[shell]`:
 
 ```sh
 infocmp -x xterm-tron | ssh host 'mkdir -p ~/.terminfo && tic -x -o ~/.terminfo /dev/stdin'

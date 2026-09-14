@@ -1,0 +1,114 @@
+#!/bin/sh
+# Written by tron. Before an interactive session it copies the xterm-tron
+# terminfo entry to the remote host, then opens the session over the same
+# connection. Hosts that cannot take the entry get TERM=xterm-256color.
+
+bin=${0%/*}
+data=${bin%/*}
+
+real=
+set -f
+saved_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+    if [ -n "$dir" ] && [ "$dir" != "$bin" ] && [ -f "$dir/ssh" ] && [ -x "$dir/ssh" ]; then
+        real=$dir/ssh
+        break
+    fi
+done
+IFS=$saved_ifs
+set +f
+if [ -z "$real" ]; then
+    echo "ssh: command not found" >&2
+    exit 127
+fi
+
+[ "$TERM" = xterm-tron ] || exec "$real" "$@"
+
+# Reads the arguments the way ssh does: options may also follow the
+# destination, and the first other word after it starts the remote command.
+dest=
+command=
+special=
+ttys=0
+want=
+ended=
+for arg; do
+    if [ -n "$want" ]; then
+        want=
+    elif [ -n "$dest" ] && { [ -n "$ended" ] || [ "${arg#-}" = "$arg" ]; }; then
+        command=1
+        break
+    elif [ -z "$ended" ] && [ "$arg" = -- ]; then
+        ended=1
+    elif [ -z "$ended" ] && [ "${arg#-}" != "$arg" ] && [ "$arg" != - ]; then
+        rest=${arg#-}
+        while [ -n "$rest" ]; do
+            flag=${rest%"${rest#?}"}
+            rest=${rest#?}
+            case $flag in
+                t) ttys=$((ttys + 1)) ;;
+                # No login shell, or no session at all.
+                [GNOQTVWfs]) special=1 ;;
+            esac
+            case $flag in
+                [BDEFIJLOPQRSWbceilmopw])
+                    [ -z "$rest" ] && want=1
+                    rest= ;;
+            esac
+        done
+    else
+        dest=$arg
+    fi
+done
+# -tt forces a pty, which would mangle the entry sent on stdin.
+[ "$ttys" -lt 2 ] || special=1
+
+fallback() {
+    TERM=xterm-256color
+    export TERM
+    exec "$real" "$@"
+}
+
+[ -n "$dest" ] && [ -z "$special" ] && [ -t 0 ] && [ -t 1 ] || fallback "$@"
+
+user=
+host=
+port=
+while read -r name value; do
+    case $name in
+        user) user=$value ;;
+        hostname) host=$value ;;
+        port) port=$value ;;
+    esac
+done <<EOF
+$("$real" -G "$@" 2>/dev/null)
+EOF
+hash=$(cat "$data/terminfo/.source-hash" 2>/dev/null)
+[ -n "$host" ] && [ -n "$hash" ] || fallback "$@"
+
+cache=$data/ssh-terminfo-hosts
+key="$hash $user@$host:$port"
+grep -qxF -e "$key" "$cache" 2>/dev/null && exec "$real" "$@"
+[ -z "$command" ] || fallback "$@"
+
+entry=$(infocmp -0 -x xterm-tron 2>/dev/null)
+[ -n "$entry" ] || fallback "$@"
+
+# The socket lives in a directory only this user can write to.
+runtime=$XDG_RUNTIME_DIR
+[ -n "$runtime" ] && [ -d "$runtime" ] || runtime=$data
+socket=$runtime/tron-ssh-%C
+
+# Runs under sh on the remote host whatever its login shell is, so it has no
+# single quotes and fits on one line. It must expand there, not here.
+# shellcheck disable=SC2016
+remote='infocmp xterm-tron >/dev/null 2>&1 && exit 0; command -v tic >/dev/null 2>&1 || exit 1; mkdir -p ~/.terminfo || exit 1; cat >~/.terminfo/.xterm-tron.src; tic -x -o ~/.terminfo ~/.terminfo/.xterm-tron.src >/dev/null 2>&1; s=$?; rm -f ~/.terminfo/.xterm-tron.src; [ $s = 0 ] && infocmp xterm-tron >/dev/null 2>&1'
+
+if printf '%s\n' "$entry" |
+    "$real" -o ControlMaster=yes -o "ControlPath=$socket" -o ControlPersist=5 "$@" "sh -c '$remote'" >/dev/null 2>&1
+then
+    printf '%s\n' "$key" >>"$cache"
+    exec "$real" -o "ControlPath=$socket" "$@"
+fi
+fallback -o "ControlPath=$socket" "$@"

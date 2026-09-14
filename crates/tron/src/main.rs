@@ -470,7 +470,12 @@ impl App {
         };
         if options.term == "xterm-tron" {
             match self.paths.as_ref().and_then(|p| terminfo::install(&p.data_dir)) {
-                Some(dir) => options.env.push(("TERMINFO_DIRS".into(), terminfo::search_path(&dir))),
+                Some(dir) => {
+                    options.env.push(("TERMINFO_DIRS".into(), terminfo::search_path(&dir)));
+                    if let Some(bin) = self.paths.as_ref().and_then(|p| terminfo::install_ssh_wrapper(&p.data_dir)) {
+                        options.env.push(("PATH".into(), terminfo::path_with(&bin)));
+                    }
+                }
                 None => {
                     log::warn!("xterm-tron terminfo unavailable, using TERM=xterm-256color");
                     options.term = "xterm-256color".into();
