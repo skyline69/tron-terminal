@@ -3687,6 +3687,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -3838,6 +3839,7 @@ dependencies = [
  "ratatui",
  "tachyonfx",
  "toml",
+ "toml_edit",
  "tron-config",
 ]
 

@@ -36,27 +36,15 @@ impl Picker {
         changed
     }
 
-    /// Scrolls so the selection is visible in `height` rows.
-    fn scroll(&mut self, height: usize) {
+    /// Scrolls so the selection is visible in `height` rows. Returns the first visible row.
+    pub fn scroll(&mut self, height: usize) -> usize {
         if self.selected < self.offset {
             self.offset = self.selected;
         } else if height > 0 && self.selected >= self.offset + height {
             self.offset = self.selected + 1 - height;
         }
+        self.offset
     }
-}
-
-/// Unsaved choices made on the startup screen.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Choices {
-    pub theme: String,
-    pub shaders: Vec<String>,
-}
-
-/// The TOML tron previews for a theme and a shader list.
-pub fn overlay(theme: &str, shaders: &[String]) -> String {
-    let files: Vec<toml::Value> = shaders.iter().map(|file| toml::Value::String(file.clone())).collect();
-    format!("theme = {}\n\n[shader]\nfiles = {}\n", toml::Value::String(theme.to_owned()), toml::Value::Array(files))
 }
 
 /// One list row: name, a short tag after it, and whether it is chosen.
@@ -259,11 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_is_valid_toml() {
-        let text = overlay("rosé \"pine\"", &["crt.wgsl".into(), "bloom.wgsl".into()]);
-        let table: toml::Table = text.parse().unwrap();
-        assert_eq!(table["theme"].as_str(), Some("rosé \"pine\""));
-        assert_eq!(table["shader"]["files"].as_array().map(Vec::len), Some(2));
+    fn ordinals() {
         assert_eq!(ordinal(2), "2nd");
         assert_eq!(ordinal(12), "12th");
     }

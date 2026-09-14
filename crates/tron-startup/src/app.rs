@@ -3,6 +3,7 @@
 //! terminal side with tachyonfx and in tron with the startup shader.
 
 use std::io::{self, Write};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
@@ -12,14 +13,15 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use tachyonfx::{Effect, Interpolation, fx};
 
 use crate::catalog::Catalog;
 use crate::link::Link;
 use crate::motion::{lerp, pulse, smooth};
-use crate::pickers::{self, Choices, Item, Picker};
+use crate::pickers::{self, Item, Picker};
+use crate::settings::{self, Choices, Setting};
 use crate::splash;
 use crate::ui::{CYAN, DARK, DIM, MAGENTA, TEXT};
 
@@ -100,9 +102,31 @@ impl Areas {
 enum Target {
     Tab(Tab),
     StartTerminal,
-    /// A row of the Themes or Shaders list, by index.
+    /// A row of the Themes, Shaders or Settings list, by index.
     Item(usize),
+    /// The unsaved changes note in the status bar.
+    SaveButton,
+    DialogButton(DialogButton),
 }
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum DialogButton {
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// A question over the tabs.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Dialog {
+    /// Confirm saving, showing what changes.
+    Save,
+    /// Unsaved changes when starting the terminal.
+    Leave,
+}
+
+/// How long a message stays in the status bar.
+const TOAST: Duration = Duration::from_secs(4);
 
 /// Wait before previewing, so holding an arrow key does not reload the config for every row.
 const PREVIEW_DELAY: Duration = Duration::from_millis(90);
@@ -121,6 +145,11 @@ enum Command {
     Pick(usize),
     /// Choose the highlighted theme, or turn the highlighted shader on or off.
     Activate,
+    /// Change the highlighted setting by steps.
+    Change(isize),
+    OpenSave,
+    OpenLeave,
+    Dialog(DialogButton),
     /// Leave the startup screen and start the shell.
     StartTerminal,
 }
@@ -148,17 +177,36 @@ pub struct App {
     /// Preview to send once its delay passed, and the last one sent.
     preview_due: Option<(Instant, String)>,
     previewed: String,
+    settings: Vec<Setting>,
+    settings_picker: Picker,
+    /// Installed fonts, listed on a background thread.
+    fonts: Option<Receiver<Vec<String>>>,
+    dialog: Option<Dialog>,
+    /// The dialog opened this frame, so it gets its entrance effect.
+    dialog_fresh: bool,
+    /// A short message in the status bar and when it appeared.
+    toast: Option<(Instant, String)>,
+    /// A save finished; tron must stop previewing and reload the file.
+    commit_pending: bool,
 }
 
 impl App {
     pub fn new(animations: bool, catalog: Catalog, shell: &[String]) -> Self {
-        let saved = Choices {
-            theme: catalog.config.theme.clone().unwrap_or_else(|| "tron".to_owned()),
-            shaders: catalog.config.shader.files.clone(),
-        };
+        let saved = Choices::from_config(&catalog.config);
         let theme_index = catalog.themes.iter().position(|t| t.name == saved.theme).unwrap_or(0);
-        let previewed = pickers::overlay(&saved.theme, &saved.shaders);
+        let previewed = saved.overlay(&saved.theme, &saved.shaders);
+        let (sender, receiver) = channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(crate::catalog::monospace_families());
+        });
         Self {
+            settings: settings::list(std::slice::from_ref(&catalog.config.font.family)),
+            settings_picker: Picker::new(0),
+            fonts: Some(receiver),
+            dialog: None,
+            dialog_fresh: false,
+            toast: None,
+            commit_pending: false,
             themes: Picker::new(theme_index),
             shaders: Picker::new(0),
             choices: saved.clone(),
@@ -233,12 +281,52 @@ impl App {
             Command::StartTerminal => self.start_exit(),
             Command::Move(delta) => {
                 let moved = match self.tab {
+                    Tab::Settings => {
+                        self.settings_picker.move_by(delta, self.settings.len());
+                        false
+                    }
                     Tab::Themes => self.themes.move_by(delta, self.catalog.themes.len()),
                     Tab::Shaders => self.shaders.move_by(delta, self.catalog.shaders.len()),
                     _ => false,
                 };
                 if moved {
                     self.schedule_preview();
+                }
+            }
+            Command::Pick(index) if self.tab == Tab::Settings => {
+                if self.settings_picker.selected == index {
+                    self.apply(Command::Change(1), content);
+                } else {
+                    self.settings_picker.set(index, self.settings.len());
+                }
+            }
+            Command::Change(delta) => {
+                if let Some(setting) = self.settings.get(self.settings_picker.selected)
+                    && let Some(current) = self.choices.settings.get(setting.key)
+                {
+                    let next = settings::step(setting, current, delta);
+                    self.choices.settings.insert(setting.key, next);
+                    self.schedule_preview();
+                }
+            }
+            Command::OpenSave => {
+                if self.choices == self.saved {
+                    self.show_toast("No changes to save");
+                } else {
+                    self.open_dialog(Dialog::Save);
+                }
+            }
+            Command::OpenLeave => self.open_dialog(Dialog::Leave),
+            Command::Dialog(button) => {
+                let dialog = self.dialog.take();
+                match button {
+                    DialogButton::Cancel => {}
+                    DialogButton::Discard => self.start_exit(),
+                    DialogButton::Save => {
+                        if self.save() && dialog == Some(Dialog::Leave) {
+                            self.start_exit();
+                        }
+                    }
                 }
             }
             Command::Pick(index) => {
@@ -287,7 +375,59 @@ impl App {
         {
             shaders.push(shader.file.clone());
         }
-        pickers::overlay(theme, &shaders)
+        self.choices.overlay(theme, &shaders)
+    }
+
+    fn open_dialog(&mut self, dialog: Dialog) {
+        self.dialog = Some(dialog);
+        self.dialog_fresh = true;
+        self.hover = None;
+    }
+
+    fn show_toast(&mut self, text: impl Into<String>) {
+        self.toast = Some((Instant::now(), text.into()));
+    }
+
+    /// Writes the choices to `config.toml`. Returns whether that worked.
+    fn save(&mut self) -> bool {
+        let Some(paths) = self.catalog.paths.clone() else {
+            self.show_toast("No configuration directory to save to");
+            return false;
+        };
+        match self.choices.save(&self.saved, &paths) {
+            Ok(()) => {
+                self.saved = self.choices.clone();
+                self.previewed = self.saved.overlay(&self.saved.theme, &self.saved.shaders);
+                self.commit_pending = true;
+                // A highlighted list entry that is not the choice is previewed again after the reload.
+                self.schedule_preview();
+                self.show_toast(format!("Saved to {}", tron_config::display_path(&paths.config_file)));
+                true
+            }
+            Err(error) => {
+                self.show_toast(format!("Could not save: {error}"));
+                false
+            }
+        }
+    }
+
+    /// Starting the terminal asks first when there are unsaved changes.
+    fn leave(&self) -> Command {
+        if self.choices == self.saved { Command::StartTerminal } else { Command::OpenLeave }
+    }
+
+    /// Takes the font list once the background thread has it.
+    fn poll_fonts(&mut self) {
+        let Some(mut families) = self.fonts.as_ref().and_then(|receiver| receiver.try_recv().ok()) else { return };
+        for choices in [&self.saved, &self.choices] {
+            if let Some(toml::Value::String(family)) = choices.settings.get("font.family")
+                && !families.contains(family)
+            {
+                families.insert(1.min(families.len()), family.clone());
+            }
+        }
+        self.settings = settings::list(&families);
+        self.fonts = None;
     }
 
     fn schedule_preview(&mut self) {
@@ -320,6 +460,30 @@ impl App {
 
     fn on_key(&self, key: KeyEvent) -> Command {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(dialog) = self.dialog {
+            return match key.code {
+                KeyCode::Enter | KeyCode::Char('y' | 's') => Command::Dialog(DialogButton::Save),
+                KeyCode::Char('d') if dialog == Dialog::Leave => Command::Dialog(DialogButton::Discard),
+                KeyCode::Esc | KeyCode::Char('n') => Command::Dialog(DialogButton::Cancel),
+                _ => Command::None,
+            };
+        }
+        if ctrl && key.code == KeyCode::Char('s') {
+            return Command::OpenSave;
+        }
+        if self.tab == Tab::Settings {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => return Command::Move(-1),
+                KeyCode::Down | KeyCode::Char('j') => return Command::Move(1),
+                KeyCode::PageUp => return Command::Move(-10),
+                KeyCode::PageDown => return Command::Move(10),
+                KeyCode::Left | KeyCode::Char('h') => return Command::Change(-1),
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char(' ') => {
+                    return Command::Change(1);
+                }
+                _ => {}
+            }
+        }
         if matches!(self.tab, Tab::Themes | Tab::Shaders) {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => return Command::Move(-1),
@@ -333,9 +497,9 @@ impl App {
             }
         }
         match key.code {
-            KeyCode::Esc => Command::StartTerminal,
+            KeyCode::Esc => self.leave(),
             KeyCode::Char('c' | 'q') if ctrl => Command::StartTerminal,
-            KeyCode::Enter if self.tab == Tab::Overview => Command::StartTerminal,
+            KeyCode::Enter if self.tab == Tab::Overview => self.leave(),
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => Command::Select(self.tab.offset(1)),
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => Command::Select(self.tab.offset(-1)),
             KeyCode::Char(digit @ '1'..='7') => Command::Select(Tab::ALL[digit as usize - '1' as usize]),
@@ -349,11 +513,14 @@ impl App {
     }
 
     fn on_click(&self, column: u16, row: u16) -> Command {
-        match self.target_at(column, row) {
-            Some(Target::Tab(tab)) => Command::Select(tab),
-            Some(Target::StartTerminal) => Command::StartTerminal,
-            Some(Target::Item(index)) => Command::Pick(index),
-            None => Command::None,
+        match (self.target_at(column, row), self.dialog) {
+            (Some(Target::DialogButton(button)), _) => Command::Dialog(button),
+            (_, Some(_)) => Command::None,
+            (Some(Target::Tab(tab)), None) => Command::Select(tab),
+            (Some(Target::StartTerminal), None) => self.leave(),
+            (Some(Target::Item(index)), None) => Command::Pick(index),
+            (Some(Target::SaveButton), None) => Command::OpenSave,
+            (None, None) => Command::None,
         }
     }
 
@@ -398,6 +565,7 @@ impl App {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, elapsed: Duration) {
+        self.poll_fonts();
         let screen = frame.area();
         let areas = Areas::new(screen);
         self.hits.clear();
@@ -411,13 +579,17 @@ impl App {
         frame.render_widget(block, areas.content);
         match self.tab {
             Tab::Overview => self.draw_overview(frame, inner),
+            Tab::Settings => self.draw_settings(frame, inner),
             Tab::Themes => self.draw_themes(frame, inner),
             Tab::Shaders => self.draw_shaders(frame, inner),
             Tab::Keys => draw_keys(frame, inner),
             Tab::About => draw_about(frame, inner),
-            tab => draw_upcoming(frame, inner, tab),
+            Tab::Tour => draw_upcoming(frame, inner),
         }
         self.draw_status(frame, areas.status);
+        if let Some(dialog) = self.dialog {
+            self.draw_dialog(frame, screen, dialog);
+        }
 
         if !self.animations {
             return;
@@ -482,12 +654,34 @@ impl App {
             Tab::Shaders => {
                 vec![key("↑/↓"), label(" browse  "), key("Space"), label(" on/off  "), key("←/→"), label(" tabs")]
             }
+            Tab::Settings => {
+                vec![key("↑/↓"), label(" select  "), key("←/→"), label(" change  "), key("Tab"), label(" tabs")]
+            }
             _ => vec![key("←/→"), label(" switch  "), key("1-7"), label(" jump  "), key("click"), label(" select")],
         };
         frame.render_widget(Paragraph::new(Line::from(hints)), area);
-        if self.choices != self.saved {
-            let changed = Line::styled("● changed, not saved yet", Style::new().fg(MAGENTA));
-            frame.render_widget(Paragraph::new(changed).centered(), area);
+        let toast = self.toast.as_ref().filter(|(since, _)| since.elapsed() < TOAST).map(|(_, text)| text.clone());
+        if let Some(text) = toast {
+            frame.render_widget(Paragraph::new(Line::styled(text, Style::new().fg(CYAN))).centered(), area);
+        } else if self.choices != self.saved {
+            let hovered = self.hover == Some(Target::SaveButton);
+            let note = Line::from(vec![
+                Span::styled("● unsaved changes  ", Style::new().fg(MAGENTA)),
+                Span::styled("Ctrl+S", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " save",
+                    if hovered {
+                        Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED)
+                    } else {
+                        Style::new().fg(DIM)
+                    },
+                ),
+            ]);
+            let width = note.width() as u16;
+            let note_area =
+                Rect::new(area.x + area.width.saturating_sub(width) / 2, area.y, width, 1).intersection(area);
+            self.hits.push((note_area, Target::SaveButton));
+            frame.render_widget(Paragraph::new(note), note_area);
         }
         let hovered = self.hover == Some(Target::StartTerminal);
         let start_label = if hovered {
@@ -500,6 +694,135 @@ impl App {
         let start_area = Rect::new(area.right().saturating_sub(width), area.y, width, 1).intersection(area);
         self.hits.push((start_area, Target::StartTerminal));
         frame.render_widget(Paragraph::new(start), start_area);
+    }
+
+    fn draw_settings(&mut self, frame: &mut Frame, area: Rect) {
+        let [list_area, _, help_area] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(1), Constraint::Length(2)]).areas(area);
+        let height = usize::from(list_area.height);
+        let first = self.settings_picker.scroll(height);
+        let hover = match self.hover {
+            Some(Target::Item(index)) => Some(index),
+            _ => None,
+        };
+        for (row, index) in (first..self.settings.len()).take(height).enumerate() {
+            let setting = &self.settings[index];
+            let selected = index == self.settings_picker.selected;
+            let value = self.choices.settings.get(setting.key).map(settings::display).unwrap_or_default();
+            let changed = self.choices.settings.get(setting.key) != self.saved.settings.get(setting.key);
+            let label_style = match (selected, hover == Some(index)) {
+                (true, _) => Style::new().fg(CYAN).add_modifier(Modifier::BOLD),
+                (false, true) => Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED),
+                (false, false) => Style::new().fg(TEXT),
+            };
+            let (value_text, value_style) = if selected {
+                (format!("‹ {value} ›"), Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD))
+            } else {
+                (format!("  {value}"), Style::new().fg(DIM))
+            };
+            let line = Line::from(vec![
+                Span::styled(if selected { "› " } else { "  " }, Style::new().fg(CYAN)),
+                Span::styled(format!("{:<26}", setting.label), label_style),
+                Span::styled(value_text, value_style),
+                Span::styled(if changed { "  ●" } else { "" }, Style::new().fg(MAGENTA)),
+            ]);
+            let rect = Rect::new(list_area.x, list_area.y + row as u16, list_area.width, 1);
+            frame.render_widget(Paragraph::new(line), rect);
+            self.hits.push((rect, Target::Item(index)));
+        }
+        // Arrows show that the list continues.
+        let arrow = Style::new().fg(DIM);
+        if first > 0 {
+            frame.render_widget(
+                Paragraph::new(Line::styled("↑ more", arrow)).right_aligned(),
+                Rect { height: 1, ..list_area },
+            );
+        }
+        if first + height < self.settings.len() {
+            let bottom = Rect { y: list_area.bottom().saturating_sub(1), height: 1, ..list_area };
+            frame.render_widget(Paragraph::new(Line::styled("↓ more", arrow)).right_aligned(), bottom);
+        }
+        if let Some(setting) = self.settings.get(self.settings_picker.selected) {
+            let help = Paragraph::new(Line::styled(setting.help, Style::new().fg(DIM))).wrap(Wrap { trim: true });
+            frame.render_widget(help, help_area);
+        }
+    }
+
+    fn draw_dialog(&mut self, frame: &mut Frame, screen: Rect, dialog: Dialog) {
+        const SHOWN: usize = 10;
+        let changes = self.choices.changes(&self.saved, &self.settings);
+        let path = self
+            .catalog
+            .paths
+            .as_ref()
+            .map_or_else(|| "config.toml".to_owned(), |p| tron_config::display_path(&p.config_file));
+        let mut lines = vec![match dialog {
+            Dialog::Save => Line::styled(format!("Write these changes to {path}?"), Style::new().fg(TEXT)),
+            Dialog::Leave => Line::styled("Save your changes before starting the terminal?", Style::new().fg(TEXT)),
+        }];
+        lines.push(Line::raw(""));
+        for (label, old, new) in changes.iter().take(SHOWN) {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{label:<22}"), Style::new().fg(DIM)),
+                Span::styled(old.clone(), Style::new().fg(TEXT).add_modifier(Modifier::CROSSED_OUT)),
+                Span::styled("  →  ", Style::new().fg(DIM)),
+                Span::styled(new.clone(), Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
+            ]));
+        }
+        if changes.len() > SHOWN {
+            lines.push(Line::styled(format!("… and {} more", changes.len() - SHOWN), Style::new().fg(DIM)));
+        }
+        let height = (lines.len() as u16 + 6).min(screen.height);
+        let width = 72.min(screen.width.saturating_sub(4));
+        let area = Rect::new(
+            screen.x + screen.width.saturating_sub(width) / 2,
+            screen.y + screen.height.saturating_sub(height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(Clear, area);
+        let title = match dialog {
+            Dialog::Save => " Save changes ",
+            Dialog::Leave => " Unsaved changes ",
+        };
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(CYAN))
+            .title(Line::styled(title, Style::new().fg(CYAN).add_modifier(Modifier::BOLD)));
+        let inner = block.inner(area).inner(Margin::new(2, 1));
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(lines), inner);
+
+        let mut buttons = vec![(DialogButton::Save, "Enter", "save")];
+        if dialog == Dialog::Leave {
+            buttons.push((DialogButton::Discard, "d", "discard"));
+        }
+        buttons.push((DialogButton::Cancel, "Esc", "cancel"));
+        let mut column = inner.x;
+        let row = inner.bottom().saturating_sub(1);
+        for (button, key, text) in buttons {
+            let hovered = self.hover == Some(Target::DialogButton(button));
+            let text_style =
+                if hovered { Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED) } else { Style::new().fg(DIM) };
+            let line = Line::from(vec![
+                Span::styled(key, Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {text}"), text_style),
+            ]);
+            let width = line.width() as u16;
+            let rect = Rect::new(column, row, width, 1).intersection(inner);
+            frame.render_widget(Paragraph::new(line), rect);
+            self.hits.push((rect, Target::DialogButton(button)));
+            column += width + 4;
+        }
+        if std::mem::take(&mut self.dialog_fresh) && self.animations {
+            self.effects.push(
+                fx::parallel(&[
+                    fx::coalesce((220, Interpolation::QuadOut)),
+                    fx::fade_from_fg(DARK, (220, Interpolation::QuadOut)),
+                ])
+                .with_area(area),
+            );
+        }
     }
 
     fn draw_themes(&mut self, frame: &mut Frame, area: Rect) {
@@ -671,11 +994,8 @@ fn draw_about(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
-fn draw_upcoming(frame: &mut Frame, area: Rect, tab: Tab) {
-    let text = match tab {
-        Tab::Settings => "Font, size, opacity, cursor and more, previewed live.",
-        _ => "Ligatures, emoji, right-to-left text, images and scaled text.",
-    };
+fn draw_upcoming(frame: &mut Frame, area: Rect) {
+    let text = "Ligatures, emoji, right-to-left text, images and scaled text.";
     let lines = vec![
         Line::styled(text, Style::new().fg(TEXT)),
         Line::raw(""),
@@ -771,6 +1091,9 @@ pub fn run<W: Write>(
                     set_pointer(if hand { "pointer" } else { "default" });
                 }
                 app.apply(command, content);
+                if std::mem::take(&mut app.commit_pending) {
+                    link.commit();
+                }
             }
             Ok(_) => {}
             Err(error) => break Err(error),
@@ -893,7 +1216,7 @@ mod tests {
         assert_eq!(app.choices.theme, name);
         let text = screen(&mut app);
         assert!(text.contains("● chosen") && text.contains("cargo build"), "{text}");
-        assert!(text.contains("changed, not saved yet"), "{text}");
+        assert!(text.contains("unsaved changes"), "{text}");
     }
 
     #[test]
@@ -916,6 +1239,52 @@ mod tests {
         assert!(app.wants_startup_shader());
         let back = app.take_preview(Instant::now() + PREVIEW_DELAY).unwrap();
         assert!(!back.contains(&app.catalog.shaders[2].file), "leaving drops the highlight: {back}");
+    }
+
+    #[test]
+    fn settings_change_values_and_preview_them() {
+        let mut app = App::new(true, catalog(), &[]);
+        app.apply(Command::Select(Tab::Settings), Rect::default());
+        assert_eq!(app.on_key(key(KeyCode::Right)), Command::Change(1));
+        assert_eq!(app.on_key(key(KeyCode::Tab)), Command::Select(Tab::Themes), "Tab still switches tabs");
+        app.apply(Command::Move(1), Rect::default());
+        assert_eq!(app.settings[app.settings_picker.selected].key, "font.size");
+        app.apply(Command::Change(2), Rect::default());
+        assert_eq!(app.choices.settings["font.size"], toml::Value::Float(13.0));
+        let preview = app.take_preview(Instant::now() + PREVIEW_DELAY).unwrap();
+        assert!(preview.contains("size = 13.0"), "{preview}");
+        let text = screen(&mut app);
+        assert!(text.contains("‹ 13 ›") && text.contains("Font size"), "{text}");
+    }
+
+    #[test]
+    fn saving_asks_first_and_writes_the_file() {
+        let dir = std::env::temp_dir().join(format!("tron-startup-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let paths = tron_config::Paths::with_dirs(dir.clone(), dir.join("data"));
+        let mut app = App::new(true, Catalog::for_paths(Some(paths.clone())), &[]);
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        app.apply(app.on_key(ctrl_s), Rect::default());
+        assert_eq!(app.dialog, None, "nothing to save");
+        assert!(app.toast.is_some());
+
+        app.choices.theme = "nord".into();
+        assert_eq!(app.on_key(key(KeyCode::Esc)), Command::OpenLeave, "unsaved changes ask before leaving");
+        app.apply(app.on_key(ctrl_s), Rect::default());
+        assert_eq!(app.dialog, Some(Dialog::Save));
+        let text = screen(&mut app);
+        assert!(text.contains("Save changes") && text.contains("tron  →  nord"), "{text}");
+        app.apply(app.on_key(key(KeyCode::Enter)), Rect::default());
+        assert!(app.commit_pending && app.dialog.is_none());
+        assert_eq!(tron_config::Config::load(&paths).unwrap().theme.as_deref(), Some("nord"));
+        assert_eq!(app.on_key(key(KeyCode::Esc)), Command::StartTerminal, "saved, so no question");
+
+        app.choices.theme = "dracula".into();
+        app.apply(Command::OpenLeave, Rect::default());
+        app.apply(app.on_key(key(KeyCode::Char('d'))), Rect::default());
+        assert!(app.exit.is_some(), "discard starts the terminal");
+        assert_eq!(tron_config::Config::load(&paths).unwrap().theme.as_deref(), Some("nord"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

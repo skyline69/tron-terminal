@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod link;
 mod motion;
 mod pickers;
+mod settings;
 mod splash;
 mod ui;
 

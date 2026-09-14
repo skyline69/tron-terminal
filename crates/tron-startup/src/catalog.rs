@@ -38,6 +38,24 @@ pub struct Catalog {
     pub shaders: Vec<Shader>,
 }
 
+/// Installed monospaced font families from fontconfig, `monospace` first.
+pub fn monospace_families() -> Vec<String> {
+    let output = std::process::Command::new("fc-list").args([":spacing=mono", "family"]).output();
+    let mut families: Vec<String> = match output {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split(',').next())
+            .map(|family| family.trim().replace("\\-", "-"))
+            .filter(|family| !family.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    };
+    families.sort_by_key(|family| family.to_lowercase());
+    families.dedup();
+    families.insert(0, "monospace".to_owned());
+    families
+}
+
 impl Catalog {
     /// Reads the catalog for tron's configuration directory, as passed by tron.
     pub fn load() -> Self {
