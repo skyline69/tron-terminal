@@ -265,6 +265,8 @@ struct Session {
     mouse: MouseState,
     /// Mouse pointer shape currently set on the window.
     pointer_icon: CursorIcon,
+    /// Pointer shape the application asked for while it reads the mouse (OSC 22).
+    app_pointer: Option<CursorIcon>,
     bindings: Vec<Binding>,
     search: Option<SearchState>,
     /// Uncommitted IME text.
@@ -391,6 +393,7 @@ impl App {
             hyper: false,
             mouse: MouseState::default(),
             pointer_icon: CursorIcon::Text,
+            app_pointer: None,
             bindings: Vec::new(),
             search: None,
             preedit: None,
@@ -956,6 +959,7 @@ impl Session {
                 }
                 TermEvent::Notification { title, body, when } => self.notify(&title, &body, when),
                 TermEvent::StartupScreen { token, payload } => self.startup_command(&token, &payload),
+                TermEvent::PointerShape(name) => self.app_pointer = pointer_icon(&name),
                 TermEvent::ColumnsChanged(cols) => {
                     // DECCOLM: resize the window to fit the new width, keeping the height.
                     let metrics = self.fonts.metrics();
@@ -1462,10 +1466,13 @@ impl Session {
     /// Arrow while the application receives mouse events, I-beam while the
     /// mouse selects text (including Shift held over a mouse-reporting app).
     fn update_pointer_icon(&mut self, modes: Modes) {
+        if !modes.intersects(Modes::MOUSE_TRACKING) {
+            self.app_pointer = None;
+        }
         let icon = if self.hovered_link.is_some() {
             CursorIcon::Pointer
         } else if self.mouse_reporting(modes) {
-            CursorIcon::Default
+            self.app_pointer.unwrap_or(CursorIcon::Default)
         } else {
             CursorIcon::Text
         };
@@ -1789,6 +1796,22 @@ fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
+/// Pointer for a CSS cursor name, or one of the common X cursor names. `None`
+/// for the default or unknown names.
+fn pointer_icon(name: &str) -> Option<CursorIcon> {
+    let css = match name {
+        "left_ptr" | "arrow" | "top_left_arrow" => "default",
+        "hand" | "hand1" | "hand2" | "pointing_hand" => "pointer",
+        "xterm" | "ibeam" => "text",
+        "watch" => "wait",
+        "fleur" => "move",
+        "sb_h_double_arrow" => "ew-resize",
+        "sb_v_double_arrow" => "ns-resize",
+        other => other,
+    };
+    css.parse().ok()
+}
+
 /// A random hex token from the kernel, or from the clock when that fails.
 fn random_token() -> String {
     let mut bytes = [0u8; 16];
@@ -1859,6 +1882,16 @@ fn window_size(cols: usize, rows: usize, metrics: CellMetrics) -> WindowSize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_names_map_to_icons() {
+        assert_eq!(pointer_icon("pointer"), Some(CursorIcon::Pointer));
+        assert_eq!(pointer_icon("hand2"), Some(CursorIcon::Pointer));
+        assert_eq!(pointer_icon("default"), Some(CursorIcon::Default));
+        assert_eq!(pointer_icon("not-allowed"), Some(CursorIcon::NotAllowed));
+        assert_eq!(pointer_icon(""), None);
+        assert_eq!(pointer_icon("sparkles"), None);
+    }
 
     #[test]
     fn dropped_paths_are_shell_quoted() {

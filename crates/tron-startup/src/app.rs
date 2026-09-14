@@ -94,6 +94,16 @@ impl Areas {
     }
 }
 
+/// Something on screen that reacts to the mouse.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Target {
+    Tab(Tab),
+    StartTerminal,
+}
+
+/// Length of the hover fade in and out.
+const HOVER_MS: u32 = 160;
+
 /// What a key or click asks for.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Command {
@@ -112,8 +122,10 @@ pub struct App {
     effects: Vec<Effect>,
     /// Screen size the effects were made for.
     screen: Rect,
-    /// Screen columns covered by each tab title, for mouse clicks.
-    tab_spans: Vec<(Tab, u16, u16)>,
+    /// Screen areas of clickable things, rebuilt every frame.
+    hits: Vec<(Rect, Target)>,
+    /// What the pointer is over.
+    hover: Option<Target>,
     switched: Option<Instant>,
     exit: Option<Instant>,
 }
@@ -128,7 +140,8 @@ impl App {
             shell: shell.join(" "),
             effects: Vec::new(),
             screen: Rect::default(),
-            tab_spans: Vec::new(),
+            hits: Vec::new(),
+            hover: None,
             switched: None,
             exit: None,
         }
@@ -191,14 +204,37 @@ impl App {
         }
     }
 
-    fn on_click(&self, column: u16, row: u16, tabs_row: u16) -> Command {
-        if row != tabs_row {
-            return Command::None;
+    fn target_at(&self, column: u16, row: u16) -> Option<Target> {
+        let point = ratatui::layout::Position::new(column, row);
+        self.hits.iter().find(|(area, _)| area.contains(point)).map(|(_, target)| *target)
+    }
+
+    fn on_click(&self, column: u16, row: u16) -> Command {
+        match self.target_at(column, row) {
+            Some(Target::Tab(tab)) => Command::Select(tab),
+            Some(Target::StartTerminal) => Command::StartTerminal,
+            None => Command::None,
         }
-        self.tab_spans
-            .iter()
-            .find(|(_, start, end)| (*start..*end).contains(&column))
-            .map_or(Command::None, |(tab, _, _)| Command::Select(*tab))
+    }
+
+    /// Updates what the pointer is over, fading the old target out and the new one in.
+    fn on_move(&mut self, column: u16, row: u16) {
+        let target = self.target_at(column, row);
+        if target == self.hover {
+            return;
+        }
+        if self.animations {
+            let area_of =
+                |target: Option<Target>| self.hits.iter().find(|(_, t)| Some(*t) == target).map(|(area, _)| *area);
+            let (old, new) = (area_of(self.hover), area_of(target));
+            if let Some(area) = old {
+                self.effects.push(fx::fade_from_fg(TEXT, (HOVER_MS, Interpolation::QuadOut)).with_area(area));
+            }
+            if let Some(area) = new {
+                self.effects.push(fx::fade_from_fg(DIM, (HOVER_MS, Interpolation::QuadOut)).with_area(area));
+            }
+        }
+        self.hover = target;
     }
 
     /// Startup shader parameters at `now`: power, grid, glitch, bloom.
@@ -224,6 +260,7 @@ impl App {
     pub fn draw(&mut self, frame: &mut Frame, elapsed: Duration) {
         let screen = frame.area();
         let areas = Areas::new(screen);
+        self.hits.clear();
         self.draw_header(frame, areas.header);
         self.draw_tabs(frame, areas.tabs);
         let block = Block::bordered()
@@ -274,17 +311,18 @@ impl App {
 
     fn draw_tabs(&mut self, frame: &mut Frame, area: Rect) {
         let mut spans = Vec::new();
-        self.tab_spans.clear();
         let mut column = area.x;
         for (index, tab) in Tab::ALL.into_iter().enumerate() {
             let label = format!(" {} {} ", index + 1, tab.title());
             let width = label.chars().count() as u16;
             let style = if tab == self.tab {
                 Style::new().fg(CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else if self.hover == Some(Target::Tab(tab)) {
+                Style::new().fg(TEXT).add_modifier(Modifier::BOLD)
             } else {
                 Style::new().fg(DIM)
             };
-            self.tab_spans.push((tab, column, column + width));
+            self.hits.push((Rect::new(column, area.y, width, 1).intersection(area), Target::Tab(tab)));
             spans.push(Span::styled(label, style));
             spans.push(Span::raw(" "));
             column += width + 1;
@@ -292,7 +330,7 @@ impl App {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    fn draw_status(&self, frame: &mut Frame, area: Rect) {
+    fn draw_status(&mut self, frame: &mut Frame, area: Rect) {
         let key = |text: &'static str| Span::styled(text, Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD));
         let label = |text: &'static str| Span::styled(text, Style::new().fg(DIM));
         let hints = Line::from(vec![
@@ -304,11 +342,20 @@ impl App {
             label(" select"),
         ]);
         frame.render_widget(Paragraph::new(hints), area);
-        let start = Line::from(vec![key("Esc"), label(" start terminal")]);
-        frame.render_widget(Paragraph::new(start).alignment(Alignment::Right), area);
+        let hovered = self.hover == Some(Target::StartTerminal);
+        let start_label = if hovered {
+            Span::styled(" start terminal", Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED))
+        } else {
+            label(" start terminal")
+        };
+        let start = Line::from(vec![key("Esc"), start_label]);
+        let width = start.width() as u16;
+        let start_area = Rect::new(area.right().saturating_sub(width), area.y, width, 1).intersection(area);
+        self.hits.push((start_area, Target::StartTerminal));
+        frame.render_widget(Paragraph::new(start), start_area);
     }
 
-    fn draw_overview(&self, frame: &mut Frame, area: Rect) {
+    fn draw_overview(&mut self, frame: &mut Frame, area: Rect) {
         let heading = Style::new().fg(CYAN).add_modifier(Modifier::BOLD);
         let label = Style::new().fg(DIM);
         let value = Style::new().fg(TEXT);
@@ -333,17 +380,25 @@ impl App {
             field("Config", config),
             field("Themes", format!("{} available", self.catalog.themes.len())),
             field("Shaders", format!("{} available", self.catalog.shaders.len())),
-            Line::raw(""),
         ];
-        lines.push(Line::from(vec![
-            Span::styled("  Enter", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
-            Span::styled("  start the terminal", label),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  tron --startup", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
+        let [text_area, hints_area] = Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).areas(area);
+        frame.render_widget(Paragraph::new(std::mem::take(&mut lines)).wrap(Wrap { trim: false }), text_area);
+
+        let hovered = self.hover == Some(Target::StartTerminal);
+        let start_label = if hovered { Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED) } else { label };
+        let start = Line::from(vec![
+            Span::styled("Enter", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
+            Span::styled("  start the terminal", start_label),
+        ]);
+        let start_area = Rect::new(hints_area.x, hints_area.y, start.width() as u16, 1).intersection(hints_area);
+        self.hits.push((start_area, Target::StartTerminal));
+        frame.render_widget(Paragraph::new(start), start_area);
+        let again = Line::from(vec![
+            Span::styled("tron --startup", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
             Span::styled("  opens this screen again", label),
-        ]));
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        ]);
+        let again_area = Rect { y: hints_area.y + 1, height: 1, ..hints_area }.intersection(hints_area);
+        frame.render_widget(Paragraph::new(again), again_area);
     }
 }
 
@@ -482,6 +537,7 @@ pub fn run<W: Write>(
     ratatui::crossterm::execute!(io::stdout(), EnableMouseCapture)?;
     link.scene(SCENE);
     let mut last = Instant::now();
+    let mut pointer_hand = false;
     let result = loop {
         let now = Instant::now();
         let elapsed = now - last;
@@ -494,16 +550,26 @@ pub fn run<W: Write>(
             break Ok(());
         }
         let content = Areas::new(terminal.get_frame().area()).content;
-        let tabs_row = Areas::new(terminal.get_frame().area()).tabs.y;
         match event::poll(FRAME) {
             Ok(true) if app.exit.is_none() => {
                 let command = match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
-                    Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                        app.on_click(mouse.column, mouse.row, tabs_row)
-                    }
+                    Event::Mouse(mouse) => match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => app.on_click(mouse.column, mouse.row),
+                        MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                            app.on_move(mouse.column, mouse.row);
+                            Command::None
+                        }
+                        _ => Command::None,
+                    },
                     _ => Command::None,
                 };
+                // A hand pointer over clickable things (OSC 22, supported by tron and xterm).
+                let hand = app.hover.is_some();
+                if hand != pointer_hand {
+                    pointer_hand = hand;
+                    set_pointer(if hand { "pointer" } else { "default" });
+                }
                 match command {
                     Command::Select(tab) => app.select(tab, content),
                     Command::StartTerminal => app.start_exit(),
@@ -514,8 +580,18 @@ pub fn run<W: Write>(
             Err(error) => break Err(error),
         }
     };
+    if pointer_hand {
+        set_pointer("");
+    }
     let _ = ratatui::crossterm::execute!(io::stdout(), DisableMouseCapture);
     result
+}
+
+/// Asks the terminal for a mouse pointer shape by CSS name, or the default for "".
+fn set_pointer(name: &str) {
+    let mut out = io::stdout();
+    let _ = write!(out, "\x1b]22;{name}\x07");
+    let _ = out.flush();
 }
 
 #[cfg(test)]
@@ -557,9 +633,12 @@ mod tests {
         let overview = screen(&mut app);
         assert!(overview.contains("1 Overview") && overview.contains("Welcome to tron"), "{overview}");
         assert!(overview.contains("fish -l"), "{overview}");
-        let (tab, start, _) = app.tab_spans[4];
-        assert_eq!(app.on_click(start + 1, 99, 3), Command::None);
-        assert_eq!(app.on_click(start + 1, 3, 3), Command::Select(tab));
+        let (area, target) = app.hits[4];
+        assert_eq!(target, Target::Tab(Tab::Keys));
+        assert_eq!(app.on_click(area.x + 1, 99), Command::None);
+        assert_eq!(app.on_click(area.x + 1, area.y), Command::Select(Tab::Keys));
+        let (start, _) = *app.hits.iter().find(|(_, t)| *t == Target::StartTerminal).unwrap();
+        assert_eq!(app.on_click(start.x, start.y), Command::StartTerminal);
         for tab in Tab::ALL {
             app.tab = tab;
             let text = screen(&mut app);
@@ -567,6 +646,22 @@ mod tests {
         }
         app.tab = Tab::Keys;
         assert!(screen(&mut app).contains("Scroll to previous prompt"));
+    }
+
+    #[test]
+    fn hovering_highlights_and_fades() {
+        let mut app = app();
+        screen(&mut app);
+        let effects = app.effects.len();
+        let (area, _) = app.hits[2];
+        app.on_move(area.x + 1, area.y);
+        assert_eq!(app.hover, Some(Target::Tab(Tab::Themes)));
+        assert_eq!(app.effects.len(), effects + 1, "fade in");
+        app.on_move(area.x + 1, area.y);
+        assert_eq!(app.effects.len(), effects + 1, "no new effect without a change");
+        app.on_move(0, 0);
+        assert_eq!(app.hover, None);
+        assert_eq!(app.effects.len(), effects + 2, "fade out");
     }
 
     #[test]
