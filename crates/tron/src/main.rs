@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,6 +45,22 @@ use clipboard::Clipboard;
 
 /// Delay before re-checking a frame held back by synchronized output.
 const SYNC_POLL: Duration = Duration::from_millis(8);
+/// Longest frames are held back after a pty resize while the shell redraws.
+const RESIZE_HOLD: Duration = Duration::from_millis(50);
+/// Output pause that means the shell finished redrawing after a resize.
+const RESIZE_QUIET: Duration = Duration::from_millis(6);
+
+/// Frames held back after the pty was resized. Shells redraw their prompt on a
+/// resize; showing the reflowed old prompt first made it flicker.
+#[derive(Clone, Copy, Debug)]
+struct ResizeHold {
+    since: Instant,
+    /// Output counter when the pty was resized.
+    output: u64,
+    /// Output counter last seen, and when it last changed.
+    last_output: u64,
+    output_at: Instant,
+}
 /// Maximum time between clicks of a double or triple click.
 const MULTI_CLICK: Duration = Duration::from_millis(400);
 /// Debug aid: a token accepted for startup screen commands in any session.
@@ -144,6 +160,8 @@ struct Shared {
     term: Mutex<Terminal>,
     /// Set by the reader when it woke the event loop and the wake is unhandled.
     wake_pending: AtomicBool,
+    /// Chunks of pty output parsed so far, to notice the shell answering a resize.
+    output: AtomicU64,
     exited: AtomicBool,
 }
 
@@ -275,6 +293,7 @@ struct Session {
     applied_shaders: Option<AppliedShaders>,
     /// Window transparency and blur last set.
     applied_translucency: Option<(bool, bool)>,
+    resize_hold: Option<ResizeHold>,
     /// Configuration problems shown at the top of the window, and until when.
     config_errors: Vec<String>,
     config_errors_until: Option<Instant>,
@@ -347,6 +366,7 @@ impl App {
         let shared = Arc::new(Shared {
             term: Mutex::new(term),
             wake_pending: AtomicBool::new(false),
+            output: AtomicU64::new(0),
             exited: AtomicBool::new(false),
         });
         let input = spawn_writer(pty.writer()?)?;
@@ -440,6 +460,7 @@ impl App {
             applied_font: String::new(),
             applied_shaders: None,
             applied_translucency: None,
+            resize_hold: None,
         };
         session.apply_config(config, self.paths.as_ref());
         if let Some(error) = self.config_error.take() {
@@ -646,6 +667,8 @@ impl ApplicationHandler for App {
                 session.update_hover();
             }
             WindowEvent::Focused(focused) => {
+                // Screenshots show the window as it looks focused, even when the compositor gives no focus.
+                let focused = focused || session.screenshot.is_some();
                 session.focused = focused;
                 if let Some(accessibility) = &mut session.accessibility {
                     accessibility.set_focused(focused);
@@ -853,6 +876,24 @@ impl Session {
         self.window.request_redraw();
     }
 
+    /// Whether a frame waits for the shell to redraw after a resize: until its
+    /// output arrived and paused, for at most `RESIZE_HOLD`.
+    fn resize_held(&mut self) -> bool {
+        let Some(hold) = &mut self.resize_hold else { return false };
+        let now = Instant::now();
+        let output = self.shared.output.load(Ordering::Acquire);
+        if output != hold.last_output {
+            hold.last_output = output;
+            hold.output_at = now;
+        }
+        let settling = output == hold.output || now.duration_since(hold.output_at) < RESIZE_QUIET;
+        if settling && now.duration_since(hold.since) < RESIZE_HOLD {
+            return true;
+        }
+        self.resize_hold = None;
+        false
+    }
+
     /// Loads the fonts, features and size from `config`.
     fn apply_font_config(&mut self, config: &Config, problems: &mut Vec<String>) {
         if config.font.family != self.font_family {
@@ -1037,6 +1078,10 @@ impl Session {
     }
 
     fn redraw(&mut self, event_loop: &dyn ActiveEventLoop) {
+        if self.resize_held() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(2)));
+            return;
+        }
         {
             let mut term = self.shared.term.lock();
             if term.sync_blocked() {
@@ -1172,8 +1217,14 @@ impl Session {
             term.resize(cols, rows);
             changed
         };
-        if changed && let Err(error) = self.pty.resize(window_size(cols, rows, self.fonts.metrics())) {
-            log::warn!("failed to resize pty: {error}");
+        if changed {
+            if self.resize_hold.is_none() {
+                let (now, output) = (Instant::now(), self.shared.output.load(Ordering::Acquire));
+                self.resize_hold = Some(ResizeHold { since: now, output, last_output: output, output_at: now });
+            }
+            if let Err(error) = self.pty.resize(window_size(cols, rows, self.fonts.metrics())) {
+                log::warn!("failed to resize pty: {error}");
+            }
         }
         self.window.request_redraw();
     }
@@ -1767,6 +1818,7 @@ fn spawn_reader(
                 parser.advance(&mut *term, &buffer[..n]);
                 term.take_responses()
             };
+            shared.output.fetch_add(1, Ordering::AcqRel);
             if let Some(reply) = reply {
                 let _ = responses.send(reply);
             }
