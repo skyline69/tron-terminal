@@ -91,6 +91,11 @@ pub struct Config {
     pub bell: BellConfig,
     pub links: LinkConfig,
     pub notifications: NotificationConfig,
+    /// Show the startup screen (welcome, setup, tour) before the shell.
+    /// Unset: only on the first launch.
+    pub startup: Option<bool>,
+    /// Animate the startup screen. Default true; `false` for reduced motion.
+    pub startup_animations: Option<bool>,
     /// Key combination to action, for example `"ctrl+shift+c" = "copy"`.
     /// Entries override the defaults. `"none"` removes a default binding.
     pub keybindings: BTreeMap<String, String>,

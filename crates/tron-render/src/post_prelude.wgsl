@@ -30,10 +30,11 @@ struct TronUniforms {
     previous_cursor: vec4<f32>,
     // Value of `time` when the cursor rectangle last changed.
     cursor_change_time: f32,
-    // Scalars, not a vec3: a vec3 would align to 16 and grow the struct.
+    // Startup screen scene and parameters. Zero for user shaders.
+    scene: u32,
     _padding2: f32,
     _padding3: f32,
-    _padding4: f32,
+    params: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> tron: TronUniforms;

@@ -26,6 +26,9 @@ use post::{PostChain, PostUniforms};
 
 pub use post::PostShader;
 
+/// Effects shown only while tron's startup screen runs.
+const STARTUP_SHADER: &str = include_str!("startup.wgsl");
+
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
     #[error("failed to create surface: {0}")]
@@ -212,6 +215,11 @@ pub struct Renderer {
     cells: CellPipeline,
     images: ImagePipeline,
     post: PostChain,
+    /// The startup screen's own chain, after the user's shaders.
+    startup: PostChain,
+    startup_scene: u32,
+    startup_params: [f32; 4],
+    startup_frame: u32,
     theme: Theme,
     background: [u8; 3],
     focused: bool,
@@ -303,6 +311,7 @@ impl Renderer {
         let images = ImagePipeline::new(&device, format, cache);
         log::debug!("gpu init: image pipeline after {:?}", started.elapsed());
         let mut post = PostChain::new(&device, format, cache);
+        let startup = PostChain::new(&device, format, cache);
         post.resize(&device, config.width, config.height);
         log::debug!("gpu init: post chain after {:?}", started.elapsed());
         if let Some(cache) = &pipeline_cache {
@@ -319,6 +328,10 @@ impl Renderer {
             cells,
             images,
             post,
+            startup,
+            startup_scene: 0,
+            startup_params: [0.0; 4],
+            startup_frame: 0,
             theme,
             background: [0; 3],
             focused: true,
@@ -392,6 +405,7 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.post.resize(&self.device, width, height);
+        self.startup.resize(&self.device, width, height);
         self.cells.invalidate();
     }
 
@@ -444,10 +458,39 @@ impl Renderer {
         errors
     }
 
+    /// Loads or unloads the startup screen's shader. Returns whether it runs.
+    pub fn set_startup_shader(&mut self, enabled: bool) -> bool {
+        if enabled == self.startup.is_active() {
+            return enabled;
+        }
+        let shaders: Vec<PostShader> = if enabled {
+            vec![PostShader { name: "startup".into(), source: STARTUP_SHADER.into() }]
+        } else {
+            Vec::new()
+        };
+        for error in self.startup.set_shaders(&self.device, &shaders, Some(true)) {
+            log::error!("{error}");
+        }
+        self.startup.resize(&self.device, self.config.width, self.config.height);
+        self.startup_frame = 0;
+        self.startup.is_active()
+    }
+
+    /// Scene and parameters for the startup screen's shader.
+    pub fn set_startup_params(&mut self, scene: u32, params: [f32; 4]) {
+        self.startup_scene = scene;
+        self.startup_params = params;
+    }
+
+    pub fn startup_params(&self) -> (u32, [f32; 4]) {
+        (self.startup_scene, self.startup_params)
+    }
+
     /// Whether frames should be drawn continuously for shader animation.
     pub fn is_animated(&self) -> bool {
         const CURSOR_ANIMATION: f32 = 1.0;
         self.post.is_animated()
+            || self.startup.is_animated()
             || (self.post.uses_cursor_motion()
                 && self.started.elapsed().as_secs_f32() - self.cursor_change_time < CURSOR_ANIMATION)
     }
@@ -507,7 +550,7 @@ impl Renderer {
         let surface_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         {
-            let target = self.post.input_view().unwrap_or(&surface_view);
+            let target = self.post.input_view().or(self.startup.input_view()).unwrap_or(&surface_view);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -532,9 +575,9 @@ impl Renderer {
             self.cursor = cursor;
             self.cursor_change_time = time;
         }
-        if self.post.is_active() {
+        if self.post.is_active() || self.startup.is_active() {
             let m = self.cells.metrics();
-            let uniforms = PostUniforms {
+            let mut uniforms = PostUniforms {
                 resolution: viewport,
                 time,
                 frame: self.post_frame,
@@ -545,10 +588,22 @@ impl Renderer {
                 background: [clear.r as f32, clear.g as f32, clear.b as f32, clear.a as f32],
                 previous_cursor: self.previous_cursor,
                 cursor_change_time: self.cursor_change_time,
-                _padding2: [0.0; 3],
+                scene: 0,
+                _padding2: [0.0; 2],
+                params: [0.0; 4],
             };
-            self.post.run(&self.queue, &mut encoder, &surface_view, &uniforms);
-            self.post_frame = self.post_frame.wrapping_add(1);
+            if self.post.is_active() {
+                let output = self.startup.input_view().unwrap_or(&surface_view);
+                self.post.run(&self.queue, &mut encoder, output, &uniforms);
+                self.post_frame = self.post_frame.wrapping_add(1);
+            }
+            if self.startup.is_active() {
+                uniforms.frame = self.startup_frame;
+                uniforms.scene = self.startup_scene;
+                uniforms.params = self.startup_params;
+                self.startup.run(&self.queue, &mut encoder, &surface_view, &uniforms);
+                self.startup_frame = self.startup_frame.wrapping_add(1);
+            }
         }
         let capture = self.capture.take().map(|path| {
             let (width, height) = (self.config.width, self.config.height);

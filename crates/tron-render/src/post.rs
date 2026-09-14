@@ -42,7 +42,7 @@ pub struct PostShader {
     pub source: String,
 }
 
-/// Matches `TronUniforms` in the prelude. 96 bytes, aligned to 16.
+/// Matches `TronUniforms` in the prelude. 112 bytes, aligned to 16.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, Default)]
 pub struct PostUniforms {
@@ -56,7 +56,9 @@ pub struct PostUniforms {
     pub background: [f32; 4],
     pub previous_cursor: [f32; 4],
     pub cursor_change_time: f32,
-    pub _padding2: [f32; 3],
+    pub scene: u32,
+    pub _padding2: [f32; 2],
+    pub params: [f32; 4],
 }
 
 struct Target {
@@ -452,7 +454,9 @@ mod tests {
 
     #[test]
     fn uniforms_match_the_prelude_layout() {
-        assert_eq!(size_of::<PostUniforms>(), 96);
+        assert_eq!(size_of::<PostUniforms>(), 112);
+        assert_eq!(std::mem::offset_of!(PostUniforms, scene), 84);
+        assert_eq!(std::mem::offset_of!(PostUniforms, params), 96);
         assert_eq!(std::mem::offset_of!(PostUniforms, background), 48);
         assert_eq!(std::mem::offset_of!(PostUniforms, previous_cursor), 64);
         assert_eq!(std::mem::offset_of!(PostUniforms, cursor_change_time), 80);

@@ -45,12 +45,17 @@ A desktop entry and icon live in `dist/`.
 ## Usage
 
 ```
-tron [options] [-e program [args...]]
+tron [OPTIONS] [COMMAND]
 
-  -e, --command <program> [args...]  Run a program instead of the shell
-  -d, --working-directory <dir>      Start in this directory
-      --config-dir <dir>             Use this configuration directory
+  -e, --command <PROGRAM>...     Run a program instead of the shell
+  -d, --working-directory <DIR>  Start in this directory
+      --config-dir <DIR>         Use this configuration directory
+      --startup                  Show the startup screen: welcome, setup and tour
+  tron completions <SHELL>       Print shell completions (bash, zsh, fish, ...)
 ```
+
+The startup screen opens by itself the first time tron starts. Set
+`startup = false` to never show it, or `startup = true` to show it every time.
 
 ### Default key bindings
 

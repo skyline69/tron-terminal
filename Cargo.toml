@@ -16,6 +16,7 @@ tron-pty = { path = "crates/tron-pty" }
 tron-font = { path = "crates/tron-font" }
 tron-render = { path = "crates/tron-render" }
 tron-config = { path = "crates/tron-config" }
+tron-startup = { path = "crates/tron-startup" }
 
 accesskit = "0.25.0"
 accesskit_unix = "0.23.0"
@@ -23,6 +24,8 @@ anyhow = "1.0.104"
 arboard = { version = "3.6.1", default-features = false }
 base64 = "0.23.1"
 bitflags = "2.13.2"
+clap = { version = "4.6.6", features = ["derive"] }
+clap_complete = "4.6.9"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 foldhash = "0.2.0"
 gif = "0.14.2"
@@ -36,6 +39,8 @@ miniz_oxide = "0.9.1"
 notify = "9.0.0-rc.5"
 parking_lot = "0.12.5"
 png = "0.18.1"
+ratatui = "0.30.2"
+tachyonfx = { version = "0.25.2", default-features = false, features = ["std", "std-duration"] }
 pollster = "1.0.1"
 rustix = { version = "1.1.4", features = ["pty", "termios", "process", "fs", "stdio"] }
 smithay-clipboard = "0.7.3"

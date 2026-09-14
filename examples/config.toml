@@ -7,6 +7,12 @@
 #   ~/.config/tron/themes/<name>.toml   color themes
 #   ~/.config/tron/shaders/<name>.wgsl  post-processing shaders
 
+# Startup screen (welcome, setup, tour) before the shell. Unset: only on the
+# first launch. `tron --startup` shows it any time.
+# startup = true
+# Animate it. false for reduced motion.
+# startup_animations = true
+
 # Theme from themes/<name>.toml. "tron" is built in.
 # theme = "tron-light"
 

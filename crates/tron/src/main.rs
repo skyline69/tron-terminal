@@ -1,6 +1,7 @@
 //! tron: a GPU accelerated terminal emulator.
 
 mod accessibility;
+mod cli;
 mod clipboard;
 mod input;
 mod mouse;
@@ -46,6 +47,8 @@ use clipboard::Clipboard;
 const SYNC_POLL: Duration = Duration::from_millis(8);
 /// Maximum time between clicks of a double or triple click.
 const MULTI_CLICK: Duration = Duration::from_millis(400);
+/// Longest the startup screen's shader may run without being turned off.
+const STARTUP_SHADER_LIMIT: Duration = Duration::from_secs(60);
 /// How long configuration errors stay on screen.
 const CONFIG_ERROR_TIME: Duration = Duration::from_secs(15);
 /// Duration of the visual bell flash.
@@ -54,66 +57,19 @@ const FLASH: Duration = Duration::from_millis(150);
 const LINK_SCHEMES: [&str; 9] =
     ["http://", "https://", "file://", "mailto:", "ftp://", "sftp://", "ssh://", "git://", "gemini://"];
 
-const HELP: &str = "tron: GPU accelerated terminal emulator
-
-Usage: tron [options] [-e program [args...]]
-
-Options:
-  -e, --command <program> [args...]  Run a program instead of the shell
-  -d, --working-directory <dir>      Start in this directory
-      --config-dir <dir>             Use this configuration directory
-  -h, --help                         Show this help
-  -V, --version                      Show the version
-";
-
-#[derive(Default, Clone)]
-struct Cli {
-    command: Option<Vec<String>>,
-    working_directory: Option<PathBuf>,
-    config_dir: Option<PathBuf>,
-}
-
-/// Parses arguments. `Ok(None)` means help or version was printed.
-fn parse_cli() -> Result<Option<Cli>, String> {
-    let mut cli = Cli::default();
-    let mut args = std::env::args_os().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.to_str() {
-            Some("-e" | "--command") => {
-                let command: Vec<String> = args.by_ref().map(|a| a.to_string_lossy().into_owned()).collect();
-                if command.is_empty() {
-                    return Err("-e needs a program".into());
-                }
-                cli.command = Some(command);
-            }
-            Some("-d" | "--working-directory") => {
-                cli.working_directory = Some(args.next().ok_or("--working-directory needs a directory")?.into());
-            }
-            Some("--config-dir") => cli.config_dir = Some(args.next().ok_or("--config-dir needs a directory")?.into()),
-            Some("-h" | "--help") => {
-                print!("{HELP}");
-                return Ok(None);
-            }
-            Some("-V" | "--version") => {
-                println!("tron {}", env!("CARGO_PKG_VERSION"));
-                return Ok(None);
-            }
-            _ => return Err(format!("unknown argument {arg:?}, see --help")),
-        }
-    }
-    Ok(Some(cli))
-}
+use cli::Cli;
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::new().filter_level(log::LevelFilter::Warn).parse_env(env_logger::Env::default()).init();
-    let cli = match parse_cli() {
-        Ok(Some(cli)) => cli,
-        Ok(None) => return Ok(()),
-        Err(error) => {
-            eprintln!("tron: {error}");
-            std::process::exit(2);
+    let cli = <Cli as clap::Parser>::parse();
+    match &cli.subcommand {
+        Some(cli::Command::Completions { shell }) => {
+            cli::print_completions(*shell);
+            return Ok(());
         }
-    };
+        Some(cli::Command::StartupScreen { shell }) => tron_startup::run(shell),
+        None => {}
+    }
     let gpu = thread::Builder::new().name("gpu-init".into()).spawn(|| pollster::block_on(Gpu::new())).ok();
     let paths = match (Paths::discover(), &cli.config_dir) {
         (Some(paths), Some(dir)) => Some(Paths::with_dirs(dir.clone(), paths.data_dir)),
@@ -133,6 +89,10 @@ fn main() -> anyhow::Result<()> {
         }
         None => Config::default(),
     };
+
+    let marker_exists = paths.as_ref().is_none_or(|p| p.data_dir.join(cli::STARTUP_MARKER).exists());
+    let show_startup = cli.show_startup(&config, marker_exists, std::env::var_os("TRON_SCREENSHOT").is_some());
+    let startup_token = random_token();
 
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     let proxy = event_loop.create_proxy();
@@ -154,6 +114,8 @@ fn main() -> anyhow::Result<()> {
         paths,
         config,
         config_error,
+        show_startup,
+        startup_token,
         proxy,
         config_dirty,
         _watcher: watcher,
@@ -177,6 +139,10 @@ struct App {
     config: Config,
     /// Why the configuration file could not be loaded at startup.
     config_error: Option<String>,
+    /// Run the startup screen before the shell.
+    show_startup: bool,
+    /// Secret the startup screen sends with its commands.
+    startup_token: String,
     proxy: EventLoopProxy,
     config_dirty: Arc<AtomicBool>,
     _watcher: Option<Watcher>,
@@ -267,6 +233,10 @@ struct Session {
     pty: Pty,
     input: mpsc::Sender<Vec<u8>>,
     settings: Settings,
+    /// Token accepted for startup screen commands, until the shell's first prompt.
+    startup_token: Option<String>,
+    /// When the startup shader was turned on and how many prompt marks existed then.
+    startup_shader: Option<(Instant, usize)>,
     /// Configuration problems shown at the top of the window, and until when.
     config_errors: Vec<String>,
     config_errors_until: Option<Instant>,
@@ -418,6 +388,8 @@ impl App {
             scroll_accumulator: 0.0,
             config_errors: Vec::new(),
             config_errors_until: None,
+            startup_token: self.show_startup.then(|| self.startup_token.clone()),
+            startup_shader: None,
         };
         session.apply_config(config, self.paths.as_ref());
         if let Some(error) = self.config_error.take() {
@@ -455,6 +427,27 @@ impl App {
             }
         }
         options.env.extend(shell.env.iter().map(|(k, v)| (k.into(), v.into())));
+        if self.show_startup
+            && let Ok(exe) = std::env::current_exe()
+        {
+            // The startup screen runs first and then replaces itself with the shell.
+            let program = options
+                .program
+                .take()
+                .or_else(|| std::env::var("SHELL").ok().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| "/bin/sh".to_owned());
+            let mut args = vec!["startup-screen".to_owned(), "--".to_owned(), program];
+            args.append(&mut options.args);
+            options.args = args;
+            options.program = Some(exe.to_string_lossy().into_owned());
+            if let Some(paths) = &self.paths {
+                options.env.push((tron_startup::MARKER_ENV.into(), paths.data_dir.join(cli::STARTUP_MARKER).into()));
+            }
+            options.env.push((tron_startup::TOKEN_ENV.into(), self.startup_token.clone().into()));
+            if self.config.startup_animations == Some(false) {
+                options.env.push((tron_startup::ANIMATIONS_ENV.into(), "0".into()));
+            }
+        }
         options
     }
 
@@ -778,6 +771,43 @@ impl Session {
         self.window.request_redraw();
     }
 
+    /// Commands from the startup screen, accepted only with its token: `shader=on`,
+    /// `shader=off`, `scene=<n>` and `params=<x>:<y>:<z>:<w>`, separated by commas.
+    fn startup_command(&mut self, token: &str, payload: &str) {
+        if self.startup_token.as_deref() != Some(token) {
+            log::debug!("ignoring a startup screen command without the right token");
+            return;
+        }
+        let (mut scene, mut params) = self.renderer.startup_params();
+        for command in payload.split(',') {
+            match command.split_once('=') {
+                Some(("shader", "on")) => {
+                    if self.renderer.set_startup_shader(true) && self.startup_shader.is_none() {
+                        let marks = self.shared.term.lock().command_marks().count();
+                        self.startup_shader = Some((Instant::now(), marks));
+                    }
+                }
+                Some(("shader", "off")) => {
+                    self.renderer.set_startup_shader(false);
+                    self.startup_shader = None;
+                }
+                Some(("scene", value)) => scene = value.parse().unwrap_or(scene),
+                Some(("params", values)) => {
+                    for (slot, value) in params.iter_mut().zip(values.split(':')) {
+                        if let Ok(value) = value.parse::<f32>()
+                            && value.is_finite()
+                        {
+                            *slot = value.clamp(-100.0, 100.0);
+                        }
+                    }
+                }
+                _ => log::debug!("unknown startup screen command {command:?}"),
+            }
+        }
+        self.renderer.set_startup_params(scene, params);
+        self.window.request_redraw();
+    }
+
     /// Shows a desktop notification when the user's settings and the application allow it.
     fn notify(&self, title: &str, body: &str, when: Option<NotifyWhen>) {
         let focused_ok = match (self.settings.notify_mode, when) {
@@ -837,6 +867,7 @@ impl Session {
                     }
                 }
                 TermEvent::Notification { title, body, when } => self.notify(&title, &body, when),
+                TermEvent::StartupScreen { token, payload } => self.startup_command(&token, &payload),
                 TermEvent::ColumnsChanged(cols) => {
                     // DECCOLM: resize the window to fit the new width, keeping the height.
                     let metrics = self.fonts.metrics();
@@ -871,6 +902,15 @@ impl Session {
                 self.window.set_title(if title.is_empty() { &self.settings.title } else { &title });
             }
             term.snapshot(&mut self.snapshot);
+            // The startup screen's shader ends when the shell shows its first prompt,
+            // or after a time limit if the screen never turned it off.
+            if let Some((since, marks)) = self.startup_shader
+                && (since.elapsed() > STARTUP_SHADER_LIMIT || term.command_marks().count() > marks)
+            {
+                self.startup_shader = None;
+                self.startup_token = None;
+                self.renderer.set_startup_shader(false);
+            }
         }
         let now = Instant::now();
         let mut next_wake: Option<Instant> = None;
@@ -1199,6 +1239,7 @@ impl Session {
         let cwd = self.shared.term.lock().cwd().map(percent_decode).map(PathBuf::from).filter(|p| p.is_dir());
         let Ok(exe) = std::env::current_exe() else { return };
         let mut command = Command::new(exe);
+        command.arg("--no-startup");
         if let Some(cwd) = cwd.or_else(|| std::env::current_dir().ok()) {
             command.arg("--working-directory").arg(cwd);
         }
@@ -1657,6 +1698,16 @@ fn dropped_text(value: &dyn TypedData) -> Option<String> {
 /// Quotes `text` for POSIX shells: single quotes, with `'` written as `'\''`.
 fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// A random hex token from the kernel, or from the clock when that fails.
+fn random_token() -> String {
+    let mut bytes = [0u8; 16];
+    if File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut bytes)).is_err() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        bytes = (nanos ^ u128::from(std::process::id()) << 64).to_le_bytes();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Runs a program without waiting for it, reaping it on a helper thread.

@@ -128,6 +128,12 @@ pub enum TermEvent {
     },
     /// DECCOLM switched the screen width. The window should resize to fit.
     ColumnsChanged(usize),
+    /// A command from tron's startup screen (`OSC 7777 ; token ; payload`).
+    /// The application must check the token.
+    StartupScreen {
+        token: String,
+        payload: String,
+    },
 }
 
 /// When a notification should be shown (kitty's `o` key).
@@ -2416,6 +2422,10 @@ impl Perform for Terminal {
             [b"99", metadata, payload @ ..] => self.kitty_notification(metadata, &payload.join(&b';'), terminator),
             [b"1337", rest @ ..] => self.iterm2(&rest.join(&b';')),
             [b"66", metadata, text @ ..] => self.text_sizing(metadata, &text.join(&b';')),
+            [b"7777", token, payload @ ..] => self.events.push(TermEvent::StartupScreen {
+                token: String::from_utf8_lossy(token).into_owned(),
+                payload: String::from_utf8_lossy(&payload.join(&b';')).into_owned(),
+            }),
             [b"7", uri, ..] => {
                 let uri = String::from_utf8_lossy(uri);
                 let path = uri
@@ -3048,6 +3058,15 @@ mod tests {
         assert!(row.cells[2].flags.contains(Flags::WIDE));
         assert_eq!(row.cells[4].ch, '❤');
         assert_eq!(row.cells[5].ch, 'a');
+    }
+
+    #[test]
+    fn startup_screen_commands_become_events() {
+        let mut t = term(10, 2, b"\x1b]7777;abc;shader=on,params=1:0.5:0:0\x07");
+        assert_eq!(
+            t.take_events(),
+            vec![TermEvent::StartupScreen { token: "abc".into(), payload: "shader=on,params=1:0.5:0:0".into() }]
+        );
     }
 
     #[test]
