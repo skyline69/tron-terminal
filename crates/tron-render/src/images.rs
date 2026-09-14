@@ -52,7 +52,7 @@ pub struct ImagePipeline {
 }
 
 impl ImagePipeline {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, cache: Option<&wgpu::PipelineCache>) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("image.wgsl"));
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("image uniforms"),
@@ -120,7 +120,7 @@ impl ImagePipeline {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache,
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("image uniforms"),
@@ -190,7 +190,9 @@ impl ImagePipeline {
             let Some(image) = images.get(&placement.image_id) else { continue };
             self.ensure_texture(device, queue, image, srgb);
             let [sx, sy, sw, sh] = placement.source;
-            let (width, height) = if placement.scaled {
+            let (width, height) = if let Some([w, h]) = placement.pixel_size {
+                (w as f32, h as f32)
+            } else if placement.scaled {
                 (
                     placement.cols as f32 * cell_w - placement.offset_x as f32,
                     placement.rows as f32 * cell_h - placement.offset_y as f32,
@@ -228,7 +230,8 @@ impl ImagePipeline {
         for (y, row) in snapshot.rows.iter().enumerate() {
             let mut previous = None;
             for (x, cell) in row.cells.iter().enumerate() {
-                let Some(tile) = placeholder_cell(cell, row.combining(x), previous) else {
+                let underline_color = snapshot.extended(cell.extended).underline_color;
+                let Some(tile) = placeholder_cell(cell, underline_color, row.combining(x), previous) else {
                     previous = None;
                     continue;
                 };

@@ -7,12 +7,17 @@ A GPU accelerated terminal emulator written in Rust. Fast first, then beautiful.
   in the throughput benchmarks below.
 - **Good text.** HarfBuzz-grade shaping through `harfrust` with programming
   ligatures, font fallback through fontconfig, color emoji, and box drawing,
-  block and Powerline glyphs drawn to fit every cell exactly.
+  block and Powerline glyphs drawn to fit every cell exactly. Right-to-left
+  text (Arabic, Hebrew) is reordered for display, double width and double
+  height lines work, and grapheme clusters take their real width (mode 2027).
 - **Customizable.** WGSL post-processing shaders, themes, hot reloaded
   configuration and key bindings.
-- **Modern protocols.** Kitty graphics (including animation, shared memory
-  and Unicode placeholders) and keyboard protocols, Sixel, synchronized output,
-  OSC 8 hyperlinks, OSC 52 clipboard, styled underlines, true color.
+- **Modern protocols.** Kitty graphics (including animation, frame
+  composition, relative placements, shared memory and Unicode placeholders),
+  kitty keyboard and text sizing protocols, iTerm2 inline images (PNG, JPEG,
+  animated GIF), Sixel, synchronized output, OSC 8 hyperlinks, OSC 52
+  clipboard, OSC 133 prompt marks, desktop notifications (OSC 9, 99 and 777),
+  styled underlines, true color.
 - **Images and video.** `chafa`, `kitten icat`-style tools, `yazi` previews and
   `mpv --vo=kitty` work out of the box.
 
@@ -57,13 +62,26 @@ tron [options] [-e program [args...]]
 | `Shift+PageUp` / `Shift+PageDown` | Scroll a page |
 | `Shift+Home` / `Shift+End` | Scroll to top / bottom |
 | `Ctrl+Shift+F` | Search scrollback (Enter older, Shift+Enter newer, Esc close) |
+| `Ctrl+Shift+Z` / `Ctrl+Shift+X` | Scroll to the previous / next shell prompt |
+| `Ctrl+Shift+G` | Select the output of the last command |
 | `Ctrl+Shift+N` | New window in the current directory |
 | `Ctrl+Shift+,` | Reload configuration |
 | `Ctrl+click` | Open a link |
 
 Mouse: drag to select, double click for words, triple click for lines,
 `Alt`+drag for a block, `Shift`+click to extend. Hold `Shift` to select text in
-applications that use the mouse.
+applications that use the mouse. Dropping files inserts their shell-quoted
+paths.
+
+The kitty keyboard protocol reports alternate and base layout keys, keypad
+keys and the Hyper modifier; application keypad mode and SGR-Pixels mouse
+reports (mode 1016) work too. The clipboard and primary selection work on
+Wayland and X11.
+
+### Accessibility
+
+tron exposes the screen to screen readers such as Orca over AT-SPI. Set
+`TRON_ACCESSIBILITY=0` to turn it off.
 
 ## Configuration
 
@@ -91,7 +109,9 @@ Key bindings override the defaults:
 Actions: `copy`, `paste`, `paste_selection`, `increase_font_size`,
 `decrease_font_size`, `reset_font_size`, `scroll_line_up`, `scroll_line_down`,
 `scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`,
-`clear_scrollback`, `search`, `new_window`, `reload_config`, `text:...`, `none`.
+`clear_scrollback`, `scroll_to_previous_prompt`, `scroll_to_next_prompt`,
+`select_command_output`, `copy_command_output`, `search`, `new_window`,
+`reload_config`, `text:...`, `none`.
 
 ### Shaders
 
@@ -106,16 +126,25 @@ fn shade(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
 }
 ```
 
+`terminal(uv)` samples the rendered terminal. `previous(uv)` samples the
+final image of the previous frame, for trails and afterglow effects.
+
 Available inputs on the `tron` uniform: `resolution`, `time`, `frame`,
-`cursor` (x, y, width, height in pixels), `cell_size`, `focused` and
+`cursor` (x, y, width, height in pixels), `previous_cursor` and
+`cursor_change_time` (for cursor trails), `cell_size`, `focused` and
 `background`. Shaders that read `tron.time` or `tron.frame` redraw every
-frame. Examples: CRT, bloom and cursor glow in
-[`examples/shaders`](examples/shaders).
+frame; shaders that read `tron.cursor_change_time` redraw for a second after
+the cursor moves. Examples: CRT, bloom, cursor glow, cursor trail and
+afterglow in [`examples/shaders`](examples/shaders). Compiled pipelines are
+cached in `~/.cache/tron`.
 
 ## Shell integration
 
-tron clears and lets the shell redraw its prompt on resize when the shell
-marks prompts with OSC 133. fish 4 does this out of the box. For bash and zsh:
+When the shell marks prompts with OSC 133, tron clears and lets the shell
+redraw its prompt on resize, `Ctrl+Shift+Z` and `Ctrl+Shift+X` jump between
+prompts, and `Ctrl+Shift+G` selects the output of the last command (or of the
+command at the top of the view after jumping). fish 4 sends the marks out of
+the box. For bash and zsh:
 
 ```sh
 # bash (~/.bashrc)
@@ -126,6 +155,18 @@ PS1='\[\e]133;D\e\\\e]133;A\e\\\]'"$PS1"'\[\e]133;B\e\\\]'
 precmd() { print -n '\e]133;D\e\\\e]133;A\e\\' }
 preexec() { print -n '\e]133;C\e\\' }
 ```
+
+## Notifications
+
+Applications can show desktop notifications with OSC 9, OSC 777 (`notify`)
+and kitty's OSC 99. tron runs `notify-send` for them, by default only while
+its window is unfocused:
+
+```sh
+printf '\e]777;notify;Build;finished\e\\'
+```
+
+See `[notifications]` in the example config.
 
 ## Remote hosts
 
@@ -143,12 +184,13 @@ five runs, lower is better.
 
 | Workload | tron | Alacritty 0.17 | Ghostty 1.3 |
 |---|---|---|---|
-| Plain ASCII, 54 MiB | 707 ms | 882 ms | 1275 ms |
-| True color SGR, 44 MiB | 663 ms | 731 ms | 3058 ms |
-| Unicode and CJK, 31 MiB | 457 ms | 463 ms | 667 ms |
-| Launch until the shell runs | 53 ms | 140 ms | 417 ms |
+| Plain ASCII, 54 MiB | 689 ms | 868 ms | 1173 ms |
+| True color SGR, 44 MiB | 611 ms | 728 ms | 2969 ms |
+| Unicode and CJK, 31 MiB | 453 ms | 449 ms | 632 ms |
+| Launch until the shell runs | 55 ms | 138 ms | 419 ms |
 
-Headless parser throughput:
+Headless parser throughput (about 500 MiB/s plain ASCII, 270 MiB/s true
+color SGR, 200 MiB/s Unicode on the same machine):
 `cargo run --release -p tron-core --example throughput`.
 
 ## Architecture

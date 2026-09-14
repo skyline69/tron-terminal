@@ -6,6 +6,7 @@
 
 use foldhash::HashMap;
 
+use crate::cell::Extended;
 use crate::graphics::{Image, Placement};
 use crate::grid::Row;
 use crate::palette::Palette;
@@ -27,6 +28,8 @@ pub struct Snapshot {
     pub alt_screen: bool,
     pub palette: Palette,
     pub palette_generation: u64,
+    /// Copy of the terminal's [`crate::ExtendedTable`] entries.
+    pub extended: Vec<Extended>,
     pub selection: Option<SelectionRange>,
     pub graphics_generation: u64,
     pub placements: Vec<Placement>,
@@ -43,6 +46,12 @@ impl Snapshot {
     /// Absolute line number of viewport row `row`.
     pub fn line(&self, row: usize) -> i64 {
         self.top_line + row as i64
+    }
+
+    /// Extended attributes of a cell.
+    #[inline]
+    pub fn extended(&self, id: u16) -> &Extended {
+        self.extended.get(usize::from(id)).unwrap_or(&Extended::DEFAULT)
     }
 
     pub fn cursor(&self) -> CursorState {

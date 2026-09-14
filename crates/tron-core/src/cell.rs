@@ -1,6 +1,7 @@
 //! Cells, colors and text attributes.
 
 use bitflags::bitflags;
+use foldhash::HashMap;
 
 /// A terminal color as set by SGR. Resolved to RGB by the renderer.
 ///
@@ -89,16 +90,16 @@ bitflags! {
     }
 }
 
-/// One grid cell. 20 bytes.
+/// One grid cell. 16 bytes, laid out in declaration order with no padding.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[repr(C)]
 pub struct Cell {
     pub ch: char,
     pub fg: Color,
     pub bg: Color,
-    pub underline_color: Color,
     pub flags: Flags,
-    /// Hyperlink id (OSC 8), 0 for none. See [`crate::Terminal::hyperlink`].
-    pub link: u16,
+    /// Index of the cell's rarely used attributes in the [`ExtendedTable`], 0 for none.
+    pub extended: u16,
 }
 
 impl Default for Cell {
@@ -110,14 +111,8 @@ impl Default for Cell {
 impl Cell {
     /// An empty cell. The NUL character keeps the bit pattern all zero, so
     /// clearing rows compiles to `memset`. Empty cells read as spaces.
-    pub const BLANK: Self = Self {
-        ch: '\0',
-        fg: Color::DEFAULT,
-        bg: Color::DEFAULT,
-        underline_color: Color::DEFAULT,
-        flags: Flags::empty(),
-        link: 0,
-    };
+    pub const BLANK: Self =
+        Self { ch: '\0', fg: Color::DEFAULT, bg: Color::DEFAULT, flags: Flags::empty(), extended: 0 };
 
     /// Whether the cell holds no character.
     #[inline]
@@ -128,7 +123,113 @@ impl Cell {
     /// A blank cell that keeps the background of `pen` (background color erase).
     #[inline]
     pub fn erased(pen: &Cell) -> Self {
-        Self { bg: pen.bg, link: 0, ..Self::BLANK }
+        Self { bg: pen.bg, ..Self::BLANK }
+    }
+}
+
+/// Cell attributes that few cells use: underline color, hyperlink and text size.
+/// Cells refer to them by index, which keeps [`Cell`] small.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Extended {
+    pub underline_color: Color,
+    /// Hyperlink id (OSC 8), 0 for none. See [`crate::Terminal::hyperlink`].
+    pub link: u16,
+    /// Text drawn larger than one cell (kitty text sizing, OSC 66).
+    pub size: Option<TextSize>,
+}
+
+impl Extended {
+    pub const DEFAULT: Self = Self { underline_color: Color::DEFAULT, link: 0, size: None };
+}
+
+impl Default for Extended {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// A block of cells showing one piece of scaled text (kitty text sizing protocol).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct TextSize {
+    /// Rows the block spans, 1 to 7. Columns are `scale * width`.
+    pub scale: u8,
+    /// Width in cells before scaling.
+    pub width: u8,
+    /// Fractional font scale inside the block, `numerator / denominator` (0 for none).
+    pub numerator: u8,
+    pub denominator: u8,
+    /// Vertical alignment for fractional scales: 0 top, 1 bottom, 2 center.
+    pub vertical: u8,
+    /// Horizontal alignment for fractional scales: 0 left, 1 right, 2 center.
+    pub horizontal: u8,
+    /// Position of this cell inside the block. The text lives at (0, 0).
+    pub dx: u8,
+    pub dy: u8,
+}
+
+impl TextSize {
+    /// Size of the block in cells: columns, rows.
+    pub fn cells(&self) -> (usize, usize) {
+        (usize::from(self.scale) * usize::from(self.width), usize::from(self.scale))
+    }
+
+    /// Font scale relative to normal text.
+    pub fn font_scale(&self) -> f32 {
+        let fraction = if self.numerator > 0 && self.denominator > self.numerator {
+            f32::from(self.numerator) / f32::from(self.denominator)
+        } else {
+            1.0
+        };
+        f32::from(self.scale) * fraction
+    }
+}
+
+/// Interned [`Extended`] values. Index 0 is the default. Entries are never
+/// removed, so an index stays valid for the life of the terminal.
+pub struct ExtendedTable {
+    entries: Vec<Extended>,
+    index: HashMap<Extended, u16>,
+}
+
+impl Default for ExtendedTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExtendedTable {
+    pub fn new() -> Self {
+        let mut index = HashMap::default();
+        index.insert(Extended::DEFAULT, 0);
+        Self { entries: vec![Extended::DEFAULT], index }
+    }
+
+    #[inline]
+    pub fn get(&self, id: u16) -> &Extended {
+        self.entries.get(usize::from(id)).unwrap_or(&Extended::DEFAULT)
+    }
+
+    pub fn entries(&self) -> &[Extended] {
+        &self.entries
+    }
+
+    /// Index of `value`, adding it when new. When the table is full, the
+    /// closest existing entry is used: the same link without other attributes.
+    pub fn intern(&mut self, value: Extended) -> u16 {
+        if value == Extended::DEFAULT {
+            return 0;
+        }
+        if let Some(&id) = self.index.get(&value) {
+            return id;
+        }
+        if self.entries.len() > usize::from(u16::MAX) {
+            let plain = Extended { link: value.link, ..Extended::DEFAULT };
+            return self.index.get(&plain).copied().unwrap_or(0);
+        }
+        let id = self.entries.len() as u16;
+        self.entries.push(value);
+        self.index.insert(value, id);
+        id
     }
 }
 
@@ -144,7 +245,19 @@ mod tests {
     }
 
     #[test]
+    fn extended_table_interns_and_saturates() {
+        let mut table = ExtendedTable::new();
+        let red = Extended { underline_color: Color::indexed(1), ..Extended::DEFAULT };
+        assert_eq!(table.intern(Extended::DEFAULT), 0);
+        let id = table.intern(red);
+        assert_eq!(table.intern(red), id);
+        assert_eq!(*table.get(id), red);
+        assert_eq!(*table.get(u16::MAX), Extended::DEFAULT);
+    }
+
+    #[test]
     fn cell_is_compact() {
-        assert_eq!(std::mem::size_of::<Cell>(), 20);
+        assert_eq!(std::mem::size_of::<Cell>(), 16);
+        assert_eq!(std::mem::offset_of!(Cell, ch), 0);
     }
 }

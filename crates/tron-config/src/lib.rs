@@ -90,6 +90,7 @@ pub struct Config {
     pub images: ImageConfig,
     pub bell: BellConfig,
     pub links: LinkConfig,
+    pub notifications: NotificationConfig,
     /// Key combination to action, for example `"ctrl+shift+c" = "copy"`.
     /// Entries override the defaults. `"none"` removes a default binding.
     pub keybindings: BTreeMap<String, String>,
@@ -199,6 +200,8 @@ pub struct FontConfig {
     /// Variable font axes, for example `{ wght = 450, wdth = 90 }`.
     pub variations: BTreeMap<String, f32>,
     pub hinting: Hinting,
+    /// Reorder rows with right-to-left text (Arabic, Hebrew) for display.
+    pub bidi: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -224,6 +227,7 @@ impl Default for FontConfig {
             bold_italic_family: None,
             variations: BTreeMap::new(),
             hinting: Hinting::Auto,
+            bidi: true,
         }
     }
 }
@@ -287,6 +291,9 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("shift+home", "scroll_to_top"),
     ("shift+end", "scroll_to_bottom"),
     ("ctrl+shift+f", "search"),
+    ("ctrl+shift+z", "scroll_to_previous_prompt"),
+    ("ctrl+shift+x", "scroll_to_next_prompt"),
+    ("ctrl+shift+g", "select_command_output"),
     ("ctrl+shift+n", "new_window"),
     ("ctrl+shift+comma", "reload_config"),
 ];
@@ -402,6 +409,13 @@ pub enum Action {
     ScrollToTop,
     ScrollToBottom,
     ClearScrollback,
+    /// Scrolls so the previous shell prompt is at the top (needs OSC 133 marks).
+    ScrollToPreviousPrompt,
+    ScrollToNextPrompt,
+    /// Selects the output of the last command, or of the command at the top of the scrolled view.
+    SelectCommandOutput,
+    /// Copies that output to the clipboard.
+    CopyCommandOutput,
     Search,
     NewWindow,
     ReloadConfig,
@@ -430,6 +444,10 @@ impl Action {
             "scroll_to_top" => Self::ScrollToTop,
             "scroll_to_bottom" => Self::ScrollToBottom,
             "clear_scrollback" => Self::ClearScrollback,
+            "scroll_to_previous_prompt" => Self::ScrollToPreviousPrompt,
+            "scroll_to_next_prompt" => Self::ScrollToNextPrompt,
+            "select_command_output" => Self::SelectCommandOutput,
+            "copy_command_output" => Self::CopyCommandOutput,
             "search" => Self::Search,
             "new_window" => Self::NewWindow,
             "reload_config" => Self::ReloadConfig,
@@ -473,6 +491,32 @@ pub struct LinkConfig {
 impl Default for LinkConfig {
     fn default() -> Self {
         Self { open_command: "xdg-open".into() }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyMode {
+    Never,
+    /// Show notifications only while the window does not have focus.
+    #[default]
+    Unfocused,
+    Always,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotificationConfig {
+    /// When desktop notifications from applications (OSC 9, 99, 777) are shown.
+    /// Applications using OSC 99 may ask for a stricter condition.
+    pub mode: NotifyMode,
+    /// Program run as `command --app-name tron -- title body`.
+    pub command: String,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self { mode: NotifyMode::Unfocused, command: "notify-send".into() }
     }
 }
 
@@ -790,7 +834,8 @@ mod tests {
     fn empty_config_is_default() {
         let config = Config::parse("").unwrap();
         assert_eq!(config.font.family, "monospace");
-        assert!(config.font.ligatures);
+        assert!(config.font.ligatures && config.font.bidi);
+        assert_eq!(config.notifications.mode, NotifyMode::Unfocused);
     }
 
     #[test]
@@ -842,6 +887,7 @@ mod tests {
         assert_eq!(find("Alt+Return"), Some(Action::NewWindow));
         assert_eq!(find("ctrl+plus"), Some(Action::IncreaseFontSize));
         assert_eq!(find("super+k"), Some(Action::SendText("\u{15}".into())));
+        assert_eq!(find("ctrl+shift+z"), Some(Action::ScrollToPreviousPrompt));
         assert_eq!(errors.len(), 1);
     }
 

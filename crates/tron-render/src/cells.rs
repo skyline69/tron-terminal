@@ -7,7 +7,8 @@ use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
 use tron_core::{
-    Cell, Color, ColorKind, CursorShape, Flags, Modes, PLACEHOLDER, Palette, Row, SelectionRange, Snapshot,
+    Cell, Color, ColorKind, CursorShape, Extended, Flags, LineSize, Modes, PLACEHOLDER, Palette, Row, SelectionRange,
+    Snapshot, TextSize,
 };
 use tron_font::{CellMetrics, FontSystem, GlyphFormat, GlyphKey, ShapedGlyph, Style};
 use unicode_width::UnicodeWidthChar;
@@ -51,8 +52,162 @@ struct Uniforms {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum GlyphSource {
-    Font(GlyphKey),
-    Sprite(char),
+    Font(GlyphKey, GlyphScale),
+    Sprite(char, GlyphScale),
+}
+
+/// Horizontal and vertical glyph scale in sixteenths, part of the glyph cache key.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+struct GlyphScale {
+    x: u16,
+    y: u16,
+}
+
+impl GlyphScale {
+    const ONE: Self = Self { x: 16, y: 16 };
+
+    fn new(x: f32, y: f32) -> Self {
+        let sixteenths = |v: f32| (v * 16.0).round().clamp(1.0, f32::from(u16::MAX)) as u16;
+        Self { x: sixteenths(x), y: sixteenths(y) }
+    }
+
+    fn factors(self) -> (f32, f32) {
+        (f32::from(self.x) / 16.0, f32::from(self.y) / 16.0)
+    }
+}
+
+/// Where a row's cells are drawn: stretched on double size lines and reordered
+/// when the row holds right-to-left text.
+struct RowLayout {
+    padding: f32,
+    /// Width of one column on screen.
+    cell_width: f32,
+    cell_height: f32,
+    scale_x: f32,
+    scale_y: f32,
+    /// Added to glyph positions. The bottom half of double height text draws the lower half.
+    glyph_shift: f32,
+    /// Glyphs are cut at the row edges (double height halves).
+    clipped: bool,
+    /// Columns drawn: half the row on double size lines.
+    cols: usize,
+    /// Screen column and direction of every column, for rows with right-to-left text.
+    bidi: Option<(Vec<usize>, Vec<bool>)>,
+}
+
+impl RowLayout {
+    fn new(row: &Row, padding: f32, cell_w: f32, cell_h: f32, bidi: bool) -> Self {
+        let (scale_x, scale_y, glyph_shift) = match row.line_size {
+            LineSize::Single => (1.0, 1.0, 0.0),
+            LineSize::DoubleWidth => (2.0, 1.0, 0.0),
+            LineSize::DoubleHeightTop => (2.0, 2.0, 0.0),
+            LineSize::DoubleHeightBottom => (2.0, 2.0, -cell_h),
+        };
+        let cols = if row.line_size == LineSize::Single { row.cells.len() } else { (row.cells.len() / 2).max(1) };
+        Self {
+            padding,
+            cell_width: cell_w * scale_x,
+            cell_height: cell_h,
+            scale_x,
+            scale_y,
+            glyph_shift,
+            clipped: scale_y > 1.0,
+            cols,
+            bidi: if bidi { bidi_order(row, cols) } else { None },
+        }
+    }
+
+    fn left(&self, x: usize) -> f32 {
+        let column = self.bidi.as_ref().map_or(x, |(visual, _)| visual[x]);
+        self.padding + column as f32 * self.cell_width
+    }
+
+    fn is_rtl(&self, x: usize) -> bool {
+        self.bidi.as_ref().is_some_and(|(_, rtl)| rtl[x])
+    }
+
+    fn glyph_scale(&self) -> GlyphScale {
+        GlyphScale::new(self.scale_x, self.scale_y)
+    }
+
+    fn push_glyph(&self, out: &mut Vec<Instance>, instance: Instance) {
+        if !self.clipped {
+            out.push(instance);
+        } else if let Some(clipped) = clip_vertical(instance, 0.0, self.cell_height) {
+            out.push(clipped);
+        }
+    }
+}
+
+/// Screen order of a row with right-to-left characters, by the Unicode
+/// bidirectional algorithm with a left-to-right paragraph: the screen column and
+/// direction of each column. `None` when the row has no right-to-left text.
+fn bidi_order(row: &Row, cols: usize) -> Option<(Vec<usize>, Vec<bool>)> {
+    let cells = &row.cells[..cols];
+    if !cells.iter().any(|cell| is_rtl_char(cell.ch)) {
+        return None;
+    }
+    let mut text = String::with_capacity(cols);
+    let mut units = Vec::with_capacity(cols);
+    for (x, cell) in cells.iter().enumerate() {
+        if cell.flags.contains(Flags::WIDE_SPACER) && x > 0 && cells[x - 1].flags.contains(Flags::WIDE) {
+            continue;
+        }
+        text.push(if cell.ch == '\0' || cell.ch.is_control() { ' ' } else { cell.ch });
+        units.push((x, if cell.flags.contains(Flags::WIDE) { 2 } else { 1 }));
+    }
+    let info = unicode_bidi::BidiInfo::new(&text, Some(unicode_bidi::Level::ltr()));
+    let paragraph = info.paragraphs.first()?;
+    let levels = info.reordered_levels_per_char(paragraph, paragraph.range.clone());
+    if levels.len() != units.len() {
+        return None;
+    }
+    let mut visual = vec![0; cols];
+    let mut rtl = vec![false; cols];
+    let mut column = 0;
+    for index in unicode_bidi::BidiInfo::reorder_visual(&levels) {
+        let (x, width) = units[index];
+        for offset in 0..width.min(cols - x) {
+            visual[x + offset] = column + offset;
+            rtl[x + offset] = levels[index].is_rtl();
+        }
+        column += width;
+    }
+    Some((visual, rtl))
+}
+
+/// Characters of right-to-left scripts: Hebrew, Arabic, Syriac, Thaana, NKo and others.
+#[inline]
+fn is_rtl_char(ch: char) -> bool {
+    ch >= '\u{590}'
+        && matches!(u32::from(ch), 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x1_0800..=0x1_0FFF | 0x1_E800..=0x1_EFFF)
+}
+
+/// Cuts a quad to the rows between `top` and `bottom`, adjusting its texture coordinates.
+fn clip_vertical(instance: Instance, top: f32, bottom: f32) -> Option<Instance> {
+    let (start, end) = (instance.pos[1], instance.pos[1] + instance.size[1]);
+    let (clip_start, clip_end) = (start.max(top), end.min(bottom));
+    if clip_end <= clip_start {
+        return None;
+    }
+    let texels = (instance.uv[3] - instance.uv[1]) / instance.size[1];
+    let mut clipped = instance;
+    clipped.pos[1] = clip_start;
+    clipped.size[1] = clip_end - clip_start;
+    if instance.kind != KIND_SOLID {
+        clipped.uv[1] = instance.uv[1] + (clip_start - start) * texels;
+        clipped.uv[3] = instance.uv[1] + (clip_end - start) * texels;
+    }
+    Some(clipped)
+}
+
+/// Whether the other cells of a scaled text block starting at `x` are still in place on this row.
+fn multicell_intact(row: &Row, x: usize, size: &TextSize, colors: &ColorContext<'_>) -> bool {
+    (1..size.cells().0).all(|dx| {
+        row.cells.get(x + dx).is_some_and(|cell| {
+            colors.extended(cell.extended).size.is_some_and(|s| usize::from(s.dx) == dx && s.dy == 0)
+        })
+    })
 }
 
 #[derive(Copy, Clone)]
@@ -84,6 +239,8 @@ struct Run {
     /// The cursor sits on the last cell. The next cell starts a new run so
     /// ligatures never span the cursor.
     split_after: bool,
+    /// Shaped right to left.
+    rtl: bool,
 }
 
 /// Colors needed to resolve cells.
@@ -93,9 +250,15 @@ struct ColorContext<'a> {
     reverse: bool,
     srgb: bool,
     selection: Option<SelectionRange>,
+    extended: &'a [Extended],
 }
 
 impl ColorContext<'_> {
+    #[inline]
+    fn extended(&self, id: u16) -> &Extended {
+        self.extended.get(usize::from(id)).unwrap_or(&Extended::DEFAULT)
+    }
+
     fn rgba(&self, color: [u8; 3]) -> [f32; 4] {
         to_rgba(color, self.srgb)
     }
@@ -177,6 +340,7 @@ pub struct CellPipeline {
     clear_row_cache: bool,
     overlays: Vec<Overlay>,
     overlay_instances: RowInstances,
+    bidi: bool,
     flash: f32,
     // Scratch buffers reused across rows.
     foreground: Vec<[f32; 4]>,
@@ -185,7 +349,13 @@ pub struct CellPipeline {
 }
 
 impl CellPipeline {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, metrics: CellMetrics, padding: [f32; 2]) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        metrics: CellMetrics,
+        padding: [f32; 2],
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("cells.wgsl"));
         let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -246,7 +416,7 @@ impl CellPipeline {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache,
         });
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cell uniforms"),
@@ -290,6 +460,7 @@ impl CellPipeline {
             clear_row_cache: false,
             overlays: Vec::new(),
             overlay_instances: RowInstances::default(),
+            bidi: true,
             flash: 0.0,
             foreground: Vec::new(),
             run: Run::default(),
@@ -342,6 +513,14 @@ impl CellPipeline {
 
     pub fn set_overlays(&mut self, overlays: Vec<Overlay>) {
         self.overlays = overlays;
+    }
+
+    /// Reorders rows with right-to-left text for display (Unicode bidirectional algorithm).
+    pub fn set_bidi(&mut self, enabled: bool) {
+        if enabled != self.bidi {
+            self.bidi = enabled;
+            self.invalidate();
+        }
     }
 
     pub fn set_flash(&mut self, strength: f32) {
@@ -429,7 +608,14 @@ impl CellPipeline {
         let moved = cursor_cell != self.last_cursor;
         let (old_row, new_row) = (self.last_cursor.map(|c| c.0), cursor_cell.map(|c| c.0));
 
-        let colors = ColorContext { palette: &snapshot.palette, theme, reverse, srgb, selection: snapshot.selection };
+        let colors = ColorContext {
+            palette: &snapshot.palette,
+            theme,
+            reverse,
+            srgb,
+            selection: snapshot.selection,
+            extended: &snapshot.extended,
+        };
         if self.clear_row_cache || self.row_cache.len() > rows * 4 + 64 {
             self.row_cache.clear();
             self.clear_row_cache = false;
@@ -535,13 +721,14 @@ impl CellPipeline {
         let (cell_w, cell_h) = (m.width as f32, m.height as f32);
         // Positions are relative to the row top.
         let top = 0.0;
-        let cols = row.cells.len();
+        let layout = RowLayout::new(row, self.padding[0], cell_w, cell_h, self.bidi);
+        let cols = layout.cols;
 
         // Backgrounds, decorations and per-cell text colors.
         let mut foreground = std::mem::take(&mut self.foreground);
         foreground.clear();
-        foreground.resize(cols, [0.0; 4]);
-        for (x, cell) in row.cells.iter().enumerate() {
+        foreground.resize(row.cells.len(), [0.0; 4]);
+        for (x, cell) in row.cells[..cols].iter().enumerate() {
             let selected = colors.selection.is_some_and(|s| s.contains(line, x));
             let (fg, bg) = colors.cell(cell, selected);
             foreground[x] = fg;
@@ -550,8 +737,8 @@ impl CellPipeline {
             if trailing_half {
                 continue;
             }
-            let left = self.padding[0] + x as f32 * cell_w;
-            let width = if cell.flags.contains(Flags::WIDE) { 2.0 * cell_w } else { cell_w };
+            let left = layout.left(x);
+            let width = if cell.flags.contains(Flags::WIDE) { 2.0 } else { 1.0 } * layout.cell_width;
             if let Some(bg) = bg {
                 match out.background.last_mut() {
                     Some(last) if last.color == bg && (last.pos[0] + last.size[0] - left).abs() < 0.5 => {
@@ -561,8 +748,17 @@ impl CellPipeline {
                 }
             }
             if !cell.flags.contains(Flags::HIDDEN) {
-                let linked = self.link_highlight.as_ref().is_some_and(|h| h.contains(line, x, cell.link));
-                self.push_decorations(cell, colors, fg, left, top, width, linked, out);
+                let linked = self
+                    .link_highlight
+                    .as_ref()
+                    .is_some_and(|h| h.contains(line, x, colors.extended(cell.extended).link));
+                let start = out.foreground.len();
+                self.push_decorations(cell, colors, fg, left, top, width, linked, &layout, out);
+                if layout.clipped {
+                    let clipped: Vec<Instance> =
+                        out.foreground.drain(start..).filter_map(|i| clip_vertical(i, top, top + cell_h)).collect();
+                    out.foreground.extend(clipped);
+                }
             }
         }
 
@@ -580,45 +776,53 @@ impl CellPipeline {
                 || (cell.is_empty() && !has_extra)
                 || cell.ch == PLACEHOLDER
             {
-                self.flush_run(&mut run, top, &foreground, fonts, queue, out);
+                self.flush_run(&mut run, top, &foreground, &layout, fonts, queue, out);
                 x += 1;
                 continue;
             }
+            let style = Style::new(cell.flags.contains(Flags::BOLD), cell.flags.contains(Flags::ITALIC));
+            if let Some(size) = colors.extended(cell.extended).size
+                && (size.dx, size.dy) == (0, 0)
+                && multicell_intact(row, x, &size, colors)
+            {
+                self.flush_run(&mut run, top, &foreground, &layout, fonts, queue, out);
+                self.draw_multicell(row, x, size, style, foreground[x], &layout, fonts, queue, out);
+                x += size.cells().0.max(1);
+                continue;
+            }
             if !has_extra && tron_font::sprite::is_sprite(cell.ch) {
-                self.flush_run(&mut run, top, &foreground, fonts, queue, out);
-                if let Some(glyph) = self.glyph(GlyphSource::Sprite(cell.ch), fonts, queue) {
-                    let left = self.padding[0] + x as f32 * cell_w;
-                    out.foreground.push(glyph_instance(
-                        &glyph,
-                        left,
-                        top + m.baseline as f32 - glyph.top as f32,
-                        foreground[x],
-                    ));
+                self.flush_run(&mut run, top, &foreground, &layout, fonts, queue, out);
+                if let Some(glyph) = self.glyph(GlyphSource::Sprite(cell.ch, layout.glyph_scale()), fonts, queue) {
+                    let y = top + layout.glyph_shift + m.baseline as f32 * layout.scale_y - glyph.top as f32;
+                    layout.push_glyph(&mut out.foreground, glyph_instance(&glyph, layout.left(x), y, foreground[x]));
                 }
                 x += width;
                 continue;
             }
-            let style = Style::new(cell.flags.contains(Flags::BOLD), cell.flags.contains(Flags::ITALIC));
             let face = if has_extra {
                 fonts.face_for_cluster(cell.ch, row.combining(x), style)
             } else {
                 fonts.face_for(cell.ch, style)
             };
+            let rtl = layout.is_rtl(x);
             let at_cursor = cursor_col == Some(x);
-            if run.active && (run.face != face || run.style != Some(style) || at_cursor || run.split_after) {
-                self.flush_run(&mut run, top, &foreground, fonts, queue, out);
+            if run.active
+                && (run.face != face || run.style != Some(style) || run.rtl != rtl || at_cursor || run.split_after)
+            {
+                self.flush_run(&mut run, top, &foreground, &layout, fonts, queue, out);
             }
             if !run.active {
                 run.active = true;
                 run.face = face;
                 run.style = Some(style);
+                run.rtl = rtl;
             }
             run.cells.push((run.text.len() as u32, x, width as u8));
             row.push_cell_text(x, &mut run.text);
             run.split_after = at_cursor;
             x += width;
         }
-        self.flush_run(&mut run, top, &foreground, fonts, queue, out);
+        self.flush_run(&mut run, top, &foreground, &layout, fonts, queue, out);
         self.run = run;
         self.foreground = foreground;
     }
@@ -629,6 +833,7 @@ impl CellPipeline {
         run: &mut Run,
         top: f32,
         foreground: &[[f32; 4]],
+        layout: &RowLayout,
         fonts: &mut FontSystem,
         queue: &wgpu::Queue,
         out: &mut RowInstances,
@@ -638,10 +843,9 @@ impl CellPipeline {
         }
         run.active = false;
         run.split_after = false;
-        let shaped = self.shape(fonts, run.face, &run.text);
-        let m = self.metrics;
-        let cell_w = m.width as f32;
-        let baseline = top + m.baseline as f32;
+        let shaped = self.shape(fonts, run.face, &run.text, run.rtl);
+        let baseline = top + layout.glyph_shift + self.metrics.baseline as f32 * layout.scale_y;
+        let scale = layout.glyph_scale();
         let mut cluster = u32::MAX;
         let mut pen = 0.0;
         for glyph in &shaped {
@@ -654,36 +858,93 @@ impl CellPipeline {
                 Err(i) => i.saturating_sub(1),
             };
             let (_, col, width) = run.cells[index];
-            if let Some(entry) = self.glyph(GlyphSource::Font(glyph.glyph), fonts, queue) {
-                let cell_left = self.padding[0] + col as f32 * cell_w;
+            if let Some(entry) = self.glyph(GlyphSource::Font(glyph.glyph, scale), fonts, queue) {
+                let cell_left = layout.left(col);
                 let left = match entry.format {
-                    GlyphFormat::Mask => cell_left + pen + glyph.x_offset + entry.left as f32,
+                    GlyphFormat::Mask => cell_left + pen + glyph.x_offset * layout.scale_x + entry.left as f32,
                     // Center color glyphs (emoji) in their cells.
-                    GlyphFormat::Color => cell_left + ((f32::from(width) * cell_w - entry.width as f32) / 2.0).floor(),
+                    GlyphFormat::Color => {
+                        cell_left + ((f32::from(width) * layout.cell_width - entry.width as f32) / 2.0).floor()
+                    }
                 };
-                let y = baseline - glyph.y_offset - entry.top as f32;
-                out.foreground.push(glyph_instance(&entry, left, y, foreground[col]));
+                let y = baseline - glyph.y_offset * layout.scale_y - entry.top as f32;
+                layout.push_glyph(&mut out.foreground, glyph_instance(&entry, left, y, foreground[col]));
             }
-            pen += glyph.x_advance;
+            pen += glyph.x_advance * layout.scale_x;
         }
         self.shaped = shaped;
         run.text.clear();
         run.cells.clear();
     }
 
-    fn shape(&mut self, fonts: &mut FontSystem, face: u32, text: &str) -> Vec<ShapedGlyph> {
+    /// Draws a block of scaled text (kitty text sizing) whose top left cell is `x`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_multicell(
+        &mut self,
+        row: &Row,
+        x: usize,
+        size: TextSize,
+        style: Style,
+        color: [f32; 4],
+        layout: &RowLayout,
+        fonts: &mut FontSystem,
+        queue: &wgpu::Queue,
+        out: &mut RowInstances,
+    ) {
+        let m = self.metrics;
+        let scale = size.font_scale();
+        let (block_cols, block_rows) = size.cells();
+        let block_w = block_cols as f32 * layout.cell_width;
+        let block_h = block_rows as f32 * m.height as f32;
+        let mut text = String::new();
+        row.push_cell_text(x, &mut text);
+        let face = fonts.face_for_cluster(row.cells[x].ch, row.combining(x), style);
+        let shaped = self.shape(fonts, face, &text, false);
+        let advance = shaped.iter().map(|g| g.x_advance).sum::<f32>() * scale;
+        let (spare_w, spare_h) = ((block_w - advance).max(0.0), (block_h - scale * m.height as f32).max(0.0));
+        let offset_x = match size.horizontal {
+            1 => spare_w,
+            2 => spare_w / 2.0,
+            _ => 0.0,
+        };
+        let offset_y = match size.vertical {
+            1 => spare_h,
+            2 => spare_h / 2.0,
+            _ => 0.0,
+        };
+        let origin = layout.left(x) + offset_x;
+        let baseline = offset_y + m.baseline as f32 * scale;
+        let glyph_scale = GlyphScale::new(scale, scale);
+        let mut pen = 0.0;
+        for glyph in &shaped {
+            if let Some(entry) = self.glyph(GlyphSource::Font(glyph.glyph, glyph_scale), fonts, queue) {
+                let left = match entry.format {
+                    GlyphFormat::Mask => origin + pen + glyph.x_offset * scale + entry.left as f32,
+                    GlyphFormat::Color => origin + ((block_w - entry.width as f32) / 2.0).floor(),
+                };
+                let y = baseline - glyph.y_offset * scale - entry.top as f32;
+                out.foreground.push(glyph_instance(&entry, left, y, color));
+            }
+            pen += glyph.x_advance * scale;
+        }
+        self.shaped = shaped;
+    }
+
+    fn shape(&mut self, fonts: &mut FontSystem, face: u32, text: &str, rtl: bool) -> Vec<ShapedGlyph> {
         let mut shaped = std::mem::take(&mut self.shaped);
         shaped.clear();
-        if let Some(cached) = self.shape_cache.get(&face).and_then(|cache| cache.get(text)) {
+        // Faces are numbered from zero; the top bit marks right-to-left shaping.
+        let key = face | u32::from(rtl) << 31;
+        if let Some(cached) = self.shape_cache.get(&key).and_then(|cache| cache.get(text)) {
             shaped.extend_from_slice(cached);
             return shaped;
         }
-        fonts.shape(face, text, &mut shaped);
+        fonts.shape_directional(face, text, rtl, &mut shaped);
         if self.shape_cache_len >= SHAPE_CACHE_LIMIT {
             self.shape_cache.clear();
             self.shape_cache_len = 0;
         }
-        self.shape_cache.entry(face).or_default().insert(text.to_owned(), shaped.clone());
+        self.shape_cache.entry(key).or_default().insert(text.to_owned(), shaped.clone());
         self.shape_cache_len += 1;
         shaped
     }
@@ -698,29 +959,32 @@ impl CellPipeline {
         top: f32,
         width: f32,
         linked: bool,
+        layout: &RowLayout,
         out: &mut RowInstances,
     ) {
         let m = self.metrics;
-        let thickness = m.underline_thickness as f32;
+        let scale = layout.scale_y;
+        // Double height halves draw the part of a two row tall line that falls in this row.
+        let origin = top + layout.glyph_shift;
+        let at = |position: u32| origin + position as f32 * scale;
+        let thickness = (m.underline_thickness as f32 * scale).max(1.0);
         let flags = cell.flags;
         if flags.intersects(Flags::ANY_UNDERLINE) {
-            let color = if cell.underline_color.is_default() {
+            let underline_color = colors.extended(cell.extended).underline_color;
+            let color = if underline_color.is_default() {
                 fg
             } else {
-                colors.rgba(colors.palette.resolve(cell.underline_color, colors.palette.foreground))
+                colors.rgba(colors.palette.resolve(underline_color, colors.palette.foreground))
             };
-            let y = top + m.underline_position as f32;
+            let y = at(m.underline_position);
             if flags.contains(Flags::DOUBLE_UNDERLINE) {
-                let second = if y + 3.0 * thickness <= top + m.height as f32 {
-                    y + 2.0 * thickness
-                } else {
-                    y - 2.0 * thickness
-                };
+                let second =
+                    if y + 3.0 * thickness <= at(m.height) { y + 2.0 * thickness } else { y - 2.0 * thickness };
                 out.foreground.push(solid(left, y, width, thickness, color));
                 out.foreground.push(solid(left, second, width, thickness, color));
             } else if flags.intersects(Flags::DOTTED_UNDERLINE | Flags::DASHED_UNDERLINE) {
                 let dash =
-                    if flags.contains(Flags::DOTTED_UNDERLINE) { thickness } else { (m.width as f32 / 3.0).ceil() };
+                    if flags.contains(Flags::DOTTED_UNDERLINE) { thickness } else { (layout.cell_width / 3.0).ceil() };
                 let mut x = left;
                 while x < left + width {
                     out.foreground.push(solid(x, y, dash.min(left + width - x), thickness, color));
@@ -732,7 +996,7 @@ impl CellPipeline {
                 out.foreground.push(Instance {
                     pos: [left, y + thickness / 2.0 - band / 2.0],
                     size: [width, band],
-                    uv: [m.width as f32, amplitude, thickness.max(1.0), band],
+                    uv: [layout.cell_width, amplitude, thickness.max(1.0), band],
                     color,
                     kind: KIND_CURLY,
                 });
@@ -740,13 +1004,13 @@ impl CellPipeline {
                 out.foreground.push(solid(left, y, width, thickness, color));
             }
         } else if linked {
-            out.foreground.push(solid(left, top + m.underline_position as f32, width, thickness, fg));
+            out.foreground.push(solid(left, at(m.underline_position), width, thickness, fg));
         }
         if flags.contains(Flags::STRIKETHROUGH) {
-            out.foreground.push(solid(left, top + m.strikeout_position as f32, width, thickness, fg));
+            out.foreground.push(solid(left, at(m.strikeout_position), width, thickness, fg));
         }
         if flags.contains(Flags::OVERLINE) {
-            out.foreground.push(solid(left, top, width, thickness, fg));
+            out.foreground.push(solid(left, origin, width, thickness, fg));
         }
     }
 
@@ -764,9 +1028,12 @@ impl CellPipeline {
         }
         let m = self.metrics;
         let (cell_w, cell_h) = (m.width as f32, m.height as f32);
-        let wide = snapshot.rows[cursor.row].cells.get(cursor.col).is_some_and(|c| c.flags.contains(Flags::WIDE));
-        let width = if wide { 2.0 * cell_w } else { cell_w };
-        let x = self.padding[0] + cursor.col as f32 * cell_w;
+        let row = &snapshot.rows[cursor.row];
+        let layout = RowLayout::new(row, self.padding[0], cell_w, cell_h, self.bidi);
+        let col = cursor.col.min(layout.cols - 1);
+        let wide = row.cells.get(col).is_some_and(|c| c.flags.contains(Flags::WIDE));
+        let width = if wide { 2.0 } else { 1.0 } * layout.cell_width;
+        let x = layout.left(col);
         let y = self.padding[1] + cursor.row as f32 * cell_h;
         self.cursor_rect = [x, y, width, cell_h];
         if self.cursor_hidden {
@@ -805,8 +1072,15 @@ impl CellPipeline {
             return *entry;
         }
         let raster = match source {
-            GlyphSource::Font(key) => fonts.rasterize(key),
-            GlyphSource::Sprite(ch) => fonts.sprite(ch),
+            GlyphSource::Font(key, GlyphScale::ONE) => fonts.rasterize(key),
+            GlyphSource::Font(key, scale) => {
+                let (x, y) = scale.factors();
+                fonts.rasterize_scaled(key, x, y)
+            }
+            GlyphSource::Sprite(ch, scale) => {
+                let (x, y) = scale.factors();
+                fonts.sprite_scaled(ch, x, y)
+            }
         };
         let entry = match raster {
             Some(glyph) if glyph.width > 0 && glyph.height > 0 => {
@@ -867,6 +1141,7 @@ fn row_key(row: &Row, cursor_col: Option<usize>) -> u64 {
     use std::hash::{BuildHasher, Hash, Hasher};
     let mut hasher = foldhash::fast::FixedState::with_seed(0x7472_6f6e).build_hasher();
     row.cells.hash(&mut hasher);
+    row.line_size.hash(&mut hasher);
     for (col, cell) in row.cells.iter().enumerate() {
         if cell.flags.contains(Flags::GRAPHEME) {
             col.hash(&mut hasher);
@@ -946,4 +1221,47 @@ fn create_bind_group(
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&color.view) },
         ],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(text: &str) -> Row {
+        let mut row = Row::new(text.chars().count());
+        for (cell, ch) in row.cells.iter_mut().zip(text.chars()) {
+            cell.ch = ch;
+        }
+        row
+    }
+
+    #[test]
+    fn right_to_left_text_is_reversed_on_screen() {
+        assert!(bidi_order(&row("plain text"), 10).is_none());
+        // "ab אבג cd": the Hebrew word is drawn reversed, the rest keeps its place.
+        let (visual, rtl) = bidi_order(&row("ab \u{5D0}\u{5D1}\u{5D2} cd"), 9).unwrap();
+        assert_eq!(visual, [0, 1, 2, 5, 4, 3, 6, 7, 8]);
+        assert_eq!(rtl, [false, false, false, true, true, true, false, false, false]);
+        // Numbers after right-to-left text join its run: "ab 12 גבא" on screen.
+        let (visual, _) = bidi_order(&row("ab \u{5D0}\u{5D1}\u{5D2} 12"), 9).unwrap();
+        assert_eq!(visual, [0, 1, 2, 8, 7, 6, 5, 3, 4]);
+    }
+
+    #[test]
+    fn double_size_lines_stretch_and_clip() {
+        let mut double = row("abcdef");
+        double.line_size = LineSize::DoubleHeightBottom;
+        let layout = RowLayout::new(&double, 10.0, 8.0, 16.0, true);
+        assert_eq!((layout.cols, layout.left(2), layout.glyph_shift), (3, 42.0, -16.0));
+        let glyph = Instance {
+            pos: [0.0, -10.0],
+            size: [4.0, 20.0],
+            uv: [0.0, 100.0, 4.0, 120.0],
+            color: [1.0; 4],
+            kind: KIND_MASK,
+        };
+        let clipped = clip_vertical(glyph, 0.0, 16.0).unwrap();
+        assert_eq!((clipped.pos[1], clipped.size[1], clipped.uv[1], clipped.uv[3]), (0.0, 10.0, 110.0, 120.0));
+        assert!(clip_vertical(glyph, 20.0, 36.0).is_none());
+    }
 }

@@ -122,6 +122,7 @@ impl Params {
 }
 
 /// Iterator returned by [`Params::groups`].
+#[derive(Clone)]
 pub struct Groups<'a> {
     params: &'a Params,
     pos: usize,
@@ -213,7 +214,7 @@ impl Parser {
         while i < bytes.len() {
             if self.state == State::Ground && self.utf8_need == 0 {
                 let rest = &bytes[i..];
-                let run = rest.iter().position(|&b| !(0x20..0x7f).contains(&b)).unwrap_or(rest.len());
+                let run = printable_ascii_len(rest);
                 if run > 0 {
                     performer.print_ascii(&rest[..run]);
                     i += run;
@@ -221,7 +222,7 @@ impl Parser {
                 }
                 if rest[0] >= 0x80 {
                     // Printable UTF-8, up to the next control character.
-                    let run = rest.iter().position(|&b| b < 0x20 || b == 0x7f).unwrap_or(rest.len());
+                    let run = control_position(rest);
                     let valid = match std::str::from_utf8(&rest[..run]) {
                         Ok(text) => {
                             performer.print_str(text);
@@ -251,9 +252,43 @@ impl Parser {
                     continue;
                 }
             }
+            if matches!(self.state, State::OscString | State::ApcString) {
+                // Collect string payloads (images can be megabytes) up to their terminator in one step.
+                let rest = &bytes[i..];
+                let end = if self.state == State::OscString {
+                    control_position(rest)
+                } else {
+                    let stop = memchr::memchr3(0x07, 0x18, 0x1b, rest).unwrap_or(rest.len());
+                    memchr::memchr(0x1a, &rest[..stop]).unwrap_or(stop)
+                };
+                if end > 0 {
+                    if self.state == State::OscString {
+                        self.push_osc(&rest[..end]);
+                    } else {
+                        let room = MAX_APC_LEN.saturating_sub(self.apc.len());
+                        self.apc.extend_from_slice(&rest[..end.min(room)]);
+                    }
+                    i += end;
+                    continue;
+                }
+            }
             self.byte(performer, bytes[i]);
             i += 1;
         }
+    }
+
+    /// Appends to the OSC string. iTerm2 inline images (`OSC 1337`) may be as
+    /// long as APC strings; other OSC strings are capped much lower.
+    fn push_osc(&mut self, chunk: &[u8]) {
+        const IMAGE_PREFIX: &[u8; 5] = b"1337;";
+        let mut head = [0u8; 5];
+        let have = self.osc.len().min(5);
+        head[..have].copy_from_slice(&self.osc[..have]);
+        let added = (5 - have).min(chunk.len());
+        head[have..have + added].copy_from_slice(&chunk[..added]);
+        let limit = if &head == IMAGE_PREFIX { MAX_APC_LEN } else { MAX_OSC_LEN };
+        let room = limit.saturating_sub(self.osc.len());
+        self.osc.extend_from_slice(&chunk[..chunk.len().min(room)]);
     }
 
     fn byte<P: Perform>(&mut self, p: &mut P, b: u8) {
@@ -390,11 +425,7 @@ impl Parser {
                     self.state = State::Ground;
                 }
                 0x00..=0x1f => {}
-                _ => {
-                    if self.osc.len() < MAX_OSC_LEN {
-                        self.osc.push(b);
-                    }
-                }
+                _ => self.push_osc(&[b]),
             },
             State::ApcString => match b {
                 0x07 => {
@@ -593,13 +624,102 @@ impl Parser {
             }
         }
         p.osc_dispatch(&slices[..count], bell);
-        self.osc.clear();
+        if self.osc.capacity() > MAX_OSC_LEN {
+            self.osc = Vec::new();
+        } else {
+            self.osc.clear();
+        }
     }
+}
+
+/// Length of the leading run of printable ASCII bytes (`0x20..=0x7e`).
+#[inline]
+fn printable_ascii_len(bytes: &[u8]) -> usize {
+    let mut i = 0;
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{
+            _mm_and_si128, _mm_cmpgt_epi8, _mm_cmplt_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
+        };
+        // SAFETY: SSE2 is part of the x86_64 baseline. Loads are unaligned and
+        // stay in bounds because `i + 16 <= len`.
+        unsafe {
+            let low = _mm_set1_epi8(0x1f);
+            let high = _mm_set1_epi8(0x7f);
+            while i + 16 <= bytes.len() {
+                let block = _mm_loadu_si128(bytes.as_ptr().add(i).cast());
+                // Signed compares: bytes of 0x80 and above are negative and fail `> 0x1f`.
+                let printable = _mm_and_si128(_mm_cmpgt_epi8(block, low), _mm_cmplt_epi8(block, high));
+                let mask = _mm_movemask_epi8(printable) as u32;
+                if mask != 0xffff {
+                    return i + (!mask).trailing_zeros() as usize;
+                }
+                i += 16;
+            }
+        }
+    }
+    i + bytes[i..].iter().position(|&b| !(0x20..0x7f).contains(&b)).unwrap_or(bytes.len() - i)
+}
+
+/// Index of the first C0 control or DEL byte, or the length when there is none.
+#[inline]
+fn control_position(bytes: &[u8]) -> usize {
+    let mut i = 0;
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{
+            _mm_cmpeq_epi8, _mm_loadu_si128, _mm_min_epu8, _mm_movemask_epi8, _mm_or_si128, _mm_set1_epi8,
+        };
+        // SAFETY: SSE2 is part of the x86_64 baseline. Loads are unaligned and
+        // stay in bounds because `i + 16 <= len`.
+        unsafe {
+            let c0_max = _mm_set1_epi8(0x1f);
+            let del = _mm_set1_epi8(0x7f);
+            while i + 16 <= bytes.len() {
+                let block = _mm_loadu_si128(bytes.as_ptr().add(i).cast());
+                // Unsigned `byte <= 0x1f` is `min(byte, 0x1f) == byte`.
+                let c0 = _mm_cmpeq_epi8(_mm_min_epu8(block, c0_max), block);
+                let mask = _mm_movemask_epi8(_mm_or_si128(c0, _mm_cmpeq_epi8(block, del))) as u32;
+                if mask != 0 {
+                    return i + mask.trailing_zeros() as usize;
+                }
+                i += 16;
+            }
+        }
+    }
+    i + bytes[i..].iter().position(|&b| b < 0x20 || b == 0x7f).unwrap_or(bytes.len() - i)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_scans_match_byte_scans() {
+        let mut seed: u32 = 0x9e37_79b9;
+        for len in 0..80 {
+            for _ in 0..200 {
+                let bytes: Vec<u8> = (0..len)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        // Mostly printable, sometimes controls, DEL or high bytes.
+                        match seed % 16 {
+                            0 => (seed >> 8) as u8 % 0x20,
+                            1 => 0x7f,
+                            2 => 0x80 | (seed >> 8) as u8,
+                            _ => 0x20 + (seed >> 8) as u8 % 0x5f,
+                        }
+                    })
+                    .collect();
+                let ascii = bytes.iter().position(|&b| !(0x20..0x7f).contains(&b)).unwrap_or(bytes.len());
+                let control = bytes.iter().position(|&b| b < 0x20 || b == 0x7f).unwrap_or(bytes.len());
+                assert_eq!(printable_ascii_len(&bytes), ascii, "{bytes:?}");
+                assert_eq!(control_position(&bytes), control, "{bytes:?}");
+            }
+        }
+    }
 
     #[derive(Debug, PartialEq)]
     enum Action {
@@ -740,6 +860,25 @@ mod tests {
     fn invalid_utf8_yields_replacement() {
         assert_eq!(parse(b"\xe2\x82x"), vec![Action::Print("\u{fffd}x".into())]);
         assert_eq!(parse(b"\xff"), vec![Action::Print("\u{fffd}".into())]);
+    }
+
+    #[test]
+    fn long_strings_arrive_whole_across_chunks() {
+        let image = format!("\x1b]1337;File=inline=1:{}\x07", "A".repeat(200_000));
+        let kitty = format!("\x1b_Ga=t;{}\x1b\\", "B".repeat(100_000));
+        let long_title = format!("\x1b]2;{}\x07", "C".repeat(100_000));
+        let input = format!("{image}{kitty}{long_title}");
+        let mut r = Recorder::default();
+        let mut p = Parser::new();
+        for chunk in input.as_bytes().chunks(4096) {
+            p.advance(&mut r, chunk);
+        }
+        let Action::Osc(image, _) = &r.0[0] else { panic!("{:?}", r.0[0]) };
+        assert_eq!(image[1].len(), 200_000 + "File=inline=1:".len());
+        let Action::Apc(kitty) = &r.0[1] else { panic!() };
+        assert_eq!(kitty.len(), 100_000 + "Ga=t;".len());
+        let Action::Osc(title, _) = &r.0[3] else { panic!("{:?}", r.0[3]) };
+        assert_eq!(title[1].len(), MAX_OSC_LEN - 2);
     }
 
     #[test]

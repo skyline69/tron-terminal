@@ -4,13 +4,15 @@
 //!
 //! Supported: direct, file, temporary file and shared memory transmission,
 //! chunking, zlib compression, PNG and raw RGB/RGBA data, placements with
-//! source rectangles, offsets, sizes and z-index, Unicode placeholders,
-//! animation frames and control, deletion and queries.
+//! source rectangles, offsets, sizes and z-index, relative placements,
+//! Unicode placeholders, animation frames, frame composition and control,
+//! deletion and queries. iTerm2 inline images (PNG, JPEG, GIF) are stored here too.
 
 mod diacritics;
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,7 +21,7 @@ use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 
 use crate::cell::{Cell, Color, ColorKind};
 
-const BASE64: GeneralPurpose = GeneralPurpose::new(
+pub(crate) const BASE64: GeneralPurpose = GeneralPurpose::new(
     &base64::alphabet::STANDARD,
     GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
 );
@@ -28,6 +30,10 @@ const MAX_DIMENSION: u32 = 10_000;
 const DEFAULT_QUOTA: usize = 320 * 1024 * 1024;
 /// Frame gap used when an application does not give one.
 const DEFAULT_GAP_MS: u32 = 40;
+/// Most frames kept from an animated GIF.
+const MAX_GIF_FRAMES: usize = 1000;
+/// Deepest chain of placements positioned relative to each other.
+const MAX_RELATIVE_DEPTH: usize = 8;
 /// Placements below this z-index are drawn under cell backgrounds.
 pub const BELOW_BACKGROUND_Z: i32 = i32::MIN / 2;
 /// Character that marks a cell showing part of an image (placeholder mode).
@@ -102,6 +108,10 @@ pub struct Placement {
     pub alt_screen: bool,
     /// Not drawn directly: shown through placeholder characters in cells.
     pub virtual_placement: bool,
+    /// Image and placement id of the placement this one is positioned relative to.
+    pub parent: Option<(u32, u32)>,
+    /// Drawn at this size in pixels instead of the natural or cell size.
+    pub pixel_size: Option<[u32; 2]>,
 }
 
 /// A cell that shows part of an image through the placeholder character.
@@ -117,6 +127,7 @@ pub struct PlaceholderCell {
 /// used when diacritics are omitted.
 pub fn placeholder_cell(
     cell: &Cell,
+    underline_color: Color,
     combining: Option<&str>,
     previous: Option<PlaceholderCell>,
 ) -> Option<PlaceholderCell> {
@@ -146,7 +157,7 @@ pub fn placeholder_cell(
         (Some(r), None, _) => (r, 0),
         (None, _, _) => (0, 0),
     };
-    Some(PlaceholderCell { image_id, placement_id: color_id(cell.underline_color), row, col })
+    Some(PlaceholderCell { image_id, placement_id: color_id(underline_color), row, col })
 }
 
 /// Terminal state the protocol needs.
@@ -200,6 +211,11 @@ struct Control {
     z: i32,
     delete: u8,
     placeholder: bool,
+    parent_image: u32,
+    parent_placement: u32,
+    /// Offset from the parent placement in cells.
+    parent_offset_x: i32,
+    parent_offset_y: i32,
 }
 
 impl Default for Control {
@@ -226,6 +242,10 @@ impl Default for Control {
             z: 0,
             delete: b'a',
             placeholder: false,
+            parent_image: 0,
+            parent_placement: 0,
+            parent_offset_x: 0,
+            parent_offset_y: 0,
         }
     }
 }
@@ -240,6 +260,7 @@ impl Control {
             let char_value = value.first().copied().unwrap_or(0);
             let number = || std::str::from_utf8(value).ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
             let unsigned = || number().clamp(0, i64::from(u32::MAX)) as u32;
+            let signed = || number().clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
             match key {
                 b'a' => control.action = char_value,
                 b't' => control.medium = char_value,
@@ -264,7 +285,11 @@ impl Control {
                 b'r' => control.rows = unsigned(),
                 b'C' => control.no_cursor_move = unsigned() == 1,
                 b'U' => control.placeholder = unsigned() == 1,
-                b'z' => control.z = number().clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                b'z' => control.z = signed(),
+                b'P' => control.parent_image = unsigned(),
+                b'Q' => control.parent_placement = unsigned(),
+                b'H' => control.parent_offset_x = signed(),
+                b'V' => control.parent_offset_y = signed(),
                 _ => {}
             }
         }
@@ -373,19 +398,21 @@ impl Graphics {
                 let anonymous = control.id == 0;
                 let id = if anonymous { self.internal_id() } else { control.id };
                 self.store(id, decoded, anonymous);
-                let mut outcome = respond(&control, Ok(()));
-                if control.action == b'T' {
-                    outcome.cursor_advance = self.place(id, &control, ctx);
+                if control.action != b'T' {
+                    return respond(&control, Ok(()));
                 }
-                outcome
+                match self.place(id, &control, ctx) {
+                    Ok(advance) => Outcome { cursor_advance: advance, ..respond(&control, Ok(())) },
+                    Err(error) => respond(&control, Err(error)),
+                }
             }
-            b'p' => {
-                if !self.images.contains_key(&control.id) {
-                    return respond(&control, Err("ENOENT:no such image".into()));
-                }
-                let mut outcome = respond(&control, Ok(()));
-                outcome.cursor_advance = self.place(control.id, &control, ctx);
-                outcome
+            b'p' => match self.place(control.id, &control, ctx) {
+                Ok(advance) => Outcome { cursor_advance: advance, ..respond(&control, Ok(())) },
+                Err(error) => respond(&control, Err(error)),
+            },
+            b'c' => {
+                let result = self.compose(&control);
+                respond(&control, result)
             }
             b'f' => {
                 let result = self.add_frame(&control, data);
@@ -493,7 +520,63 @@ impl Graphics {
     pub fn add_image(&mut self, width: u32, height: u32, rgba: Vec<u8>, ctx: &Context) -> (u32, u32) {
         let id = self.internal_id();
         self.store(id, Decoded { width, height, rgba, opaque: false }, true);
-        self.place(id, &Control::default(), ctx).unwrap_or((1, 1))
+        self.place(id, &Control::default(), ctx).ok().flatten().unwrap_or((1, 1))
+    }
+
+    /// Shows an image file (PNG, JPEG or animated GIF) at the cursor, sized as in
+    /// iTerm2's inline image protocol. Returns the cursor advance in cells.
+    pub fn add_inline_image(
+        &mut self,
+        data: &[u8],
+        args: &InlineImageArgs,
+        ctx: &Context,
+    ) -> Result<(u32, u32), String> {
+        let file = decode_file(data)?;
+        let (cell_w, cell_h) = (ctx.cell_width.max(1), ctx.cell_height.max(1));
+        let screen_w = (ctx.cols as u32).saturating_mul(cell_w).max(1);
+        let screen_h = (ctx.rows as u32).saturating_mul(cell_h).max(1);
+        let (natural_w, natural_h) = (f64::from(file.width), f64::from(file.height));
+        let wanted_w = args.width.pixels(cell_w, screen_w).map(f64::from);
+        let wanted_h = args.height.pixels(cell_h, screen_h).map(f64::from);
+        let (mut draw_w, mut draw_h) = match (wanted_w, wanted_h) {
+            (None, None) => (natural_w, natural_h),
+            (Some(w), None) => (w, w * natural_h / natural_w),
+            (None, Some(h)) => (h * natural_w / natural_h, h),
+            (Some(w), Some(h)) if args.preserve_aspect_ratio => {
+                let scale = (w / natural_w).min(h / natural_h);
+                (natural_w * scale, natural_h * scale)
+            }
+            (Some(w), Some(h)) => (w, h),
+        };
+        // Images wider than the screen shrink to fit, keeping their shape.
+        if draw_w > f64::from(screen_w) {
+            draw_h *= f64::from(screen_w) / draw_w;
+            draw_w = f64::from(screen_w);
+        }
+        let draw = [(draw_w.round() as u32).max(1), (draw_h.round() as u32).max(1)];
+
+        let id = self.internal_id();
+        let mut frames = file.frames.into_iter();
+        let (first, first_gap) = frames.next().ok_or("EINVAL:image has no frames")?;
+        self.store(id, Decoded { width: file.width, height: file.height, rgba: first, opaque: file.opaque }, true);
+        if let Some(image) = self.images.get_mut(&id) {
+            image.frames[0].gap_ms = first_gap;
+            for (rgba, gap_ms) in frames {
+                self.memory += rgba.len();
+                image.frames.push(Frame { rgba: rgba.into(), gap_ms });
+            }
+            if image.frames.len() > 1 {
+                image.state = AnimationState::Running;
+            }
+        }
+        self.enforce_quota(Some(id));
+        let control = Control { cols: draw[0].div_ceil(cell_w), rows: draw[1].div_ceil(cell_h), ..Control::default() };
+        self.place(id, &control, ctx)?;
+        if let Some(placement) = self.placements.last_mut() {
+            placement.scaled = false;
+            placement.pixel_size = Some(draw);
+        }
+        Ok((control.cols, control.rows))
     }
 
     /// Evicts the oldest images, preferring ones without placements.
@@ -516,11 +599,14 @@ impl Graphics {
             self.memory -= image.memory();
         }
         self.placements.retain(|p| p.image_id != id);
+        self.remove_orphans();
         self.generation += 1;
     }
 
-    fn place(&mut self, id: u32, control: &Control, ctx: &Context) -> Option<(u32, u32)> {
-        let image = self.images.get(&id)?;
+    /// Places image `id` at the cursor, or relative to a parent placement.
+    /// Returns the cursor advance in cells.
+    fn place(&mut self, id: u32, control: &Control, ctx: &Context) -> Result<Option<(u32, u32)>, String> {
+        let image = self.images.get(&id).ok_or("ENOENT:no such image")?;
         let anonymous = image.anonymous;
         let x = control.source[0].min(image.width);
         let y = control.source[1].min(image.height);
@@ -531,8 +617,32 @@ impl Graphics {
         let cols = if control.cols > 0 { control.cols } else { (width + control.offset_x).div_ceil(cell_w).max(1) };
         let rows = if control.rows > 0 { control.rows } else { (height + control.offset_y).div_ceil(cell_h).max(1) };
 
-        if control.placement != 0 {
-            self.placements.retain(|p| !(p.image_id == id && p.placement_id == control.placement));
+        let key = (id, control.placement);
+        let parent = (control.parent_image != 0).then_some((control.parent_image, control.parent_placement));
+        let (line, col, alt_screen) = match parent {
+            None => (ctx.cursor_line, ctx.cursor_col, ctx.alt_screen),
+            Some(parent_key) => {
+                let anchor = self
+                    .placement(parent_key)
+                    .filter(|p| !p.virtual_placement)
+                    .ok_or("ENOPARENT:no such parent placement")?;
+                if control.placement != 0 && (parent_key == key || self.has_ancestor(anchor, key)) {
+                    return Err("ECYCLE:placement would be its own parent".into());
+                }
+                if self.depth(anchor) + 1 >= MAX_RELATIVE_DEPTH {
+                    return Err("ETOODEEP:too many nested relative placements".into());
+                }
+                let col = (anchor.col as i64 + i64::from(control.parent_offset_x)).max(0) as usize;
+                (anchor.line + i64::from(control.parent_offset_y), col, anchor.alt_screen)
+            }
+        };
+        let mut moved_from = None;
+        if control.placement != 0
+            && let Some(index) =
+                self.placements.iter().position(|p| p.image_id == id && p.placement_id == control.placement)
+        {
+            let old = self.placements.remove(index);
+            moved_from = Some((old.line, old.col));
         }
         if anonymous && !control.placeholder {
             // Players redraw frames as new anonymous images at the same spot.
@@ -541,9 +651,9 @@ impl Graphics {
                 .placements
                 .iter()
                 .filter(|p| {
-                    p.line == ctx.cursor_line
-                        && p.col == ctx.cursor_col
-                        && p.alt_screen == ctx.alt_screen
+                    p.line == line
+                        && p.col == col
+                        && p.alt_screen == alt_screen
                         && p.image_id != id
                         && self.images.get(&p.image_id).is_some_and(|i| i.anonymous)
                 })
@@ -556,8 +666,8 @@ impl Graphics {
         self.placements.push(Placement {
             image_id: id,
             placement_id: control.placement,
-            line: ctx.cursor_line,
-            col: ctx.cursor_col,
+            line,
+            col,
             cols,
             rows,
             scaled: control.cols > 0 || control.rows > 0,
@@ -565,11 +675,118 @@ impl Graphics {
             offset_y: control.offset_y.min(cell_h - 1),
             source: [x, y, width, height],
             z: control.z,
-            alt_screen: ctx.alt_screen,
+            alt_screen,
             virtual_placement: control.placeholder,
+            parent,
+            pixel_size: None,
         });
+        // Placements relative to a moved one move with it.
+        if let Some((old_line, old_col)) = moved_from {
+            self.shift_descendants(key, line - old_line, col as i64 - old_col as i64);
+        }
         self.generation += 1;
-        (!control.no_cursor_move && !control.placeholder).then_some((cols, rows))
+        Ok((!control.no_cursor_move && !control.placeholder && parent.is_none()).then_some((cols, rows)))
+    }
+
+    fn placement(&self, (image, placement): (u32, u32)) -> Option<&Placement> {
+        self.placements.iter().find(|p| p.image_id == image && p.placement_id == placement)
+    }
+
+    /// Number of parents above `placement`.
+    fn depth(&self, placement: &Placement) -> usize {
+        let mut depth = 0;
+        let mut current = placement.parent;
+        while let Some(parent) = current
+            && depth <= MAX_RELATIVE_DEPTH
+        {
+            depth += 1;
+            current = self.placement(parent).and_then(|p| p.parent);
+        }
+        depth
+    }
+
+    fn has_ancestor(&self, placement: &Placement, key: (u32, u32)) -> bool {
+        let mut current = placement.parent;
+        for _ in 0..=MAX_RELATIVE_DEPTH {
+            match current {
+                Some(parent) if parent == key => return true,
+                Some(parent) => current = self.placement(parent).and_then(|p| p.parent),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    fn shift_descendants(&mut self, key: (u32, u32), lines: i64, cols: i64) {
+        let mut pending = vec![key];
+        let mut visited = 0;
+        while let Some(parent) = pending.pop()
+            && visited < self.placements.len()
+        {
+            visited += 1;
+            for child in self.placements.iter_mut().filter(|p| p.parent == Some(parent)) {
+                child.line += lines;
+                child.col = (child.col as i64 + cols).max(0) as usize;
+                pending.push((child.image_id, child.placement_id));
+            }
+        }
+    }
+
+    /// Removes relative placements whose parent is gone. Returns their image ids.
+    fn remove_orphans(&mut self) -> Vec<u32> {
+        let mut removed = Vec::new();
+        while self.placements.iter().any(|p| p.parent.is_some()) {
+            let keys: std::collections::HashSet<(u32, u32)> =
+                self.placements.iter().map(|p| (p.image_id, p.placement_id)).collect();
+            let before = removed.len();
+            self.placements.retain(|p| {
+                let orphan = p.parent.is_some_and(|parent| !keys.contains(&parent));
+                if orphan {
+                    removed.push(p.image_id);
+                }
+                !orphan
+            });
+            if removed.len() == before {
+                break;
+            }
+        }
+        removed
+    }
+
+    /// Copies a rectangle from one animation frame onto another (`a=c`).
+    fn compose(&mut self, control: &Control) -> Result<(), String> {
+        let generation = self.next_image_generation();
+        let image = self.images.get_mut(&control.id).ok_or("ENOENT:no such image")?;
+        let count = image.frames.len();
+        let (source, dest) = (control.rows as usize, control.cols as usize);
+        if source == 0 || dest == 0 || source > count || dest > count {
+            return Err("ENOENT:no such frame".into());
+        }
+        let (width, height) = (image.width as usize, image.height as usize);
+        let w = if control.source[2] == 0 { width } else { control.source[2] as usize };
+        let h = if control.source[3] == 0 { height } else { control.source[3] as usize };
+        let (dest_x, dest_y) = (control.source[0] as usize, control.source[1] as usize);
+        let (src_x, src_y) = (control.offset_x as usize, control.offset_y as usize);
+        if dest_x + w > width || dest_y + h > height || src_x + w > width || src_y + h > height {
+            return Err("EINVAL:rectangle outside the frame".into());
+        }
+        let src = image.frames[source - 1].rgba.clone();
+        let mut canvas = image.frames[dest - 1].rgba.to_vec();
+        let replace = control.no_cursor_move;
+        for row in 0..h {
+            for col in 0..w {
+                let from = &src[((src_y + row) * width + src_x + col) * 4..][..4];
+                let to = &mut canvas[((dest_y + row) * width + dest_x + col) * 4..][..4];
+                composite(to, from, replace);
+            }
+        }
+        image.frames[dest - 1].rgba = canvas.into();
+        if dest - 1 == image.current {
+            image.rgba = image.frames[dest - 1].rgba.clone();
+            image.generation = generation;
+        }
+        self.generation += 1;
+        Ok(())
     }
 
     /// Adds or edits an animation frame (`a=f`).
@@ -755,6 +972,7 @@ impl Graphics {
             }
             !remove
         });
+        affected.extend(self.remove_orphans());
         if free {
             if control.delete.eq_ignore_ascii_case(&b'i') {
                 affected.push(control.id);
@@ -787,6 +1005,7 @@ impl Graphics {
                 None => false,
             }
         });
+        self.remove_orphans();
         self.generation += 1;
     }
 
@@ -799,6 +1018,7 @@ impl Graphics {
         self.placements
             .retain(|p| p.virtual_placement || p.alt_screen != alt_screen || p.line + i64::from(p.rows) > oldest_line);
         if self.placements.len() != before {
+            self.remove_orphans();
             self.generation += 1;
         }
     }
@@ -813,6 +1033,7 @@ impl Graphics {
                 || p.line >= screen_top + rows as i64
         });
         if self.placements.len() != before {
+            self.remove_orphans();
             self.generation += 1;
         }
     }
@@ -821,6 +1042,7 @@ impl Graphics {
         let before = self.placements.len();
         self.placements.retain(|p| !p.alt_screen || p.virtual_placement);
         if self.placements.len() != before {
+            self.remove_orphans();
             self.generation += 1;
         }
     }
@@ -832,6 +1054,171 @@ impl Graphics {
         self.memory = 0;
         self.generation += 1;
     }
+}
+
+/// A width or height in an iTerm2 inline image request.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum InlineSize {
+    /// The image's own size.
+    #[default]
+    Auto,
+    Cells(u32),
+    Pixels(u32),
+    /// Percent of the terminal's width or height.
+    Percent(u32),
+}
+
+impl InlineSize {
+    fn parse(value: &[u8]) -> Self {
+        let text = std::str::from_utf8(value).unwrap_or("").trim();
+        let number = |digits: &str| digits.parse::<u32>().ok();
+        if let Some(pixels) = text.strip_suffix("px") {
+            number(pixels).map_or(Self::Auto, Self::Pixels)
+        } else if let Some(percent) = text.strip_suffix('%') {
+            number(percent).map_or(Self::Auto, Self::Percent)
+        } else {
+            number(text).map_or(Self::Auto, Self::Cells)
+        }
+    }
+
+    /// Size in pixels, `None` for automatic.
+    fn pixels(self, cell: u32, screen: u32) -> Option<u32> {
+        match self {
+            Self::Auto => None,
+            Self::Cells(n) => Some(n.saturating_mul(cell)),
+            Self::Pixels(n) => Some(n),
+            Self::Percent(percent) => Some(screen / 100 * percent.min(100)),
+        }
+        .filter(|&pixels| pixels > 0)
+    }
+}
+
+/// Arguments of an iTerm2 `File=` or `MultipartFile=` request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineImageArgs {
+    pub width: InlineSize,
+    pub height: InlineSize,
+    pub preserve_aspect_ratio: bool,
+    /// Only inline files are shown; others would be downloads.
+    pub inline: bool,
+}
+
+impl InlineImageArgs {
+    /// Parses `key=value` pairs separated by `;`.
+    pub fn parse(args: &[u8]) -> Self {
+        let mut parsed =
+            Self { width: InlineSize::Auto, height: InlineSize::Auto, preserve_aspect_ratio: true, inline: false };
+        for pair in args.split(|&b| b == b';') {
+            let Some(equals) = memchr::memchr(b'=', pair) else { continue };
+            let (key, value) = (&pair[..equals], &pair[equals + 1..]);
+            match key {
+                b"width" => parsed.width = InlineSize::parse(value),
+                b"height" => parsed.height = InlineSize::parse(value),
+                b"preserveAspectRatio" => parsed.preserve_aspect_ratio = value != b"0",
+                b"inline" => parsed.inline = value == b"1",
+                _ => {}
+            }
+        }
+        parsed
+    }
+}
+
+/// A decoded image file: frames of straight alpha RGBA with display times in milliseconds.
+struct DecodedFile {
+    width: u32,
+    height: u32,
+    frames: Vec<(Vec<u8>, u32)>,
+    opaque: bool,
+}
+
+/// Decodes PNG, JPEG or GIF data, recognized by its signature.
+fn decode_file(data: &[u8]) -> Result<DecodedFile, String> {
+    if data.starts_with(b"\x89PNG") {
+        let png = decode_png(data)?;
+        return Ok(DecodedFile {
+            width: png.width,
+            height: png.height,
+            opaque: png.opaque,
+            frames: vec![(png.rgba, DEFAULT_GAP_MS)],
+        });
+    }
+    if data.starts_with(&[0xff, 0xd8]) {
+        return decode_jpeg(data);
+    }
+    if data.starts_with(b"GIF8") {
+        return decode_gif(data);
+    }
+    Err("EINVAL:unsupported image format".into())
+}
+
+fn decode_jpeg(data: &[u8]) -> Result<DecodedFile, String> {
+    use zune_jpeg::zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
+    let options = DecoderOptions::default()
+        .jpeg_set_out_colorspace(ColorSpace::RGBA)
+        .set_max_width(MAX_DIMENSION as usize)
+        .set_max_height(MAX_DIMENSION as usize);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(data), options);
+    let rgba = decoder.decode().map_err(|e| format!("EINVAL:bad JPEG: {e:?}"))?;
+    let info = decoder.info().ok_or("EINVAL:bad JPEG")?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    if rgba.len() != width as usize * height as usize * 4 {
+        return Err("EINVAL:bad JPEG".into());
+    }
+    Ok(DecodedFile { width, height, frames: vec![(rgba, DEFAULT_GAP_MS)], opaque: true })
+}
+
+/// Decodes every frame of a GIF onto a full size canvas, applying disposal.
+fn decode_gif(data: &[u8]) -> Result<DecodedFile, String> {
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    options.set_memory_limit(gif::MemoryLimit::Bytes(NonZeroU64::new(MAX_TRANSFER as u64).expect("limit is not zero")));
+    let mut decoder = options.read_info(std::io::Cursor::new(data)).map_err(|e| format!("EINVAL:bad GIF: {e}"))?;
+    let (width, height) = (u32::from(decoder.width()), u32::from(decoder.height()));
+    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return Err("EINVAL:invalid image dimensions".into());
+    }
+    let (w, h) = (width as usize, height as usize);
+    let mut canvas = vec![0u8; w * h * 4];
+    let mut frames = Vec::new();
+    let mut total = 0;
+    while let Some(frame) = decoder.read_next_frame().map_err(|e| format!("EINVAL:bad GIF: {e}"))? {
+        let previous = (frame.dispose == gif::DisposalMethod::Previous).then(|| canvas.clone());
+        let (left, top) = (usize::from(frame.left), usize::from(frame.top));
+        let (fw, fh) = (usize::from(frame.width), usize::from(frame.height));
+        for y in 0..fh.min(h.saturating_sub(top)) {
+            for x in 0..fw.min(w.saturating_sub(left)) {
+                let Some(pixel) = frame.buffer.get((y * fw + x) * 4..(y * fw + x) * 4 + 4) else { continue };
+                if pixel[3] != 0 {
+                    canvas[((top + y) * w + left + x) * 4..][..4].copy_from_slice(pixel);
+                }
+            }
+        }
+        // Browsers treat delays of 10 ms or less as 100 ms; so do most terminals.
+        let gap_ms = match u32::from(frame.delay) * 10 {
+            0..=10 => 100,
+            ms => ms,
+        };
+        total += canvas.len();
+        frames.push((canvas.clone(), gap_ms));
+        match frame.dispose {
+            gif::DisposalMethod::Background => {
+                for y in top..(top + fh).min(h) {
+                    canvas[(y * w + left.min(w)) * 4..(y * w + (left + fw).min(w)) * 4].fill(0);
+                }
+            }
+            gif::DisposalMethod::Previous => {
+                if let Some(previous) = previous {
+                    canvas = previous;
+                }
+            }
+            _ => {}
+        }
+        if frames.len() == MAX_GIF_FRAMES || total > MAX_TRANSFER {
+            break;
+        }
+    }
+    let opaque = frames.iter().all(|(rgba, _)| rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+    Ok(DecodedFile { width, height, frames, opaque })
 }
 
 /// Blends `src` over `dst`, both straight alpha RGBA. `replace` copies instead.
@@ -1068,12 +1455,93 @@ mod tests {
     }
 
     #[test]
+    fn frames_compose_rectangles() {
+        let mut g = Graphics::new();
+        let red = BASE64.encode([255u8, 0, 0, 255, 0, 0]);
+        let blue = BASE64.encode([0u8, 0, 255, 0, 0, 255]);
+        g.handle(format!("a=t,f=24,s=2,v=1,i=1,q=1;{red}").as_bytes(), &ctx());
+        g.handle(format!("a=f,f=24,s=2,v=1,i=1,q=1;{blue}").as_bytes(), &ctx());
+        let out = g.handle(b"a=c,i=1,r=2,c=1,x=1,w=1,h=1,C=1", &ctx());
+        assert_eq!(out.response.as_deref(), Some(&b"\x1b_Gi=1;OK\x1b\\"[..]));
+        assert_eq!(&g.images()[&1].rgba[..], &[255, 0, 0, 255, 0, 0, 255, 255]);
+        let out = g.handle(b"a=c,i=1,r=2,c=1,x=1,w=2,h=1", &ctx());
+        assert!(String::from_utf8(out.response.unwrap()).unwrap().contains("EINVAL"));
+    }
+
+    #[test]
+    fn relative_placements_follow_and_die_with_their_parent() {
+        let mut g = Graphics::new();
+        let data = BASE64.encode([0u8; 3]);
+        g.handle(format!("a=t,f=24,s=1,v=1,i=1,q=2;{data}").as_bytes(), &ctx());
+        g.handle(format!("a=t,f=24,s=1,v=1,i=2,q=2;{data}").as_bytes(), &ctx());
+        let out = g.handle(b"a=p,i=2,p=1,P=1,Q=1", &ctx());
+        assert!(String::from_utf8(out.response.unwrap()).unwrap().contains("ENOPARENT"));
+        g.handle(b"a=p,i=1,p=1,q=2", &ctx());
+        let out = g.handle(b"a=p,i=2,p=1,P=1,Q=1,H=3,V=-1,q=2", &ctx());
+        assert_eq!(out.cursor_advance, None);
+        let child = |g: &Graphics| g.placements().iter().find(|p| p.image_id == 2).map(|p| (p.line, p.col));
+        assert_eq!(child(&g), Some((4, 5)));
+        let moved = Context { cursor_line: 10, cursor_col: 0, ..ctx() };
+        g.handle(b"a=p,i=1,p=1,q=2", &moved);
+        assert_eq!(child(&g), Some((9, 3)));
+        g.handle(b"a=d,d=i,i=1", &ctx());
+        assert!(g.placements().is_empty());
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&vec![200; (width * height * 4) as usize]).unwrap();
+        writer.finish().unwrap();
+        out
+    }
+
+    #[test]
+    fn inline_images_are_sized_like_iterm2() {
+        let args = InlineImageArgs::parse(b"name=eA==;size=10;width=4;height=50%;inline=1");
+        assert_eq!(args.width, InlineSize::Cells(4));
+        assert_eq!(args.height, InlineSize::Percent(50));
+        assert!(args.inline && args.preserve_aspect_ratio);
+
+        let mut g = Graphics::new();
+        let args = InlineImageArgs::parse(b"width=4;inline=1");
+        let advance = g.add_inline_image(&png(20, 10), &args, &ctx()).unwrap();
+        assert_eq!(advance, (4, 1));
+        let p = &g.placements()[0];
+        assert_eq!((p.pixel_size, p.line, p.col), (Some([40, 20]), 5, 2));
+
+        // Natural size wider than the 800 pixel screen shrinks to fit.
+        let args = InlineImageArgs::parse(b"inline=1");
+        assert_eq!(g.add_inline_image(&png(1600, 400), &args, &ctx()).unwrap(), (80, 10));
+        assert!(g.add_inline_image(b"not an image", &args, &ctx()).is_err());
+    }
+
+    #[test]
+    fn animated_gifs_decode_every_frame() {
+        let mut data = Vec::new();
+        {
+            let mut encoder = gif::Encoder::new(&mut data, 2, 1, &[255, 0, 0, 0, 0, 255]).unwrap();
+            for index in [0u8, 1] {
+                let mut frame = gif::Frame::from_indexed_pixels(2, 1, vec![index, index], None);
+                frame.delay = 5;
+                encoder.write_frame(&frame).unwrap();
+            }
+        }
+        let file = decode_file(&data).unwrap();
+        assert_eq!((file.width, file.height, file.frames.len()), (2, 1, 2));
+        assert_eq!(&file.frames[1].0[..4], &[0, 0, 255, 255]);
+        assert_eq!(file.frames[0].1, 50);
+    }
+
+    #[test]
     fn placeholder_cells_decode_ids_rows_and_columns() {
         let cell = Cell { ch: PLACEHOLDER, fg: Color::rgb(0, 0, 42), ..Cell::BLANK };
-        let first = placeholder_cell(&cell, Some("\u{305}\u{30D}"), None).unwrap();
+        let first = placeholder_cell(&cell, Color::DEFAULT, Some("\u{305}\u{30D}"), None).unwrap();
         assert_eq!((first.image_id, first.row, first.col), (42, 0, 1));
-        let next = placeholder_cell(&cell, None, Some(first)).unwrap();
+        let next = placeholder_cell(&cell, Color::DEFAULT, None, Some(first)).unwrap();
         assert_eq!((next.row, next.col), (0, 2));
-        assert!(placeholder_cell(&Cell::BLANK, None, None).is_none());
+        assert!(placeholder_cell(&Cell::BLANK, Color::DEFAULT, None, None).is_none());
     }
 }

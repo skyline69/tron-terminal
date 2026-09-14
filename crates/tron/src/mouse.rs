@@ -54,6 +54,12 @@ pub fn encode(
     Some(vec![0x1b, b'[', b'M', (value + 32) as u8, x as u8, y as u8])
 }
 
+/// Encodes an SGR-Pixels report (mode 1016). `x` and `y` are zero based pixels
+/// from the top left of the cell grid; like xterm, the report is one based.
+pub fn encode_pixels(code: u8, pressed: bool, motion: bool, x: u32, y: u32, mods: ModifiersState) -> Option<Vec<u8>> {
+    encode(code, pressed, motion, y as usize, x as usize, mods, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +72,7 @@ mod tests {
         assert_eq!(encode(WHEEL_UP, true, false, 0, 0, none, false).unwrap(), b"\x1b[M`!!");
         assert_eq!(encode(2, false, false, 0, 0, none, false).unwrap(), b"\x1b[M#!!");
         assert!(encode(0, true, false, 0, 300, none, false).is_none());
+        assert_eq!(encode_pixels(0, true, false, 0, 0, none).unwrap(), b"\x1b[<0;1;1M");
+        assert_eq!(encode_pixels(NO_BUTTON, true, true, 1234, 567, none).unwrap(), b"\x1b[<35;1235;568M");
     }
 }

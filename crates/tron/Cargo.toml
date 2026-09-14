@@ -21,3 +21,6 @@ anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
 smithay-clipboard.workspace = true
+arboard.workspace = true
+accesskit.workspace = true
+accesskit_unix.workspace = true

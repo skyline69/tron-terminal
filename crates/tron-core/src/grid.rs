@@ -12,12 +12,26 @@ use std::collections::VecDeque;
 
 use crate::cell::{Cell, Flags};
 
+/// DEC line size attributes: DECSWL, DECDWL and DECDHL.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum LineSize {
+    #[default]
+    Single,
+    /// Every cell is twice as wide; half as many columns fit.
+    DoubleWidth,
+    /// Top half of double width, double height text.
+    DoubleHeightTop,
+    /// Bottom half of double width, double height text.
+    DoubleHeightBottom,
+}
+
 /// One line of cells.
 #[derive(Clone, Debug)]
 pub struct Row {
     pub cells: Vec<Cell>,
     /// The line continues on the next row because of auto-wrap.
     pub wrapped: bool,
+    pub line_size: LineSize,
     /// Cells at or after this index are default blanks.
     occupied: usize,
     /// Combining characters, keyed by column. Usually empty.
@@ -26,7 +40,13 @@ pub struct Row {
 
 impl Row {
     pub fn new(cols: usize) -> Self {
-        Self { cells: vec![Cell::BLANK; cols], wrapped: false, occupied: 0, extras: Vec::new() }
+        Self {
+            cells: vec![Cell::BLANK; cols],
+            wrapped: false,
+            line_size: LineSize::Single,
+            occupied: 0,
+            extras: Vec::new(),
+        }
     }
 
     fn filled(cols: usize, blank: Cell) -> Self {
@@ -47,6 +67,7 @@ impl Row {
         }
         self.occupied = if blank == Cell::BLANK { 0 } else { cols };
         self.wrapped = false;
+        self.line_size = LineSize::Single;
         self.extras.clear();
     }
 
@@ -134,6 +155,7 @@ impl Row {
         self.cells.clear();
         self.cells.extend_from_slice(&other.cells);
         self.wrapped = other.wrapped;
+        self.line_size = other.line_size;
         self.occupied = other.occupied;
         self.extras.clone_from(&other.extras);
     }
@@ -160,17 +182,51 @@ impl Row {
     }
 }
 
+/// How many rows ahead of the recycled one [`Grid::scroll_up`] prefetches.
+const PREFETCH_DISTANCE: usize = 4;
+
+/// Asks the CPU to load a row's written cells into cache.
+#[inline]
+fn prefetch_row(row: &Row) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+        let bytes = row.occupied.min(row.cells.len()) * size_of::<Cell>();
+        let start = row.cells.as_ptr().cast::<i8>();
+        for offset in (0..bytes).step_by(64) {
+            // SAFETY: prefetching is a hint that never faults; the address is inside the allocation.
+            unsafe { _mm_prefetch(start.add(offset), _MM_HINT_T0) };
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = row;
+}
+
 /// Where rows moved during a reflow, in absolute line numbers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineMap {
     old_oldest: i64,
-    /// New absolute line of each old row, `None` when the row was dropped.
-    rows: Vec<Option<i64>>,
+    cols: usize,
+    /// New position (absolute line, column) of the first cell of each old row,
+    /// `None` when the row was dropped.
+    rows: Vec<Option<(i64, usize)>>,
 }
 
 impl LineMap {
     /// New absolute line of the row that was at `line` before the reflow.
     pub fn map(&self, line: i64) -> Option<i64> {
+        self.start(line).map(|(line, _)| line)
+    }
+
+    /// New position of the cell that was at `line`, `col`. Wide characters that
+    /// wrapped early can shift the result by a column.
+    pub fn map_point(&self, line: i64, col: usize) -> Option<(i64, usize)> {
+        let (start_line, start_col) = self.start(line)?;
+        let offset = start_col + col;
+        Some((start_line + (offset / self.cols) as i64, offset % self.cols))
+    }
+
+    fn start(&self, line: i64) -> Option<(i64, usize)> {
         let index = usize::try_from(line - self.old_oldest).ok()?;
         self.rows.get(index).copied().flatten()
     }
@@ -270,6 +326,15 @@ impl Grid {
         }
     }
 
+    /// Scrolls the viewport so absolute line `line` is its top row, as far as history allows.
+    pub fn scroll_to_top(&mut self, line: i64) {
+        let offset = (self.history - line).clamp(0, self.base() as i64) as usize;
+        if offset != self.display_offset {
+            self.display_offset = offset;
+            self.full_damage = true;
+        }
+    }
+
     /// Scrolls the viewport so absolute line `line` is visible, centering it when it was not.
     pub fn scroll_to_line(&mut self, line: i64) {
         let top = self.viewport_line(0);
@@ -350,6 +415,13 @@ impl Grid {
         let cols = self.cols;
         if save && top == 0 && self.max_scrollback > 0 {
             for _ in 0..n {
+                // The recycled row is the oldest in history and cold in cache. Start
+                // loading rows a few scrolls ahead so clearing them does not wait.
+                if self.base() >= self.max_scrollback
+                    && let Some(ahead) = self.lines.get(PREFETCH_DISTANCE)
+                {
+                    prefetch_row(ahead);
+                }
                 let recycled = if self.base() >= self.max_scrollback { self.lines.pop_front() } else { None };
                 let row = match recycled {
                     Some(mut row) => {
@@ -382,7 +454,11 @@ impl Grid {
                 self.history += n as i64;
             }
         }
-        self.damage[top..=bottom].fill(true);
+        if top == 0 && bottom + 1 == self.rows {
+            self.full_damage = true;
+        } else {
+            self.damage[top..=bottom].fill(true);
+        }
     }
 
     /// Scrolls rows `top..=bottom` down by `n`.
@@ -431,6 +507,13 @@ impl Grid {
         if end == width {
             line.wrapped = false;
         }
+    }
+
+    /// Erases a whole row and makes it single width.
+    pub fn erase_row(&mut self, row: usize, blank: Cell) {
+        let cols = self.cols;
+        self.erase(row, 0..cols, blank);
+        self.row_mut(row).line_size = LineSize::Single;
     }
 
     pub fn clear_scrollback(&mut self) {
@@ -510,9 +593,13 @@ impl Grid {
         let mut cursor_offset = None;
         // Old rows of the logical line being collected, with their offset into it.
         let mut line_rows: Vec<(usize, usize)> = Vec::new();
+        let mut line_size = LineSize::Single;
 
         for (index, mut row) in old.into_iter().enumerate() {
             let offset = cells.len();
+            if line_rows.is_empty() {
+                line_size = row.line_size;
+            }
             line_rows.push((index, offset));
             if index == cursor_index {
                 cursor_offset = Some(offset + cursor.1);
@@ -534,7 +621,7 @@ impl Grid {
             cells.extend_from_slice(&row.cells[..take]);
             if !row.wrapped {
                 extras.sort_by_key(|(c, _)| *c);
-                out.line(&cells, &extras, cursor_offset.take(), &line_rows);
+                out.line(&cells, &extras, cursor_offset.take(), &line_rows, line_size);
                 cells.clear();
                 extras.clear();
                 line_rows.clear();
@@ -542,7 +629,7 @@ impl Grid {
         }
         if !cells.is_empty() || cursor_offset.is_some() || !line_rows.is_empty() {
             extras.sort_by_key(|(c, _)| *c);
-            out.line(&cells, &extras, cursor_offset.take(), &line_rows);
+            out.line(&cells, &extras, cursor_offset.take(), &line_rows, line_size);
         }
 
         let (cursor_index, cursor_col) = out.cursor.unwrap_or((out.lines.len().saturating_sub(1), 0));
@@ -558,7 +645,8 @@ impl Grid {
         let new_oldest = self.oldest_line();
         self.line_map = Some(LineMap {
             old_oldest,
-            rows: row_map.into_iter().map(|row| row.map(|index| new_oldest + index as i64)).collect(),
+            cols,
+            rows: row_map.into_iter().map(|row| row.map(|(index, col)| (new_oldest + index as i64, col))).collect(),
         });
         (cursor_index.saturating_sub(new_base), cursor_col)
     }
@@ -569,22 +657,30 @@ struct Rewrap {
     cols: usize,
     lines: VecDeque<Row>,
     cursor: Option<(usize, usize)>,
-    /// New row index of each old row.
-    row_map: Vec<Option<usize>>,
+    /// New row index and column of the first cell of each old row.
+    row_map: Vec<Option<(usize, usize)>>,
 }
 
 impl Rewrap {
-    fn line(&mut self, cells: &[Cell], extras: &[(usize, String)], cursor: Option<usize>, rows: &[(usize, usize)]) {
+    fn line(
+        &mut self,
+        cells: &[Cell],
+        extras: &[(usize, String)],
+        cursor: Option<usize>,
+        rows: &[(usize, usize)],
+        line_size: LineSize,
+    ) {
         let cols = self.cols;
-        let mut row = Row::new(cols);
-        let mut col = 0;
+        let new_row = || Row { line_size, ..Row::new(cols) };
+        let mut row = new_row();
+        let mut col: usize = 0;
         let mut extra = 0;
-        // New row index of every cell, to map old rows through the rewrap.
-        let mut cell_rows: Vec<usize> = Vec::with_capacity(cells.len());
+        // New row and column of every cell, to map old rows through the rewrap.
+        let mut cell_positions: Vec<(usize, usize)> = Vec::with_capacity(cells.len());
         for (i, cell) in cells.iter().enumerate() {
             let wide = cell.flags.contains(Flags::WIDE);
             if cell.flags.contains(Flags::WIDE_SPACER) && i > 0 && cells[i - 1].flags.contains(Flags::WIDE) {
-                cell_rows.push(self.lines.len());
+                cell_positions.push((self.lines.len(), col.saturating_sub(1)));
                 continue;
             }
             let width = if wide && cols > 1 { 2 } else { 1 };
@@ -594,10 +690,10 @@ impl Rewrap {
                 }
                 row.wrapped = true;
                 row.occupied = cols;
-                self.lines.push_back(std::mem::replace(&mut row, Row::new(cols)));
+                self.lines.push_back(std::mem::replace(&mut row, new_row()));
                 col = 0;
             }
-            cell_rows.push(self.lines.len());
+            cell_positions.push((self.lines.len(), col));
             if cursor == Some(i) {
                 self.cursor = Some((self.lines.len(), col));
             }
@@ -621,7 +717,8 @@ impl Rewrap {
         }
         let last_row = self.lines.len();
         for &(old, offset) in rows {
-            self.row_map[old] = Some(cell_rows.get(offset).copied().unwrap_or(last_row));
+            let past_end = (last_row, (col + offset.saturating_sub(cells.len())).min(cols - 1));
+            self.row_map[old] = Some(cell_positions.get(offset).copied().unwrap_or(past_end));
         }
         if let Some(offset) = cursor
             && offset >= cells.len()
@@ -713,6 +810,7 @@ mod tests {
         assert_eq!(map.map(row1), Some(grid.screen_line(0)));
         assert_eq!(map.map(row2), Some(grid.screen_line(1)));
         assert_eq!(text(grid.line(map.map(row2).unwrap()).unwrap()), "g");
+        assert_eq!(map.map_point(row1, 1), Some((grid.screen_line(0), 5)));
     }
 
     #[test]

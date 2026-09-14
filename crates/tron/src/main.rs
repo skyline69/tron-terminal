@@ -1,5 +1,6 @@
 //! tron: a GPU accelerated terminal emulator.
 
+mod accessibility;
 mod clipboard;
 mod input;
 mod mouse;
@@ -18,19 +19,22 @@ use anyhow::Context;
 use parking_lot::Mutex;
 use winit::application::ApplicationHandler;
 use winit::cursor::CursorIcon;
+use winit::data_transfer::{DataTransferId, TypeHint, TypedData};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ButtonSource, ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, DndAction, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{
     ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, UserAttentionType, Window, WindowAttributes,
     WindowId,
 };
 
-use tron_config::{Action, Animation, Bell, BindKey, Binding, Blinking, Config, KeyCombo, Osc52, Paths, Watcher};
+use tron_config::{
+    Action, Animation, Bell, BindKey, Binding, Blinking, Config, KeyCombo, NotifyMode, Osc52, Paths, Watcher,
+};
 use tron_core::{
-    CursorShape, LinkMatch, Modes, Palette, Parser, SearchMatch, Selection, SelectionKind, Snapshot, TermEvent,
-    Terminal,
+    CursorShape, LinkMatch, Modes, NotifyWhen, Palette, Parser, SearchMatch, Selection, SelectionKind, Snapshot,
+    TermEvent, Terminal,
 };
 use tron_font::{CellMetrics, FontSystem};
 use tron_pty::{Pty, SpawnOptions, WindowSize};
@@ -42,6 +46,8 @@ use clipboard::Clipboard;
 const SYNC_POLL: Duration = Duration::from_millis(8);
 /// Maximum time between clicks of a double or triple click.
 const MULTI_CLICK: Duration = Duration::from_millis(400);
+/// How long configuration errors stay on screen.
+const CONFIG_ERROR_TIME: Duration = Duration::from_secs(15);
 /// Duration of the visual bell flash.
 const FLASH: Duration = Duration::from_millis(150);
 /// Link schemes opened on Ctrl+click.
@@ -117,10 +123,12 @@ fn main() -> anyhow::Result<()> {
     if paths.is_none() {
         log::warn!("no home directory found, using the default configuration");
     }
+    let mut config_error = None;
     let config = match paths.as_ref().map(Config::load) {
         Some(Ok(config)) => config,
         Some(Err(error)) => {
             log::error!("{error}");
+            config_error = Some(error.to_string());
             Config::default()
         }
         None => Config::default(),
@@ -141,7 +149,17 @@ fn main() -> anyhow::Result<()> {
         .ok()
     });
 
-    event_loop.run_app(App { cli, paths, config, proxy, config_dirty, _watcher: watcher, gpu, session: None })?;
+    event_loop.run_app(App {
+        cli,
+        paths,
+        config,
+        config_error,
+        proxy,
+        config_dirty,
+        _watcher: watcher,
+        gpu,
+        session: None,
+    })?;
     Ok(())
 }
 
@@ -157,6 +175,8 @@ struct App {
     cli: Cli,
     paths: Option<Paths>,
     config: Config,
+    /// Why the configuration file could not be loaded at startup.
+    config_error: Option<String>,
     proxy: EventLoopProxy,
     config_dirty: Arc<AtomicBool>,
     _watcher: Option<Watcher>,
@@ -179,6 +199,8 @@ struct Settings {
     blinking: Blinking,
     blink_interval: Duration,
     open_command: String,
+    notify_mode: NotifyMode,
+    notify_command: String,
 }
 
 impl Settings {
@@ -195,6 +217,8 @@ impl Settings {
             blinking: config.cursor.blinking,
             blink_interval: Duration::from_millis(config.cursor.blink_interval_ms.max(50)),
             open_command: config.links.open_command.clone(),
+            notify_mode: config.notifications.mode,
+            notify_command: config.notifications.command.clone(),
         }
     }
 }
@@ -211,6 +235,8 @@ struct MouseState {
     /// Buttons held while reporting to the application, as a bit mask.
     buttons: u8,
     last_cell: Option<(usize, usize)>,
+    /// Last position reported in SGR-Pixels mode.
+    last_pixel: Option<(u32, u32)>,
     /// Time, cell and count of the last left click.
     click: Option<(Instant, usize, usize, u8)>,
     selecting: bool,
@@ -218,9 +244,21 @@ struct MouseState {
     pending_click: bool,
 }
 
+/// A drag and drop operation over the window.
+struct DropState {
+    id: DataTransferId,
+    /// Data was requested from the source.
+    requested: bool,
+    /// Text to insert, once received.
+    text: Option<String>,
+    dropped: bool,
+}
+
 struct Session {
     // Declared before `window`: it must be dropped before the Wayland display.
     clipboard: Clipboard,
+    accessibility: Option<accessibility::Accessibility>,
+    drop: Option<DropState>,
     window: Arc<dyn Window>,
     renderer: Renderer,
     fonts: FontSystem,
@@ -229,7 +267,12 @@ struct Session {
     pty: Pty,
     input: mpsc::Sender<Vec<u8>>,
     settings: Settings,
+    /// Configuration problems shown at the top of the window, and until when.
+    config_errors: Vec<String>,
+    config_errors_until: Option<Instant>,
     modifiers: ModifiersState,
+    /// Hyper is held. winit's modifier state does not include it.
+    hyper: bool,
     mouse: MouseState,
     /// Mouse pointer shape currently set on the window.
     pointer_icon: CursorIcon,
@@ -336,8 +379,13 @@ impl App {
             log::debug!("IME unavailable: {error}");
         }
 
+        // TRON_ACCESSIBILITY=0 turns screen reader support off.
+        let accessibility = (std::env::var_os("TRON_ACCESSIBILITY").is_none_or(|v| v != "0"))
+            .then(|| accessibility::Accessibility::new(self.proxy.clone()));
         let mut session = Session {
             clipboard: Clipboard::new(window.as_ref()),
+            accessibility,
+            drop: None,
             frame_interval: frame_interval(window.as_ref()),
             last_frame: Instant::now() - Duration::from_secs(1),
             snapshot: Snapshot::default(),
@@ -351,6 +399,7 @@ impl App {
             input,
             settings,
             modifiers: ModifiersState::empty(),
+            hyper: false,
             mouse: MouseState::default(),
             pointer_icon: CursorIcon::Text,
             bindings: Vec::new(),
@@ -367,8 +416,13 @@ impl App {
             scale_factor,
             font_size: config.font.size,
             scroll_accumulator: 0.0,
+            config_errors: Vec::new(),
+            config_errors_until: None,
         };
         session.apply_config(config, self.paths.as_ref());
+        if let Some(error) = self.config_error.take() {
+            session.show_config_errors(vec![error]);
+        }
         if let Some(path) = std::env::var_os("TRON_SCREENSHOT") {
             let delay = std::env::var("TRON_SCREENSHOT_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
             if session.renderer.enable_capture() {
@@ -414,7 +468,12 @@ impl App {
                     session.apply_config(&self.config, self.paths.as_ref());
                 }
             }
-            Err(error) => log::error!("{error}"),
+            Err(error) => {
+                log::error!("{error}");
+                if let Some(session) = &mut self.session {
+                    session.show_config_errors(vec![error.to_string()]);
+                }
+            }
         }
     }
 }
@@ -499,6 +558,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(focused) => {
                 session.focused = focused;
+                if let Some(accessibility) = &mut session.accessibility {
+                    accessibility.set_focused(focused);
+                }
                 if session.shared.term.lock().modes().contains(Modes::FOCUS_EVENTS) {
                     session.send(if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
                 }
@@ -506,6 +568,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                #[allow(deprecated)] // winit's xkb backend still reports Hyper_L/R as NamedKey::Hyper.
+                if event.logical_key == Key::Named(NamedKey::Hyper) {
+                    session.hyper = pressed;
+                }
                 if pressed {
                     if session.exited {
                         event_loop.exit();
@@ -534,11 +600,16 @@ impl ApplicationHandler for App {
                 } else if session.search.is_some() {
                     return;
                 }
-                let (app_cursor, kitty_flags) = {
+                let key_modes = {
                     let term = session.shared.term.lock();
-                    (term.modes().contains(Modes::APP_CURSOR), term.keyboard_flags())
+                    input::KeyModes {
+                        app_cursor: term.modes().contains(Modes::APP_CURSOR),
+                        app_keypad: term.modes().contains(Modes::APP_KEYPAD),
+                        kitty_flags: term.keyboard_flags(),
+                    }
                 };
-                if let Some(bytes) = input::encode(&event, session.modifiers, app_cursor, kitty_flags) {
+                let mods = input::Mods::new(session.modifiers, session.hyper, false);
+                if let Some(bytes) = input::encode(&event, mods, key_modes) {
                     if pressed {
                         session.prepare_input();
                     }
@@ -569,6 +640,12 @@ impl ApplicationHandler for App {
                 session.scroll(lines);
             }
             WindowEvent::PointerMoved { position, .. } => session.pointer_moved(position.x, position.y),
+            WindowEvent::DragEntered { id, .. } | WindowEvent::DragPosition { id, .. } => {
+                session.drag_over(event_loop, id)
+            }
+            WindowEvent::DragDropped { id, .. } => session.drag_dropped(id),
+            WindowEvent::DragLeft { id } => session.drag_left(id),
+            WindowEvent::DataTransferReceived { id, value, .. } => session.drag_data(id, value.as_ref()),
             WindowEvent::PointerButton { state, position, button: ButtonSource::Mouse(button), .. } => {
                 session.mouse.position = (position.x, position.y);
                 session.pointer_button(state == ElementState::Pressed, button);
@@ -596,9 +673,10 @@ impl Session {
 
     fn apply_config(&mut self, config: &Config, paths: Option<&Paths>) {
         self.settings = Settings::new(config);
+        let mut problems = Vec::new();
         let (bindings, errors) = config.bindings();
         for error in errors {
-            log::error!("keybindings: {error}");
+            problems.push(format!("keybindings: {error}"));
         }
         self.bindings = bindings;
 
@@ -608,7 +686,7 @@ impl Session {
                     self.fonts = fonts;
                     self.font_family = config.font.family.clone();
                 }
-                Err(error) => log::error!("{error}"),
+                Err(error) => problems.push(error.to_string()),
             }
         }
         self.fonts.set_fallback(&config.font.fallback);
@@ -627,6 +705,7 @@ impl Session {
             tron_config::Hinting::Off => tron_font::Hinting::Off,
         });
         self.set_font_size(config.font.size);
+        self.renderer.set_bidi(config.font.bidi);
 
         match config.colors(paths) {
             Ok(colors) => {
@@ -645,7 +724,7 @@ impl Session {
                     bold_is_bright: colors.bold_is_bright,
                 });
             }
-            Err(error) => log::error!("{error}"),
+            Err(error) => problems.push(error.to_string()),
         }
 
         let translucent = config.window.opacity < 1.0 && self.renderer.supports_transparency();
@@ -658,7 +737,7 @@ impl Session {
             .filter_map(|source| match source {
                 Ok(source) => Some(PostShader { name: source.name, source: source.source }),
                 Err(error) => {
-                    log::error!("{error}");
+                    problems.push(error.to_string());
                     None
                 }
             })
@@ -668,9 +747,7 @@ impl Session {
             Animation::Always => Some(true),
             Animation::Never => Some(false),
         };
-        for error in self.renderer.set_shaders(&shaders, animation) {
-            log::error!("{error}");
-        }
+        problems.extend(self.renderer.set_shaders(&shaders, animation));
 
         {
             let mut term = self.shared.term.lock();
@@ -685,7 +762,49 @@ impl Session {
             term.graphics_mut().set_limits(limit, config.images.file_transfer);
             term.grid_mut().damage_all();
         }
+        self.show_config_errors(problems);
         self.window.request_redraw();
+    }
+
+    /// Logs configuration problems and shows them at the top of the window for a while.
+    /// An empty list removes earlier ones.
+    fn show_config_errors(&mut self, errors: Vec<String>) {
+        for error in &errors {
+            log::error!("{error}");
+        }
+        self.config_errors_until = (!errors.is_empty()).then(|| Instant::now() + CONFIG_ERROR_TIME);
+        self.config_errors = errors;
+        self.update_overlays();
+        self.window.request_redraw();
+    }
+
+    /// Shows a desktop notification when the user's settings and the application allow it.
+    fn notify(&self, title: &str, body: &str, when: Option<NotifyWhen>) {
+        let focused_ok = match (self.settings.notify_mode, when) {
+            (NotifyMode::Never, _) => return,
+            (NotifyMode::Always, None | Some(NotifyWhen::Always)) => true,
+            _ => false,
+        };
+        // Visibility is not known, so "invisible" counts as unfocused.
+        if self.focused && !focused_ok {
+            return;
+        }
+        let mut command = Command::new(&self.settings.notify_command);
+        command.args(["--app-name", "tron", "--", title, body]);
+        spawn_detached(command);
+    }
+
+    /// Output of the command at the top of a scrolled view, or of the last command.
+    fn command_output(&self) -> Option<(tron_core::Point, tron_core::Point)> {
+        let term = self.shared.term.lock();
+        let grid = term.grid();
+        if grid.display_offset() > 0 {
+            let top = grid.viewport_line(0);
+            // After jumping to a prompt, the top row is the prompt and output starts below it.
+            term.command_output(Some(top)).or_else(|| term.command_output(Some(top + 1)))
+        } else {
+            term.command_output(None)
+        }
     }
 
     fn handle_events(&mut self, events: Vec<TermEvent>) {
@@ -716,6 +835,15 @@ impl Session {
                             self.send(reply);
                         }
                     }
+                }
+                TermEvent::Notification { title, body, when } => self.notify(&title, &body, when),
+                TermEvent::ColumnsChanged(cols) => {
+                    // DECCOLM: resize the window to fit the new width, keeping the height.
+                    let metrics = self.fonts.metrics();
+                    let padding = padding(self.settings.padding, self.scale_factor);
+                    let width = cols as f32 * metrics.width as f32 + 2.0 * padding[0];
+                    let height = self.window.surface_size().height;
+                    let _ = self.window.request_surface_size(PhysicalSize::new(width.ceil() as u32, height).into());
                 }
             }
         }
@@ -762,6 +890,17 @@ impl Session {
             wake_at(self.blink_epoch + interval * (phase as u32 + 1));
         }
 
+        // Configuration errors disappear after a while.
+        match self.config_errors_until {
+            Some(until) if until <= now => {
+                self.config_errors.clear();
+                self.config_errors_until = None;
+                self.update_overlays();
+            }
+            Some(until) => wake_at(until),
+            None => {}
+        }
+
         // Visual bell.
         match self.flash_until {
             Some(until) if until > now => {
@@ -798,6 +937,18 @@ impl Session {
             self.pending_key = None;
         }
         self.update_ime_area();
+        if let Some(accessibility) = &mut self.accessibility {
+            let metrics = self.fonts.metrics();
+            let [pad_x, pad_y] = padding(self.settings.padding, self.scale_factor);
+            let layout = accessibility::Layout {
+                cell_width: f64::from(metrics.width),
+                cell_height: f64::from(metrics.height),
+                padding: [f64::from(pad_x), f64::from(pad_y)],
+            };
+            if let Some(due) = accessibility.update(&self.snapshot, layout) {
+                wake_at(due);
+            }
+        }
 
         if capture_now {
             event_loop.exit();
@@ -910,6 +1061,27 @@ impl Session {
                 self.prepare_input();
                 self.send(text.into_bytes());
             }
+            Action::ScrollToPreviousPrompt | Action::ScrollToNextPrompt => {
+                self.shared.term.lock().scroll_to_prompt(action == Action::ScrollToPreviousPrompt);
+                self.window.request_redraw();
+            }
+            Action::SelectCommandOutput | Action::CopyCommandOutput => {
+                let Some((start, end)) = self.command_output() else { return };
+                let text = {
+                    let mut term = self.shared.term.lock();
+                    term.set_selection(Some(Selection { kind: SelectionKind::Simple, anchor: start, head: end }));
+                    term.scroll_to_line(start.line);
+                    term.selection_text()
+                };
+                if let Some(text) = text {
+                    if action == Action::CopyCommandOutput {
+                        self.clipboard.store(false, text);
+                    } else if self.settings.copy_on_select {
+                        self.clipboard.store(true, text);
+                    }
+                }
+                self.window.request_redraw();
+            }
             Action::ReloadConfig | Action::None => {}
         }
     }
@@ -990,6 +1162,23 @@ impl Session {
                 text: format!(" Search: {}▏{status} ", search.query),
                 fg: palette.background,
                 bg: palette.cursor,
+                underline: false,
+            });
+        }
+        const SHOWN_ERRORS: usize = 4;
+        for (row, error) in self.config_errors.iter().take(SHOWN_ERRORS).enumerate() {
+            let first_line = error.lines().next().unwrap_or_default();
+            let more = if row + 1 == SHOWN_ERRORS && self.config_errors.len() > SHOWN_ERRORS {
+                " (more in the log)"
+            } else {
+                ""
+            };
+            overlays.push(Overlay {
+                row,
+                col: 0,
+                text: format!(" config: {first_line}{more} "),
+                fg: [0xff, 0xff, 0xff],
+                bg: [0xb0, 0x30, 0x40],
                 underline: false,
             });
         }
@@ -1088,6 +1277,58 @@ impl Session {
         self.send(bytes);
     }
 
+    /// Accepts a drag over the window and asks for its data early: Wayland
+    /// ends the transfer as soon as the drop happens.
+    fn drag_over(&mut self, event_loop: &dyn ActiveEventLoop, id: DataTransferId) {
+        if self.drop.as_ref().is_none_or(|drop| drop.id != id) {
+            self.drop = Some(DropState { id, requested: false, text: None, dropped: false });
+        }
+        if let Err(error) = event_loop.set_valid_dnd_actions(id, &[DndAction::Copy]) {
+            log::debug!("cannot accept drag: {error}");
+        }
+        let Some(drop) = &mut self.drop else { return };
+        if drop.requested {
+            return;
+        }
+        drop.requested = [TypeHint::UriList, TypeHint::Plaintext]
+            .iter()
+            .any(|hint| event_loop.fetch_data_transfer(id, hint).is_ok());
+    }
+
+    fn drag_data(&mut self, id: DataTransferId, value: &dyn TypedData) {
+        let Some(drop) = self.drop.as_mut().filter(|drop| drop.id == id) else { return };
+        if drop.text.is_none() {
+            drop.text = dropped_text(value);
+        }
+        if drop.dropped {
+            self.finish_drop();
+        }
+    }
+
+    fn drag_dropped(&mut self, id: DataTransferId) {
+        let Some(drop) = self.drop.as_mut().filter(|drop| drop.id == id) else { return };
+        drop.dropped = true;
+        if drop.text.is_some() {
+            self.finish_drop();
+        }
+    }
+
+    fn drag_left(&mut self, id: DataTransferId) {
+        // Wayland also reports leaving after a drop, before the data arrives.
+        if self.drop.as_ref().is_some_and(|drop| drop.id == id && !drop.dropped) {
+            self.drop = None;
+        }
+    }
+
+    fn finish_drop(&mut self) {
+        if let Some(text) = self.drop.take().and_then(|drop| drop.text)
+            && !text.is_empty()
+        {
+            self.paste(&text);
+            self.window.request_redraw();
+        }
+    }
+
     /// Arrow while the application receives mouse events, I-beam while the
     /// mouse selects text (including Shift held over a mouse-reporting app).
     fn update_pointer_icon(&mut self, modes: Modes) {
@@ -1102,6 +1343,34 @@ impl Session {
             self.pointer_icon = icon;
             self.window.set_cursor(icon.into());
         }
+    }
+
+    /// Encodes a mouse report in the format the application selected.
+    fn mouse_report(
+        &self,
+        modes: Modes,
+        code: u8,
+        pressed: bool,
+        motion: bool,
+        row: usize,
+        col: usize,
+    ) -> Option<Vec<u8>> {
+        if modes.contains(Modes::MOUSE_SGR_PIXELS) {
+            let (x, y) = self.grid_pixel(self.mouse.position.0, self.mouse.position.1);
+            return mouse::encode_pixels(code, pressed, motion, x, y, self.modifiers);
+        }
+        mouse::encode(code, pressed, motion, row, col, self.modifiers, modes.contains(Modes::MOUSE_SGR))
+    }
+
+    /// Pointer position in pixels from the top left of the cell grid, clamped to the grid.
+    fn grid_pixel(&self, x: f64, y: f64) -> (u32, u32) {
+        let [pad_x, pad_y] = padding(self.settings.padding, self.scale_factor);
+        let metrics = self.fonts.metrics();
+        let (cols, rows) = self.renderer.grid_size();
+        let width = (cols as u32 * metrics.width).max(1) - 1;
+        let height = (rows as u32 * metrics.height).max(1) - 1;
+        let clamp = |value: f64, pad: f32, max: u32| (value as f32 - pad).max(0.0).min(max as f32) as u32;
+        (clamp(x, pad_x, width), clamp(y, pad_y, height))
     }
 
     fn mouse_reporting(&self, modes: Modes) -> bool {
@@ -1127,8 +1396,7 @@ impl Session {
             } else {
                 self.mouse.buttons &= !(1 << code);
             }
-            let sgr = modes.contains(Modes::MOUSE_SGR);
-            if let Some(bytes) = mouse::encode(code, pressed, false, row, col, self.modifiers, sgr) {
+            if let Some(bytes) = self.mouse_report(modes, code, pressed, false, row, col) {
                 self.send(bytes);
             }
             self.mouse.last_cell = Some((row, col));
@@ -1195,14 +1463,18 @@ impl Session {
         if self.mouse_reporting(modes) {
             let report =
                 modes.contains(Modes::MOUSE_ANY) || (modes.contains(Modes::MOUSE_BUTTON) && self.mouse.buttons != 0);
-            if report && self.mouse.last_cell != Some((row, col)) {
+            let pixels = modes.contains(Modes::MOUSE_SGR_PIXELS);
+            let pixel = self.grid_pixel(x, y);
+            let moved =
+                if pixels { self.mouse.last_pixel != Some(pixel) } else { self.mouse.last_cell != Some((row, col)) };
+            if report && moved {
                 let code = (0..3).find(|b| self.mouse.buttons & (1 << b) != 0).unwrap_or(mouse::NO_BUTTON);
-                let sgr = modes.contains(Modes::MOUSE_SGR);
-                if let Some(bytes) = mouse::encode(code, true, true, row, col, self.modifiers, sgr) {
+                if let Some(bytes) = self.mouse_report(modes, code, true, true, row, col) {
                     self.send(bytes);
                 }
             }
             self.mouse.last_cell = Some((row, col));
+            self.mouse.last_pixel = Some(pixel);
             return;
         }
         if !self.mouse.selecting {
@@ -1243,8 +1515,7 @@ impl Session {
         if self.mouse_reporting(modes) {
             let (row, col) = self.renderer.cell_at(self.mouse.position.0, self.mouse.position.1);
             let code = if whole > 0.0 { mouse::WHEEL_UP } else { mouse::WHEEL_DOWN };
-            let sgr = modes.contains(Modes::MOUSE_SGR);
-            if let Some(bytes) = mouse::encode(code, true, false, row, col, self.modifiers, sgr) {
+            if let Some(bytes) = self.mouse_report(modes, code, true, false, row, col) {
                 self.send(bytes.repeat(count));
             }
         } else if alt_screen {
@@ -1369,6 +1640,25 @@ fn bind_key(key: &Key) -> Option<BindKey> {
     }
 }
 
+/// Text inserted for dropped data: shell-quoted file paths, or plain text.
+fn dropped_text(value: &dyn TypedData) -> Option<String> {
+    match value.type_().hint() {
+        Some(TypeHint::UriList) => {
+            let items: Vec<String> = match value.try_as_file_paths() {
+                Ok(paths) if !paths.is_empty() => paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+                _ => value.try_as_uris().ok()?,
+            };
+            Some(items.iter().map(|item| shell_quote(item)).collect::<Vec<_>>().join(" "))
+        }
+        _ => value.try_as_string().ok(),
+    }
+}
+
+/// Quotes `text` for POSIX shells: single quotes, with `'` written as `'\''`.
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
 /// Runs a program without waiting for it, reaping it on a helper thread.
 fn spawn_detached(mut command: Command) {
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -1423,5 +1713,17 @@ fn window_size(cols: usize, rows: usize, metrics: CellMetrics) -> WindowSize {
         rows: clamp(rows),
         cell_width: clamp(metrics.width as usize),
         cell_height: clamp(metrics.height as usize),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropped_paths_are_shell_quoted() {
+        assert_eq!(shell_quote("/tmp/a b.txt"), "'/tmp/a b.txt'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote(""), "''");
     }
 }

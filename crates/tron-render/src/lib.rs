@@ -99,12 +99,73 @@ pub struct Gpu {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    pipeline_cache: Option<PipelineCacheFile>,
+}
+
+/// Compiled pipelines kept on disk, so later launches skip shader compilation.
+#[derive(Clone)]
+struct PipelineCacheFile {
+    cache: wgpu::PipelineCache,
+    path: PathBuf,
+    /// Size of the data loaded at startup, to skip saving an unchanged cache.
+    loaded_len: usize,
+}
+
+impl PipelineCacheFile {
+    fn open(device: &wgpu::Device, info: &wgpu::AdapterInfo) -> Option<Self> {
+        let key = wgpu::util::pipeline_cache_key(info)?;
+        let dir = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?
+            .join("tron");
+        let path = dir.join(key);
+        let data = std::fs::read(&path).ok();
+        // SAFETY: the data was written by `save` from `PipelineCache::get_data` for an
+        // adapter with the same cache key; wgpu and the driver validate its header,
+        // and `fallback` starts an empty cache when it does not match.
+        let cache = unsafe {
+            device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                label: Some("tron pipelines"),
+                data: data.as_deref(),
+                fallback: true,
+            })
+        };
+        Some(Self { cache, path, loaded_len: data.map_or(0, |d| d.len()) })
+    }
+
+    /// Writes the cache on a background thread when it grew.
+    fn save(&self) {
+        let this = self.clone();
+        let spawned = std::thread::Builder::new().name("pipeline-cache".into()).spawn(move || {
+            let Some(data) = this.cache.get_data() else { return };
+            if data.len() == this.loaded_len {
+                return;
+            }
+            let write = || -> std::io::Result<()> {
+                if let Some(dir) = this.path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                let temp = this.path.with_extension("tmp");
+                std::fs::write(&temp, &data)?;
+                std::fs::rename(&temp, &this.path)
+            };
+            match write() {
+                Ok(()) => log::debug!("saved pipeline cache to {}", this.path.display()),
+                Err(error) => log::debug!("cannot save pipeline cache: {error}"),
+            }
+        });
+        if let Err(error) = spawned {
+            log::debug!("cannot save pipeline cache: {error}");
+        }
+    }
 }
 
 impl Gpu {
     /// Opens the GPU. This is the slowest part of startup, so it can run on a
     /// background thread before the window exists.
     pub async fn new() -> Result<Self, RenderError> {
+        let started = Instant::now();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -117,19 +178,27 @@ impl Gpu {
                 apply_limit_buckets: false,
             })
             .await?;
+        log::debug!("gpu init: instance and adapter after {:?}", started.elapsed());
         let info = adapter.get_info();
         log::info!("GPU: {} ({:?}, {})", info.name, info.backend, info.driver);
+        let required_features = adapter.features() & wgpu::Features::PIPELINE_CACHE;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("tron"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
             })
             .await?;
-        Ok(Self { instance, adapter, device, queue })
+        log::debug!("gpu init: device after {:?}", started.elapsed());
+        let pipeline_cache = if required_features.contains(wgpu::Features::PIPELINE_CACHE) {
+            PipelineCacheFile::open(&device, &info)
+        } else {
+            None
+        };
+        Ok(Self { instance, adapter, device, queue, pipeline_cache })
     }
 }
 
@@ -148,6 +217,12 @@ pub struct Renderer {
     focused: bool,
     started: Instant,
     post_frame: u32,
+    /// Cursor rectangle of the last rendered frame and the one before its last change.
+    cursor: [f32; 4],
+    previous_cursor: [f32; 4],
+    /// Seconds since `started` when the cursor rectangle last changed.
+    cursor_change_time: f32,
+    pipeline_cache: Option<PipelineCacheFile>,
     capture: Option<PathBuf>,
     device_lost: Arc<AtomicBool>,
 }
@@ -177,7 +252,9 @@ impl Renderer {
         padding: [f32; 2],
         theme: Theme,
     ) -> Result<Self, RenderError> {
-        let Gpu { instance, adapter, device, queue } = gpu;
+        let started = Instant::now();
+        let Gpu { instance, adapter, device, queue, pipeline_cache } = gpu;
+        let cache = pipeline_cache.as_ref().map(|c| &c.cache);
         let device_lost = Arc::new(AtomicBool::new(false));
         let lost = device_lost.clone();
         device.set_device_lost_callback(move |reason, message| {
@@ -219,11 +296,18 @@ impl Renderer {
         let _ = theme.opacity;
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
+        log::debug!("gpu init: surface configured after {:?}", started.elapsed());
 
-        let cells = CellPipeline::new(&device, format, metrics, padding);
-        let images = ImagePipeline::new(&device, format);
-        let mut post = PostChain::new(&device, format);
+        let cells = CellPipeline::new(&device, format, metrics, padding, cache);
+        log::debug!("gpu init: cell pipeline after {:?}", started.elapsed());
+        let images = ImagePipeline::new(&device, format, cache);
+        log::debug!("gpu init: image pipeline after {:?}", started.elapsed());
+        let mut post = PostChain::new(&device, format, cache);
         post.resize(&device, config.width, config.height);
+        log::debug!("gpu init: post chain after {:?}", started.elapsed());
+        if let Some(cache) = &pipeline_cache {
+            cache.save();
+        }
 
         Ok(Self {
             srgb_output: format.is_srgb(),
@@ -240,6 +324,10 @@ impl Renderer {
             focused: true,
             started: Instant::now(),
             post_frame: 0,
+            cursor: [0.0; 4],
+            previous_cursor: [0.0; 4],
+            cursor_change_time: -1.0e6,
+            pipeline_cache,
             capture: None,
             device_lost,
         })
@@ -271,6 +359,11 @@ impl Renderer {
 
     pub fn set_overlays(&mut self, overlays: Vec<Overlay>) {
         self.cells.set_overlays(overlays);
+    }
+
+    /// Reorders right-to-left text for display. On by default.
+    pub fn set_bidi(&mut self, enabled: bool) {
+        self.cells.set_bidi(enabled);
     }
 
     /// Visual bell flash strength for the next frame, 0 to 1.
@@ -343,12 +436,20 @@ impl Renderer {
         let errors = self.post.set_shaders(&self.device, shaders, animation);
         self.post.resize(&self.device, self.config.width, self.config.height);
         self.post_frame = 0;
+        if !shaders.is_empty()
+            && let Some(cache) = &self.pipeline_cache
+        {
+            cache.save();
+        }
         errors
     }
 
     /// Whether frames should be drawn continuously for shader animation.
     pub fn is_animated(&self) -> bool {
+        const CURSOR_ANIMATION: f32 = 1.0;
         self.post.is_animated()
+            || (self.post.uses_cursor_motion()
+                && self.started.elapsed().as_secs_f32() - self.cursor_change_time < CURSOR_ANIMATION)
     }
 
     /// Builds the frame from a terminal snapshot.
@@ -424,17 +525,27 @@ impl Renderer {
             self.cells.draw(&mut pass, text);
             self.images.draw(&mut pass, Layer::AboveText);
         }
+        let time = self.started.elapsed().as_secs_f32();
+        let cursor = self.cells.cursor_rect();
+        if cursor != self.cursor {
+            self.previous_cursor = self.cursor;
+            self.cursor = cursor;
+            self.cursor_change_time = time;
+        }
         if self.post.is_active() {
             let m = self.cells.metrics();
             let uniforms = PostUniforms {
                 resolution: viewport,
-                time: self.started.elapsed().as_secs_f32(),
+                time,
                 frame: self.post_frame,
-                cursor: self.cells.cursor_rect(),
+                cursor,
                 cell_size: [m.width as f32, m.height as f32],
                 focused: if self.focused { 1.0 } else { 0.0 },
                 _padding: 0.0,
                 background: [clear.r as f32, clear.g as f32, clear.b as f32, clear.a as f32],
+                previous_cursor: self.previous_cursor,
+                cursor_change_time: self.cursor_change_time,
+                _padding2: [0.0; 3],
             };
             self.post.run(&self.queue, &mut encoder, &surface_view, &uniforms);
             self.post_frame = self.post_frame.wrapping_add(1);

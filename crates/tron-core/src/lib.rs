@@ -15,12 +15,12 @@ pub mod snapshot;
 pub mod term;
 pub mod text;
 
-pub use cell::{Cell, Color, ColorKind, Flags};
+pub use cell::{Cell, Color, ColorKind, Extended, ExtendedTable, Flags, TextSize};
 pub use graphics::{Graphics, Image, PLACEHOLDER, PlaceholderCell, Placement, placeholder_cell};
-pub use grid::{Grid, Row};
+pub use grid::{Grid, LineSize, Row};
 pub use palette::Palette;
 pub use parser::{Params, Parser, Perform};
 pub use selection::{Point, Selection, SelectionKind, SelectionRange};
 pub use snapshot::Snapshot;
-pub use term::{CursorShape, CursorState, Hyperlink, LinkMatch, Modes, TermEvent, Terminal};
+pub use term::{CommandMark, CursorShape, CursorState, Hyperlink, LinkMatch, Modes, NotifyWhen, TermEvent, Terminal};
 pub use text::SearchMatch;

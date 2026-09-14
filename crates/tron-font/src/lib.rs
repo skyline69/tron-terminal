@@ -378,6 +378,12 @@ impl FontSystem {
 
     /// Shapes `text` with `face`. Clusters are byte offsets into `text`.
     pub fn shape(&mut self, face: u32, text: &str, out: &mut Vec<ShapedGlyph>) {
+        self.shape_directional(face, text, false, out);
+    }
+
+    /// Shapes `text` left to right, or right to left for `rtl`. Glyphs come out in
+    /// visual order (left to right on screen) either way.
+    pub fn shape_directional(&mut self, face: u32, text: &str, rtl: bool, out: &mut Vec<ShapedGlyph>) {
         out.clear();
         let size_px = self.size_px;
         let Face { blob, index, shaper, instance, variations, .. } = &mut self.faces[face as usize];
@@ -394,7 +400,7 @@ impl FontSystem {
         let shaper = data.shaper(&font).instance(Some(instance)).build();
         let mut buffer = self.buffer.take().unwrap_or_default();
         buffer.push_str(text);
-        buffer.set_direction(harfrust::Direction::LeftToRight);
+        buffer.set_direction(if rtl { harfrust::Direction::RightToLeft } else { harfrust::Direction::LeftToRight });
         buffer.guess_segment_properties();
         let glyphs = shaper.shape(buffer, harfrust::ShapeOptions::new().features(&self.features));
         let scale = size_px / shaper.units_per_em().max(1) as f32;
@@ -410,8 +416,20 @@ impl FontSystem {
 
     /// Draws a box drawing, block or Powerline character to fit the cell.
     pub fn sprite(&self, ch: char) -> Option<RasterizedGlyph> {
+        self.sprite_scaled(ch, 1.0, 1.0)
+    }
+
+    /// Draws a sprite for a cell stretched by `scale_x` and `scale_y`.
+    pub fn sprite_scaled(&self, ch: char, scale_x: f32, scale_y: f32) -> Option<RasterizedGlyph> {
         let m = self.metrics;
-        sprite::render(ch, m.width, m.height, m.baseline, m.underline_thickness)
+        let scaled = |v: u32, s: f32| ((v as f32 * s).round() as u32).max(1);
+        sprite::render(
+            ch,
+            scaled(m.width, scale_x),
+            scaled(m.height, scale_y),
+            scaled(m.baseline, scale_y),
+            scaled(m.underline_thickness, scale_y.min(scale_x)),
+        )
     }
 
     fn map(&self, face: u32, ch: char) -> Option<GlyphKey> {
@@ -470,11 +488,18 @@ impl FontSystem {
     }
 
     pub fn rasterize(&mut self, key: GlyphKey) -> Option<RasterizedGlyph> {
+        self.rasterize_scaled(key, 1.0, 1.0)
+    }
+
+    /// Rasterizes a glyph drawn `scale_y` times the font size and additionally
+    /// stretched horizontally so its width grows by `scale_x` (double width lines).
+    pub fn rasterize_scaled(&mut self, key: GlyphKey, scale_x: f32, scale_y: f32) -> Option<RasterizedGlyph> {
         let face = &self.faces[key.face as usize];
+        let size_px = self.size_px * scale_y;
         let mut scaler = self
             .scaler
             .builder(face.font_ref())
-            .size(self.size_px)
+            .size(size_px)
             .hint(self.hint)
             .variations(face.variations.iter().map(|(tag, value)| (swash::tag_from_bytes(tag), *value)))
             .build();
@@ -486,11 +511,17 @@ impl FontSystem {
         ]);
         render.format(Format::Alpha);
         if face.embolden {
-            render.embolden(self.size_px / 32.0);
+            render.embolden(size_px / 32.0);
         }
-        if let Some(degrees) = face.skew {
-            render.transform(Some(Transform::skew(Angle::from_degrees(degrees), Angle::ZERO)));
-        }
+        let stretch = scale_x / scale_y;
+        let skew = face.skew.map(|degrees| Transform::skew(Angle::from_degrees(degrees), Angle::ZERO));
+        let transform = match (skew, (stretch - 1.0).abs() > f32::EPSILON) {
+            (Some(skew), true) => Some(skew.then_scale(stretch, 1.0)),
+            (Some(skew), false) => Some(skew),
+            (None, true) => Some(Transform::scale(stretch, 1.0)),
+            (None, false) => None,
+        };
+        render.transform(transform);
         let image = render.render(&mut scaler, key.glyph)?;
         let format = match image.content {
             Content::Color => GlyphFormat::Color,
@@ -505,7 +536,7 @@ impl FontSystem {
             data: image.data,
         };
         // Bitmap emoji come in fixed large strikes. Fit them to the cell height.
-        let target = self.metrics.height;
+        let target = (self.metrics.height as f32 * scale_y).round() as u32;
         if format == GlyphFormat::Color && glyph.height > target && glyph.height > 0 {
             return Some(downscale(&glyph, target as f32 / glyph.height as f32));
         }
@@ -615,5 +646,20 @@ mod tests {
         assert_eq!(out.last().map(|g| g.cluster), Some(3));
         assert!(out.iter().all(|g| g.x_advance > 0.0));
         assert!(fonts.sprite('─').is_some());
+        let rtl_face = fonts.face_for('a', Style::Regular);
+        fonts.shape_directional(rtl_face, "ab", true, &mut out);
+        assert_eq!(out.first().map(|g| g.cluster), Some(1), "right to left glyphs come in visual order");
+    }
+
+    #[test]
+    fn scaled_glyphs_grow() {
+        let mut fonts = FontSystem::new("monospace", 12.0, 1.0).unwrap();
+        let key = fonts.glyph('M', Style::Regular).unwrap();
+        let normal = fonts.rasterize(key).unwrap();
+        let double = fonts.rasterize_scaled(key, 2.0, 2.0).unwrap();
+        let wide = fonts.rasterize_scaled(key, 2.0, 1.0).unwrap();
+        assert!(double.height >= normal.height * 2 - 2 && double.width >= normal.width * 2 - 2);
+        assert!(wide.width >= normal.width * 2 - 2 && wide.height.abs_diff(normal.height) <= 1);
+        assert_eq!(fonts.sprite_scaled('█', 2.0, 1.0).unwrap().width, fonts.metrics().width * 2);
     }
 }

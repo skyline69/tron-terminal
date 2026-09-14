@@ -1,5 +1,6 @@
 //! Terminal state: applies parsed escape sequences to the screen.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use bitflags::bitflags;
@@ -7,15 +8,21 @@ use unicode_width::UnicodeWidthChar;
 
 use base64::Engine;
 
-use crate::cell::{Cell, Color, Flags};
-use crate::graphics::{self, Graphics};
-use crate::grid::Grid;
+use crate::cell::{Cell, Color, Extended, ExtendedTable, Flags, TextSize};
+use crate::graphics::{self, Graphics, InlineImageArgs};
+use crate::grid::{Grid, LineSize};
 use crate::palette::{Palette, format_color_spec, parse_color_spec};
-use crate::parser::{MAX_PARAMS, Params, Perform};
+use crate::parser::{Groups, Params, Perform};
 use crate::selection::{Point, Selection, SelectionRange};
 
 /// How long synchronized output (mode 2026) may hold back rendering.
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
+/// Most shell prompts remembered for jumping between them.
+const MAX_COMMAND_MARKS: usize = 4096;
+/// Longest notification title or body kept, in bytes.
+const MAX_NOTIFICATION_TEXT: usize = 4096;
+/// Largest iTerm2 multipart image, base64 encoded.
+const MAX_INLINE_IMAGE: usize = 64 * 1024 * 1024;
 
 bitflags! {
     /// Terminal modes set through SM/RM and DECSET/DECRST.
@@ -42,6 +49,12 @@ bitflags! {
         const ALTERNATE_SCROLL = 1 << 18;
         /// Report dark/light color scheme changes (mode 2031).
         const COLOR_SCHEME_UPDATES = 1 << 19;
+        /// SGR mouse reports carry pixel positions instead of cells (mode 1016).
+        const MOUSE_SGR_PIXELS = 1 << 20;
+        /// Width is measured per grapheme cluster instead of per code point (mode 2027).
+        const GRAPHEME_CLUSTERS = 1 << 21;
+        /// DECCOLM (mode 3) may switch between 80 and 132 columns (mode 40).
+        const ALLOW_COLUMN_SWITCH = 1 << 22;
 
         const MOUSE_TRACKING = Self::MOUSE_X10.bits()
             | Self::MOUSE_NORMAL.bits()
@@ -106,6 +119,46 @@ pub enum TermEvent {
         primary: bool,
         terminator: &'static str,
     },
+    /// A desktop notification (OSC 9, OSC 777 or OSC 99).
+    Notification {
+        title: String,
+        body: String,
+        /// When the application wants it shown. `None` leaves it to the user's settings.
+        when: Option<NotifyWhen>,
+    },
+    /// DECCOLM switched the screen width. The window should resize to fit.
+    ColumnsChanged(usize),
+}
+
+/// When a notification should be shown (kitty's `o` key).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum NotifyWhen {
+    Always,
+    /// Only when the window does not have focus.
+    Unfocused,
+    /// Only when the window is not visible.
+    Invisible,
+}
+
+/// A shell prompt and the output of the command run from it, from OSC 133 marks.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CommandMark {
+    /// Absolute line where the prompt starts.
+    pub prompt: i64,
+    /// First line of output, once the command started.
+    pub output_start: Option<i64>,
+    /// Last line of output, once the command finished. Below `output_start`
+    /// when the command printed nothing.
+    pub output_end: Option<i64>,
+}
+
+/// A kitty notification (OSC 99) being received in chunks.
+#[derive(Default)]
+struct PendingNotification {
+    id: String,
+    title: String,
+    body: String,
+    when: Option<NotifyWhen>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
@@ -123,6 +176,11 @@ struct Cursor {
     pen: Cell,
     /// The last column was written. The next printable character wraps first.
     pending_wrap: bool,
+    underline_color: Color,
+    /// Current hyperlink id, 0 for none.
+    link: u16,
+    /// Extended attributes index for `link` with no other attributes.
+    link_extended: u16,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -170,12 +228,20 @@ pub struct Terminal {
     /// Absolute line where the shell's current prompt starts (OSC 133;A),
     /// cleared when a command runs (OSC 133;C or D).
     prompt_line: Option<i64>,
+    /// Prompts and command output on the primary screen, oldest first.
+    marks: VecDeque<CommandMark>,
+    notification: Option<PendingNotification>,
+    /// iTerm2 image arriving with `MultipartFile`, still base64 encoded.
+    multipart_image: Option<(InlineImageArgs, Vec<u8>)>,
+    /// Scaled text (OSC 66) was written, so writes must check for it.
+    multicell: bool,
     /// Kitty keyboard protocol flag stacks for the primary and alternate screen.
     keyboard: [Vec<u8>; 2],
     dcs: Option<DcsRequest>,
     links: Vec<Hyperlink>,
     link_ids: std::collections::HashMap<(Option<String>, String), u16>,
     title_stack: Vec<String>,
+    extended: ExtendedTable,
 }
 
 impl Terminal {
@@ -189,7 +255,7 @@ impl Terminal {
             saved: [None, None],
             scroll_top: 0,
             scroll_bottom: rows - 1,
-            modes: Modes::AUTOWRAP | Modes::CURSOR_VISIBLE | Modes::ALTERNATE_SCROLL,
+            modes: Modes::AUTOWRAP | Modes::CURSOR_VISIBLE | Modes::ALTERNATE_SCROLL | Modes::GRAPHEME_CLUSTERS,
             tabs: default_tabs(cols),
             charsets: [Charset::Ascii; 2],
             active_charset: 0,
@@ -213,11 +279,16 @@ impl Terminal {
             word_separators: ",│`|:\"'()[]{}<>".to_owned(),
             cwd: None,
             prompt_line: None,
+            marks: VecDeque::new(),
+            notification: None,
+            multipart_image: None,
+            multicell: false,
             keyboard: [Vec::new(), Vec::new()],
             dcs: None,
             links: Vec::new(),
             link_ids: std::collections::HashMap::new(),
             title_stack: Vec::new(),
+            extended: ExtendedTable::new(),
         }
     }
 
@@ -303,6 +374,9 @@ impl Terminal {
         snapshot.alt_screen = self.active == ALTERNATE;
         snapshot.palette = self.palette;
         snapshot.palette_generation = self.palette_generation;
+        let known = snapshot.extended.len().min(self.extended.entries().len());
+        snapshot.extended.truncate(known);
+        snapshot.extended.extend_from_slice(&self.extended.entries()[known..]);
         snapshot.selection = selection;
         snapshot.next_frame_due = self.graphics.tick(Instant::now());
         if snapshot.graphics_generation != self.graphics.generation() {
@@ -318,7 +392,13 @@ impl Terminal {
         self.keyboard[self.active].last().copied().unwrap_or(0)
     }
 
-    /// Target of hyperlink `id` from a cell's `link` field.
+    /// Extended attributes of a cell, from its `extended` index.
+    #[inline]
+    pub fn extended(&self, id: u16) -> &Extended {
+        self.extended.get(id)
+    }
+
+    /// Target of hyperlink `id` from [`Extended::link`].
     pub fn hyperlink(&self, id: u16) -> Option<&Hyperlink> {
         id.checked_sub(1).and_then(|i| self.links.get(usize::from(i)))
     }
@@ -328,9 +408,13 @@ impl Terminal {
         let grid = self.grid();
         let logical = crate::text::LogicalLine::at(grid, point.line)?;
         let row = grid.line(point.line)?;
-        let link = row.cells.get(point.col)?.link;
+        let link = self.extended.get(row.cells.get(point.col)?.extended).link;
         if let Some(target) = self.hyperlink(link) {
-            let same = |p: &Point| grid.line(p.line).and_then(|r| r.cells.get(p.col)).is_some_and(|c| c.link == link);
+            let same = |p: &Point| {
+                grid.line(p.line)
+                    .and_then(|r| r.cells.get(p.col))
+                    .is_some_and(|c| self.extended.get(c.extended).link == link)
+            };
             let index = logical.points.iter().position(|p| *p >= point)?;
             let mut first = index;
             while first > 0 && same(&logical.points[first - 1]) {
@@ -400,6 +484,217 @@ impl Terminal {
         let link = self.links.len() as u16;
         self.link_ids.insert(key, link);
         link
+    }
+
+    /// Shell integration marks (OSC 133): A prompt start, C command start, D command end.
+    fn shell_mark(&mut self, kind: Option<u8>) {
+        if self.active != PRIMARY {
+            return;
+        }
+        let line = self.grids[PRIMARY].screen_line(self.cursor.row);
+        match kind {
+            Some(b'A') => {
+                self.prompt_line = Some(line);
+                // A prompt redrawn in place, or after the screen was cleared, replaces later marks.
+                while self.marks.back().is_some_and(|m| m.prompt >= line) {
+                    self.marks.pop_back();
+                }
+                if self.marks.len() == MAX_COMMAND_MARKS {
+                    self.marks.pop_front();
+                }
+                self.marks.push_back(CommandMark { prompt: line, output_start: None, output_end: None });
+            }
+            Some(b'C') => {
+                self.prompt_line = None;
+                if let Some(mark) = self.marks.back_mut()
+                    && mark.output_start.is_none()
+                {
+                    mark.output_start = Some(line);
+                }
+            }
+            Some(b'D') => {
+                self.prompt_line = None;
+                if let Some(mark) = self.marks.back_mut()
+                    && let (Some(start), None) = (mark.output_start, mark.output_end)
+                {
+                    let end = if self.cursor.col == 0 { line - 1 } else { line };
+                    mark.output_end = Some(end.max(start - 1));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Prompts and command output marked by the shell, oldest first.
+    pub fn command_marks(&self) -> impl DoubleEndedIterator<Item = &CommandMark> {
+        self.marks.iter()
+    }
+
+    /// Scrolls the viewport so the previous or next prompt is at the top.
+    /// Past the last prompt, it scrolls to the bottom. Returns whether it scrolled.
+    pub fn scroll_to_prompt(&mut self, previous: bool) -> bool {
+        if self.active != PRIMARY {
+            return false;
+        }
+        let grid = &mut self.grids[PRIMARY];
+        let (top, oldest) = (grid.viewport_line(0), grid.oldest_line());
+        let mut prompts = self.marks.iter().map(|m| m.prompt).filter(|&line| line >= oldest);
+        let target = if previous { prompts.rfind(|&line| line < top) } else { prompts.find(|&line| line > top) };
+        match target {
+            Some(line) => grid.scroll_to_top(line),
+            None if !previous => grid.reset_display_offset(),
+            None => return false,
+        }
+        true
+    }
+
+    /// First and last cell of a command's output: the command whose output
+    /// includes `line`, or with `None` the latest command that printed something.
+    pub fn command_output(&self, line: Option<i64>) -> Option<(Point, Point)> {
+        if self.active != PRIMARY {
+            return None;
+        }
+        let grid = &self.grids[PRIMARY];
+        let cursor_line = grid.screen_line(self.cursor.row);
+        let running_end = if self.cursor.col == 0 { cursor_line - 1 } else { cursor_line };
+        let range = |mark: &CommandMark| {
+            let start = mark.output_start?.max(grid.oldest_line());
+            let end = mark.output_end.unwrap_or(running_end);
+            (end >= start).then_some((start, end))
+        };
+        let (start, end) = match line {
+            Some(line) => self.marks.iter().rev().filter_map(range).find(|&(s, e)| (s..=e).contains(&line))?,
+            None => self.marks.iter().rev().filter(|m| m.output_end.is_some()).find_map(range)?,
+        };
+        Some((Point::new(start, 0), Point::new(end, grid.cols() - 1)))
+    }
+
+    fn notify(&mut self, title: String, body: String, when: Option<NotifyWhen>) {
+        let clean = |text: String| {
+            let mut text: String = text.chars().filter(|c| !c.is_control()).collect();
+            if text.len() > MAX_NOTIFICATION_TEXT {
+                let end = (0..=MAX_NOTIFICATION_TEXT).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+                text.truncate(end);
+            }
+            text
+        };
+        let (title, body) = (clean(title), clean(body));
+        if title.is_empty() && body.is_empty() {
+            return;
+        }
+        // A notification needs a title; a lone body becomes the title.
+        let (title, body) = if title.is_empty() { (body, String::new()) } else { (title, body) };
+        self.events.push(TermEvent::Notification { title, body, when });
+    }
+
+    /// Kitty desktop notifications: <https://sw.kovidgoyal.net/kitty/desktop-notifications/>
+    fn kitty_notification(&mut self, metadata: &[u8], payload: &[u8], terminator: &str) {
+        let mut id = String::new();
+        let mut done = true;
+        let mut kind: &[u8] = b"title";
+        let mut encoded = false;
+        let mut when = None;
+        for pair in metadata.split(|&b| b == b':') {
+            let [key, b'=', value @ ..] = pair else { continue };
+            match key {
+                b'i' => {
+                    id = value
+                        .iter()
+                        .filter(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'+' | b'.'))
+                        .map(|&b| char::from(b))
+                        .take(64)
+                        .collect();
+                }
+                b'd' => done = value != b"0",
+                b'p' => kind = value,
+                b'e' => encoded = value == b"1",
+                b'o' => {
+                    when = match value {
+                        b"always" => Some(NotifyWhen::Always),
+                        b"unfocused" => Some(NotifyWhen::Unfocused),
+                        b"invisible" => Some(NotifyWhen::Invisible),
+                        _ => None,
+                    }
+                }
+                _ => {}
+            }
+        }
+        if kind == b"?" {
+            let reply = format!("\x1b]99;i={id}:p=?;p=title,body:o=always,unfocused,invisible{terminator}");
+            self.respond(reply.as_bytes());
+            return;
+        }
+        let text = if encoded {
+            match base64::engine::general_purpose::STANDARD.decode(payload) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(_) => return,
+            }
+        } else {
+            String::from_utf8_lossy(payload).into_owned()
+        };
+        let pending = match &mut self.notification {
+            Some(pending) if pending.id == id => pending,
+            slot => slot.insert(PendingNotification { id, ..PendingNotification::default() }),
+        };
+        if when.is_some() {
+            pending.when = when;
+        }
+        let target = match kind {
+            b"title" => &mut pending.title,
+            b"body" => &mut pending.body,
+            _ => return,
+        };
+        if target.len() + text.len() <= MAX_NOTIFICATION_TEXT {
+            target.push_str(&text);
+        }
+        if done && let Some(pending) = self.notification.take() {
+            self.notify(pending.title, pending.body, pending.when);
+        }
+    }
+
+    /// iTerm2 inline images: `File=args:data`, or `MultipartFile=args`, `FilePart=data`... `FileEnd`.
+    fn iterm2(&mut self, command: &[u8]) {
+        if let Some(rest) = command.strip_prefix(b"File=") {
+            if let Some(colon) = memchr::memchr(b':', rest) {
+                self.inline_image(&InlineImageArgs::parse(&rest[..colon]), &rest[colon + 1..]);
+            }
+        } else if let Some(args) = command.strip_prefix(b"MultipartFile=") {
+            self.multipart_image = Some((InlineImageArgs::parse(args), Vec::new()));
+        } else if let Some(part) = command.strip_prefix(b"FilePart=") {
+            if let Some((_, data)) = &mut self.multipart_image {
+                if data.len() + part.len() > MAX_INLINE_IMAGE {
+                    self.multipart_image = None;
+                } else {
+                    data.extend_from_slice(part);
+                }
+            }
+        } else if command == b"FileEnd"
+            && let Some((args, data)) = self.multipart_image.take()
+        {
+            self.inline_image(&args, &data);
+        }
+    }
+
+    fn inline_image(&mut self, args: &InlineImageArgs, encoded: &[u8]) {
+        if !args.inline {
+            return;
+        }
+        let Ok(data) = graphics::BASE64.decode(encoded) else {
+            log::debug!("inline image: bad base64");
+            return;
+        };
+        let ctx = self.graphics_context();
+        match self.graphics.add_inline_image(&data, args, &ctx) {
+            // Like kitty: the cursor ends on the image's last row, after its right edge.
+            Ok((cols, rows)) => {
+                for _ in 1..rows {
+                    self.linefeed();
+                }
+                self.cursor.col = (self.cursor.col + cols as usize).min(self.cols() - 1);
+                self.cursor.pending_wrap = false;
+            }
+            Err(error) => log::debug!("inline image: {error}"),
+        }
     }
 
     fn decrqss(&mut self, request: &[u8]) {
@@ -598,6 +893,8 @@ impl Terminal {
             if index == self.active {
                 if let (Some((prompt_row, below)), PRIMARY) = (prompt, index) {
                     let (mut row, _) = self.grids[index].resize(cols, rows, (prompt_row, 0), reflow);
+                    // The cursor stays below the prompt start, as far as the new height allows.
+                    let below = below.min(rows - 1);
                     let excess = (row + below).saturating_sub(rows - 1);
                     if excess > 0 {
                         self.grids[index].scroll_up(0, rows - 1, excess, Cell::BLANK, true);
@@ -618,18 +915,48 @@ impl Terminal {
                 }
             }
         }
-        // Reflow renumbers lines: keep images and the prompt mark with their text.
-        if let Some(map) = self.grids[PRIMARY].take_line_map() {
+        // Reflow renumbers lines: keep images, marks and the selection with their text.
+        let line_map = self.grids[PRIMARY].take_line_map();
+        if let Some(map) = &line_map {
             self.graphics.remap_lines(|line| map.map(line));
             if prompt.is_none() {
                 self.prompt_line = self.prompt_line.and_then(|line| map.map(line));
             }
+            self.marks.retain_mut(|mark| {
+                let Some(prompt) = map.map(mark.prompt) else { return false };
+                mark.prompt = prompt;
+                mark.output_start = mark.output_start.and_then(|line| map.map(line));
+                mark.output_end = mark.output_end.and_then(|line| map.map(line));
+                true
+            });
+        }
+        if prompt.is_some()
+            && let (Some(line), Some(mark)) = (self.prompt_line, self.marks.back_mut())
+            && mark.output_start.is_none()
+        {
+            mark.prompt = line;
         }
         for saved in self.saved.iter_mut().flatten() {
             saved.cursor.col = saved.cursor.col.min(cols - 1);
             saved.cursor.row = saved.cursor.row.min(rows - 1);
         }
-        self.selection = None;
+        self.selection = match self.selection.take() {
+            Some(mut selection) if self.active == PRIMARY => {
+                let map_point = |point: Point| match &line_map {
+                    Some(map) => map.map_point(point.line, point.col).map(|(line, col)| Point::new(line, col)),
+                    None => Some(Point::new(point.line, point.col.min(cols - 1))),
+                };
+                match (map_point(selection.anchor), map_point(selection.head)) {
+                    (Some(anchor), Some(head)) => {
+                        selection.anchor = anchor;
+                        selection.head = head;
+                        Some(selection)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
         self.cursor.pending_wrap = false;
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
@@ -662,8 +989,25 @@ impl Terminal {
             (0, self.rows() - 1)
         };
         self.cursor.row = (min + row).min(max);
-        self.cursor.col = col.min(self.cols() - 1);
+        self.cursor.col = col.min(self.line_cols(self.cursor.row) - 1);
         self.cursor.pending_wrap = false;
+    }
+
+    /// Columns usable on screen row `row`: half the screen on double size lines.
+    #[inline]
+    fn line_cols(&self, row: usize) -> usize {
+        let grid = &self.grids[self.active];
+        match grid.row(row).line_size {
+            LineSize::Single => grid.cols(),
+            _ => (grid.cols() / 2).max(1),
+        }
+    }
+
+    fn clamp_cursor_to_line(&mut self) {
+        let cols = self.line_cols(self.cursor.row);
+        if self.cursor.col >= cols {
+            self.cursor.col = cols - 1;
+        }
     }
 
     fn move_up(&mut self, n: usize) {
@@ -679,7 +1023,7 @@ impl Terminal {
     }
 
     fn move_right(&mut self, n: usize) {
-        self.cursor.col = (self.cursor.col + n).min(self.cols() - 1);
+        self.cursor.col = (self.cursor.col + n).min(self.line_cols(self.cursor.row) - 1);
         self.cursor.pending_wrap = false;
     }
 
@@ -689,7 +1033,7 @@ impl Terminal {
     }
 
     fn tab_forward(&mut self, n: usize) {
-        let cols = self.cols();
+        let cols = self.line_cols(self.cursor.row);
         for _ in 0..n {
             let next = (self.cursor.col + 1..cols).find(|&c| self.tabs[c]);
             self.cursor.col = next.unwrap_or(cols - 1);
@@ -741,6 +1085,11 @@ impl Terminal {
         grid.scroll_up(self.scroll_top, self.scroll_bottom, n, blank, save);
         let oldest = grid.oldest_line();
         self.graphics.prune(oldest, self.active == ALTERNATE);
+        if save && !self.marks.is_empty() {
+            while self.marks.front().is_some_and(|m| m.prompt.max(m.output_end.unwrap_or(m.prompt)) < oldest) {
+                self.marks.pop_front();
+            }
+        }
     }
 
     fn scroll_down(&mut self, n: usize) {
@@ -798,7 +1147,8 @@ impl Terminal {
     /// Whether a printable character continues the previous cluster: after a
     /// zero width joiner, or as the second regional indicator of a flag.
     fn joins_cluster(&self, c: char) -> bool {
-        self.last_cluster.is_some()
+        self.modes.contains(Modes::GRAPHEME_CLUSTERS)
+            && self.last_cluster.is_some()
             && ((self.last_was_zwj && !c.is_ascii()) || (is_regional_indicator(c) && self.pending_regional_indicator()))
     }
 
@@ -825,6 +1175,7 @@ impl Terminal {
         }
         let line = self.grids[self.active].row_mut(row);
         let widen = (c == '\u{FE0F}' || is_regional_indicator(c))
+            && self.modes.contains(Modes::GRAPHEME_CLUSTERS)
             && !line.cells[col].flags.contains(Flags::WIDE)
             && col + 1 < cols;
         line.push_combining(col, c);
@@ -851,14 +1202,18 @@ impl Terminal {
     }
 
     fn write_char(&mut self, c: char, width: usize) {
-        let cols = self.cols();
-        if width > cols {
+        if width > self.cols() {
             return;
         }
         let autowrap = self.modes.contains(Modes::AUTOWRAP);
         if self.cursor.pending_wrap && autowrap {
             self.wrap();
         }
+        let cols = self.line_cols(self.cursor.row);
+        if width > cols {
+            return;
+        }
+        self.clamp_cursor_to_line();
         if width == 2 && self.cursor.col + 1 >= cols {
             if autowrap {
                 let (row, col) = (self.cursor.row, self.cursor.col);
@@ -875,6 +1230,9 @@ impl Terminal {
         let (row, col) = (self.cursor.row, self.cursor.col);
         if self.modes.contains(Modes::INSERT) {
             self.insert_blanks(width);
+        }
+        if self.multicell {
+            self.clear_multicells(row, col, width);
         }
 
         let pen = self.cursor.pen;
@@ -895,6 +1253,147 @@ impl Terminal {
             self.cursor.pending_wrap = true;
         } else {
             self.cursor.col = col + width;
+            self.cursor.pending_wrap = false;
+        }
+    }
+
+    /// Clears scaled text blocks (OSC 66) that overlap `width` cells at `row`, `col`.
+    fn clear_multicells(&mut self, row: usize, col: usize, width: usize) {
+        let grid = &self.grids[self.active];
+        let (rows, cols) = (grid.rows(), grid.cols());
+        let blocks: Vec<(usize, usize, TextSize)> = (col..(col + width).min(cols))
+            .filter_map(|x| {
+                let size = self.extended.get(grid.row(row).cells[x].extended).size?;
+                Some((row.checked_sub(usize::from(size.dy))?, x.checked_sub(usize::from(size.dx))?, size))
+            })
+            .collect();
+        for (top, left, size) in blocks {
+            let (block_cols, block_rows) = size.cells();
+            for y in top..(top + block_rows).min(rows) {
+                let line = self.grids[self.active].row_mut(y);
+                for x in left..(left + block_cols).min(cols) {
+                    let cell = &mut line.cells[x];
+                    let extended = *self.extended.get(cell.extended);
+                    if extended.size.is_some() {
+                        cell.extended = self.extended.intern(Extended { size: None, ..extended });
+                        cell.ch = '\0';
+                        cell.flags.remove(Flags::CONTENT_MASK);
+                    }
+                }
+                line.touch(left, left + 1);
+            }
+        }
+    }
+
+    /// Kitty text sizing: <https://sw.kovidgoyal.net/kitty/text-sizing-protocol/>
+    fn text_sizing(&mut self, metadata: &[u8], text: &[u8]) {
+        let mut size =
+            TextSize { scale: 1, width: 0, numerator: 0, denominator: 0, vertical: 0, horizontal: 0, dx: 0, dy: 0 };
+        for pair in metadata.split(|&b| b == b':') {
+            let [key, b'=', value @ ..] = pair else { continue };
+            let Some(number) = parse_number(value) else { continue };
+            match key {
+                b's' => size.scale = number.clamp(1, 7) as u8,
+                b'w' => size.width = number.min(7) as u8,
+                b'n' => size.numerator = number.min(15) as u8,
+                b'd' => size.denominator = number.min(15) as u8,
+                b'v' => size.vertical = number.min(2) as u8,
+                b'h' => size.horizontal = number.min(2) as u8,
+                _ => {}
+            }
+        }
+        let text = String::from_utf8_lossy(&text[..text.len().min(4096)]);
+        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        let fractional = size.numerator > 0 && size.denominator > size.numerator;
+        if size.scale == 1 && size.width == 0 && !fractional {
+            for c in text.chars() {
+                self.print(c);
+            }
+            return;
+        }
+        if size.width > 0 {
+            self.write_multicell(&text, size);
+            return;
+        }
+        // Without a width, every grapheme gets its own block, as wide as the grapheme.
+        let mut clusters: Vec<(String, u8)> = Vec::new();
+        let mut after_joiner = false;
+        for c in text.chars() {
+            let width = char_width(c).unwrap_or(0) as u8;
+            let flag_pair = is_regional_indicator(c)
+                && clusters.last().is_some_and(|(s, _)| s.chars().count() == 1 && s.starts_with(is_regional_indicator));
+            match clusters.last_mut() {
+                Some((cluster, cluster_width)) if after_joiner || width == 0 || flag_pair => {
+                    cluster.push(c);
+                    if c == '\u{FE0F}' || flag_pair {
+                        *cluster_width = 2;
+                    }
+                }
+                _ => clusters.push((c.to_string(), width.max(1))),
+            }
+            after_joiner = c == '\u{200D}';
+        }
+        for (cluster, width) in clusters {
+            self.write_multicell(&cluster, TextSize { width, ..size });
+        }
+    }
+
+    /// Writes `text` into one block of `size.scale * size.width` columns and `size.scale` rows.
+    fn write_multicell(&mut self, text: &str, size: TextSize) {
+        let mut chars = text.chars();
+        let Some(first) = chars.next() else { return };
+        let (block_cols, block_rows) = size.cells();
+        let (rows, cols) = (self.rows(), self.cols());
+        let (top, bottom) = if self.in_scroll_region() { (self.scroll_top, self.scroll_bottom) } else { (0, rows - 1) };
+        if block_cols > cols || block_rows > bottom + 1 - top {
+            return;
+        }
+        let autowrap = self.modes.contains(Modes::AUTOWRAP);
+        if self.cursor.pending_wrap && autowrap {
+            self.wrap();
+        }
+        if self.cursor.col + block_cols > cols {
+            if autowrap {
+                self.wrap();
+            } else {
+                self.cursor.col = cols - block_cols;
+            }
+        }
+        let overflow = (self.cursor.row + block_rows).saturating_sub(bottom + 1);
+        if overflow > 0 {
+            self.scroll_up(overflow);
+            self.cursor.row -= overflow;
+        }
+        let (row, col) = (self.cursor.row, self.cursor.col);
+        self.multicell = true;
+        let pen = self.cursor.pen;
+        let attributes = *self.extended.get(pen.extended);
+        for dy in 0..block_rows {
+            self.clear_multicells(row + dy, col, block_cols);
+            for dx in 0..block_cols {
+                let part = TextSize { dx: dx as u8, dy: dy as u8, ..size };
+                let extended = self.extended.intern(Extended { size: Some(part), ..attributes });
+                let line = self.grids[self.active].row_mut(row + dy);
+                repair_wide(line, col + dx, 1);
+                line.touch(col + dx, col + dx + 1);
+                line.cells[col + dx] = if (dx, dy) == (0, 0) {
+                    Cell { ch: first, extended, ..pen }
+                } else {
+                    Cell { ch: '\0', flags: pen.flags | Flags::WIDE_SPACER, extended, ..pen }
+                };
+            }
+        }
+        let line = self.grids[self.active].row_mut(row);
+        for c in chars {
+            line.push_combining(col, c);
+        }
+        self.last_cluster = None;
+        self.last_char = None;
+        if col + block_cols >= cols {
+            self.cursor.col = cols - 1;
+            self.cursor.pending_wrap = true;
+        } else {
+            self.cursor.col = col + block_cols;
             self.cursor.pending_wrap = false;
         }
     }
@@ -925,18 +1424,18 @@ impl Terminal {
             0 => {
                 grid.erase(row, col..cols, blank);
                 for r in row + 1..rows {
-                    grid.erase(r, 0..cols, blank);
+                    grid.erase_row(r, blank);
                 }
             }
             1 => {
                 for r in 0..row {
-                    grid.erase(r, 0..cols, blank);
+                    grid.erase_row(r, blank);
                 }
                 grid.erase(row, 0..col + 1, blank);
             }
             2 => {
                 for r in 0..rows {
-                    grid.erase(r, 0..cols, blank);
+                    grid.erase_row(r, blank);
                 }
                 let top = grid.screen_line(0);
                 self.graphics.clear_screen(top, rows, self.active == ALTERNATE);
@@ -1046,7 +1545,10 @@ impl Terminal {
         let generation = self.palette_generation + 1;
         let cell_pixels = self.cell_pixels;
         let separators = std::mem::take(&mut self.word_separators);
+        // Snapshots keep a copy of the table, so indexes must stay valid.
+        let extended = std::mem::take(&mut self.extended);
         *self = Self::new(self.cols(), self.rows(), self.max_scrollback);
+        self.extended = extended;
         self.default_cursor_shape = shape;
         self.cursor_shape = shape;
         self.title = title;
@@ -1070,9 +1572,16 @@ impl Terminal {
     fn set_dec_mode(&mut self, mode: u16, on: bool) {
         match mode {
             1 => self.modes.set(Modes::APP_CURSOR, on),
-            // DECCOLM: the window keeps its width, but like xterm the screen is
-            // cleared, margins reset and the cursor homed.
+            // DECCOLM: with mode 40 the screen switches to 132 or 80 columns and
+            // the application is asked to resize the window. Either way, like
+            // xterm, the screen is cleared, margins reset and the cursor homed.
             3 => {
+                let cols = if on { 132 } else { 80 };
+                if self.modes.contains(Modes::ALLOW_COLUMN_SWITCH) && cols != self.cols() {
+                    let rows = self.rows();
+                    self.resize(cols, rows);
+                    self.events.push(TermEvent::ColumnsChanged(cols));
+                }
                 self.erase_display(2);
                 self.scroll_top = 0;
                 self.scroll_bottom = self.rows() - 1;
@@ -1101,6 +1610,9 @@ impl Terminal {
             }
             1004 => self.modes.set(Modes::FOCUS_EVENTS, on),
             1006 => self.modes.set(Modes::MOUSE_SGR, on),
+            1016 => self.modes.set(Modes::MOUSE_SGR_PIXELS, on),
+            2027 => self.modes.set(Modes::GRAPHEME_CLUSTERS, on),
+            40 => self.modes.set(Modes::ALLOW_COLUMN_SWITCH, on),
             1007 => self.modes.set(Modes::ALTERNATE_SCROLL, on),
             47 | 1047 => self.switch_screen(on, mode == 1047 && on),
             1048 => {
@@ -1131,6 +1643,7 @@ impl Terminal {
 
     fn dec_mode_state(&self, mode: u16) -> Option<bool> {
         let flag = match mode {
+            3 => return Some(self.cols() == 132),
             1 => Modes::APP_CURSOR,
             5 => Modes::REVERSE_VIDEO,
             6 => Modes::ORIGIN,
@@ -1143,7 +1656,10 @@ impl Terminal {
             1003 => Modes::MOUSE_ANY,
             1004 => Modes::FOCUS_EVENTS,
             1006 => Modes::MOUSE_SGR,
+            1016 => Modes::MOUSE_SGR_PIXELS,
             1007 => Modes::ALTERNATE_SCROLL,
+            2027 => Modes::GRAPHEME_CLUSTERS,
+            40 => Modes::ALLOW_COLUMN_SWITCH,
             47 | 1047 | 1049 => Modes::ALT_SCREEN,
             2004 => Modes::BRACKETED_PASTE,
             2026 => Modes::SYNC_OUTPUT,
@@ -1154,25 +1670,23 @@ impl Terminal {
     }
 
     fn sgr(&mut self, params: &Params) {
+        let plain = self.cursor.link_extended;
+        let mut underline_color = self.cursor.underline_color;
+        let mut extended_changed = false;
         let pen = &mut self.cursor.pen;
-        let link = pen.link;
         if params.is_empty() {
-            *pen = Cell { link, ..Cell::BLANK };
+            *pen = Cell { extended: plain, ..Cell::BLANK };
+            self.cursor.underline_color = Color::DEFAULT;
             return;
         }
-        let mut groups: [&[u16]; MAX_PARAMS] = [&[]; MAX_PARAMS];
-        let mut count = 0;
-        for group in params.groups() {
-            groups[count] = group;
-            count += 1;
-        }
-        let groups = &groups[..count];
-
-        let mut i = 0;
-        while i < groups.len() {
-            let group = groups[i];
+        let mut groups = params.groups();
+        while let Some(group) = groups.next() {
             match group[0] {
-                0 => *pen = Cell { link, ..Cell::BLANK },
+                0 => {
+                    *pen = Cell { extended: plain, ..Cell::BLANK };
+                    underline_color = Color::DEFAULT;
+                    extended_changed = true;
+                }
                 1 => pen.flags.insert(Flags::BOLD),
                 2 => pen.flags.insert(Flags::DIM),
                 3 => pen.flags.insert(Flags::ITALIC),
@@ -1204,13 +1718,15 @@ impl Terminal {
                 29 => pen.flags.remove(Flags::STRIKETHROUGH),
                 n @ 30..=37 => pen.fg = Color::indexed((n - 30) as u8),
                 38 | 48 | 58 => {
-                    if let Some((color, used)) = extended_color(group, &groups[i + 1..]) {
+                    if let Some(color) = extended_color(group, &mut groups) {
                         match group[0] {
                             38 => pen.fg = color,
                             48 => pen.bg = color,
-                            _ => pen.underline_color = color,
+                            _ => {
+                                underline_color = color;
+                                extended_changed = true;
+                            }
                         }
-                        i += used;
                     }
                 }
                 39 => pen.fg = Color::DEFAULT,
@@ -1218,13 +1734,34 @@ impl Terminal {
                 49 => pen.bg = Color::DEFAULT,
                 53 => pen.flags.insert(Flags::OVERLINE),
                 55 => pen.flags.remove(Flags::OVERLINE),
-                59 => pen.underline_color = Color::DEFAULT,
+                59 => {
+                    underline_color = Color::DEFAULT;
+                    extended_changed = true;
+                }
                 n @ 90..=97 => pen.fg = Color::indexed((n - 90 + 8) as u8),
                 n @ 100..=107 => pen.bg = Color::indexed((n - 100 + 8) as u8),
                 n => log::debug!("unhandled SGR {n}"),
             }
-            i += 1;
         }
+        if extended_changed {
+            self.cursor.underline_color = underline_color;
+            if underline_color.is_default() {
+                self.cursor.pen.extended = plain;
+            } else {
+                self.update_pen_extended();
+            }
+        }
+    }
+
+    /// Recomputes the pen's extended attributes index after its link or underline color changed.
+    fn update_pen_extended(&mut self) {
+        let cursor = &mut self.cursor;
+        cursor.link_extended = self.extended.intern(Extended { link: cursor.link, ..Extended::DEFAULT });
+        cursor.pen.extended = if cursor.underline_color.is_default() {
+            cursor.link_extended
+        } else {
+            self.extended.intern(Extended { underline_color: cursor.underline_color, link: cursor.link, size: None })
+        };
     }
 
     fn respond(&mut self, bytes: &[u8]) {
@@ -1232,13 +1769,13 @@ impl Terminal {
     }
 }
 
-/// Parses `38;5;n`, `38;2;r;g;b` and their colon forms.
-/// Returns the color and how many following groups were consumed.
-fn extended_color(group: &[u16], rest: &[&[u16]]) -> Option<(Color, usize)> {
+/// Parses `38;5;n`, `38;2;r;g;b` and their colon forms. The semicolon forms
+/// take their values from the following groups, which are consumed on success.
+fn extended_color(group: &[u16], rest: &mut Groups<'_>) -> Option<Color> {
     let byte = |v: u16| v.min(255) as u8;
     if group.len() > 1 {
         return match group[1] {
-            5 => group.get(2).map(|&n| (Color::indexed(byte(n)), 0)),
+            5 => group.get(2).map(|&n| Color::indexed(byte(n))),
             2 => {
                 let values = &group[2..];
                 let rgb = match values.len() {
@@ -1246,20 +1783,45 @@ fn extended_color(group: &[u16], rest: &[&[u16]]) -> Option<(Color, usize)> {
                     n if n >= 4 => &values[1..4],
                     _ => return None,
                 };
-                Some((Color::rgb(byte(rgb[0]), byte(rgb[1]), byte(rgb[2])), 0))
+                Some(Color::rgb(byte(rgb[0]), byte(rgb[1]), byte(rgb[2])))
             }
             _ => None,
         };
     }
-    match rest.first().map(|g| g[0]) {
-        Some(5) => rest.get(1).map(|g| (Color::indexed(byte(g[0])), 2)),
-        Some(2) if rest.len() >= 4 => Some((Color::rgb(byte(rest[1][0]), byte(rest[2][0]), byte(rest[3][0])), 4)),
-        _ => None,
-    }
+    let mut ahead = rest.clone();
+    let color = match ahead.next()?[0] {
+        5 => Color::indexed(byte(ahead.next()?[0])),
+        2 => {
+            let (r, g, b) = (ahead.next()?[0], ahead.next()?[0], ahead.next()?[0]);
+            Color::rgb(byte(r), byte(g), byte(b))
+        }
+        _ => return None,
+    };
+    *rest = ahead;
+    Some(color)
 }
 
 fn default_tabs(cols: usize) -> Vec<bool> {
     (0..cols).map(|c| c % 8 == 0).collect()
+}
+
+/// Writes one cell per byte: a copy of `pen` holding that ASCII character.
+#[inline]
+fn fill_ascii(cells: &mut [Cell], bytes: &[u8], pen: Cell) {
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: `Cell` is `repr(C)`, 16 bytes without padding, and starts with
+        // `ch`, so as a little endian `u128` the character is in the low 32 bits.
+        let template = unsafe { std::mem::transmute::<Cell, u128>(Cell { ch: '\0', ..pen }) };
+        for (cell, &b) in cells.iter_mut().zip(bytes) {
+            // SAFETY: the same layout, with an ASCII byte as the character.
+            *cell = unsafe { std::mem::transmute::<u128, Cell>(template | u128::from(b)) };
+        }
+    }
+    #[cfg(not(target_endian = "little"))]
+    for (cell, &b) in cells.iter_mut().zip(bytes) {
+        *cell = Cell { ch: b as char, ..pen };
+    }
 }
 
 /// Clears the other half of wide characters cut by writing `width` cells at `col`.
@@ -1281,7 +1843,7 @@ fn repair_wide(line: &mut crate::grid::Row, col: usize, width: usize) {
 }
 
 /// Display width with fast paths for the most common ranges.
-#[inline]
+#[inline(always)]
 fn char_width(c: char) -> Option<usize> {
     match u32::from(c) {
         0x20..=0x7e | 0xa0..=0x2ff => Some(1),
@@ -1336,7 +1898,7 @@ fn is_regional_indicator(c: char) -> bool {
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
         let c = self.translate(c);
-        let Some(width) = c.width() else { return };
+        let Some(width) = char_width(c) else { return };
         if width == 0 || self.joins_cluster(c) {
             self.append_to_cluster(c);
             return;
@@ -1360,6 +1922,12 @@ impl Perform for Terminal {
                 self.wrap();
             }
             let (row, col) = (self.cursor.row, self.cursor.col);
+            if self.grids[self.active].row(row).line_size != LineSize::Single {
+                for &b in rest {
+                    self.print(char::from(b));
+                }
+                return;
+            }
             let chunk = if self.cursor.pending_wrap {
                 // No auto-wrap: everything lands on the last column, the last byte wins.
                 let last = &rest[rest.len() - 1..];
@@ -1373,13 +1941,14 @@ impl Perform for Terminal {
             };
             let n = chunk.len();
             let end = col + n;
+            if self.multicell {
+                self.clear_multicells(row, col, n);
+            }
             let pen = self.cursor.pen;
             let line = self.grids[self.active].row_mut(row);
             repair_wide(line, col, n);
             line.touch(col, end);
-            for (cell, &b) in line.cells[col..col + n].iter_mut().zip(chunk) {
-                *cell = Cell { ch: b as char, ..pen };
-            }
+            fill_ascii(&mut line.cells[col..end], chunk, pen);
             self.last_cluster = Some((row, col + n - 1));
             if col + n >= cols {
                 self.cursor.col = cols - 1;
@@ -1407,7 +1976,12 @@ impl Perform for Terminal {
             // Fast segment: write characters straight into the current row until
             // something needs the general path (wrapping, clusters, overwriting
             // wide characters or graphemes).
-            if autowrap && !self.cursor.pending_wrap && !(self.last_was_zwj && self.last_cluster.is_some()) {
+            if autowrap
+                && !self.cursor.pending_wrap
+                && !(self.last_was_zwj && self.last_cluster.is_some())
+                && !self.multicell
+                && self.grids[self.active].row(self.cursor.row).line_size == LineSize::Single
+            {
                 let (row, start) = (self.cursor.row, self.cursor.col);
                 let pen = self.cursor.pen;
                 let line = self.grids[self.active].row_mut(row);
@@ -1518,7 +2092,7 @@ impl Perform for Terminal {
                 self.cursor.col = 0;
             }
             ([], b'G' | b'`') => {
-                self.cursor.col = (n(0) - 1).min(self.cols() - 1);
+                self.cursor.col = (n(0) - 1).min(self.line_cols(self.cursor.row) - 1);
                 self.cursor.pending_wrap = false;
             }
             ([], b'H' | b'f') => self.goto(n(0) - 1, n(1) - 1),
@@ -1707,11 +2281,21 @@ impl Perform for Terminal {
             ([], b'7') => self.save_cursor(),
             ([], b'8') => self.restore_cursor(),
             ([b'#'], b'8') => {
-                let (rows, cols) = (self.rows(), self.cols());
+                let rows = self.rows();
                 let fill = Cell { ch: 'E', ..Cell::BLANK };
                 for r in 0..rows {
-                    self.grids[self.active].erase(r, 0..cols, fill);
+                    self.grids[self.active].erase_row(r, fill);
                 }
+            }
+            ([b'#'], size @ (b'3' | b'4' | b'5' | b'6')) => {
+                let row = self.cursor.row;
+                self.grids[self.active].row_mut(row).line_size = match size {
+                    b'3' => LineSize::DoubleHeightTop,
+                    b'4' => LineSize::DoubleHeightBottom,
+                    b'6' => LineSize::DoubleWidth,
+                    _ => LineSize::Single,
+                };
+                self.clamp_cursor_to_line();
             }
             ([], b'D') => self.linefeed(),
             ([], b'E') => {
@@ -1807,23 +2391,31 @@ impl Perform for Terminal {
             [b"8", link_params, uri @ ..] => {
                 let uri = uri.join(&b';');
                 if uri.is_empty() || uri.len() > 4096 {
-                    self.cursor.pen.link = 0;
+                    self.cursor.link = 0;
                 } else {
                     let id = link_params
                         .split(|&b| b == b':')
                         .find_map(|p| p.strip_prefix(b"id="))
                         .map(|id| String::from_utf8_lossy(id).into_owned());
                     let uri = String::from_utf8_lossy(&uri).into_owned();
-                    self.cursor.pen.link = self.intern_link(id, uri);
+                    self.cursor.link = self.intern_link(id, uri);
                 }
+                self.update_pen_extended();
             }
-            [b"133", kind, ..] => match kind.first() {
-                Some(b'A') if self.active == PRIMARY => {
-                    self.prompt_line = Some(self.grids[PRIMARY].screen_line(self.cursor.row));
-                }
-                Some(b'C' | b'D') => self.prompt_line = None,
-                _ => {}
-            },
+            [b"133", kind, ..] => self.shell_mark(kind.first().copied()),
+            // `OSC 9 ; 4 ; ...` is ConEmu's progress report, not a notification.
+            [b"9", rest @ ..] if rest.first() != Some(&&b"4"[..]) => {
+                let body = String::from_utf8_lossy(&rest.join(&b';')).into_owned();
+                self.notify(String::new(), body, None);
+            }
+            [b"777", b"notify", title, body @ ..] => {
+                let title = String::from_utf8_lossy(title).into_owned();
+                let body = String::from_utf8_lossy(&body.join(&b';')).into_owned();
+                self.notify(title, body, None);
+            }
+            [b"99", metadata, payload @ ..] => self.kitty_notification(metadata, &payload.join(&b';'), terminator),
+            [b"1337", rest @ ..] => self.iterm2(&rest.join(&b';')),
+            [b"66", metadata, text @ ..] => self.text_sizing(metadata, &text.join(&b';')),
             [b"7", uri, ..] => {
                 let uri = String::from_utf8_lossy(uri);
                 let path = uri
@@ -1912,6 +2504,27 @@ mod tests {
             r.push_cell_text(col, &mut out);
         }
         out.trim_end().to_string()
+    }
+
+    #[test]
+    fn fast_width_ranges_match_unicode_width() {
+        // The soft hyphen takes a cell, as in glibc's wcwidth and other terminals.
+        let mismatches: Vec<String> = (0..0x1_0000u32)
+            .filter_map(char::from_u32)
+            .filter(|&c| c != '\u{AD}' && char_width(c) != c.width())
+            .map(|c| format!("U+{:04X}", u32::from(c)))
+            .collect();
+        assert!(mismatches.is_empty(), "{mismatches:?}");
+    }
+
+    #[test]
+    fn sgr_semicolon_colors_consume_their_values() {
+        let t = term(10, 1, b"\x1b[38;5;196;1;48;2;1;2;3;4mX\x1b[38;5mY");
+        let row = t.grid().row(0);
+        assert_eq!(row.cells[0].fg.kind(), ColorKind::Indexed(196));
+        assert_eq!(row.cells[0].bg.kind(), ColorKind::Rgb(1, 2, 3));
+        assert!(row.cells[0].flags.contains(Flags::BOLD | Flags::UNDERLINE));
+        assert!(row.cells[1].flags.contains(Flags::BLINK));
     }
 
     #[test]
@@ -2166,6 +2779,81 @@ mod tests {
         }
     }
 
+    /// Random mixes of the newer sequences, resizes and selections must never panic.
+    #[test]
+    fn random_sequences_and_resizes_do_not_panic() {
+        const PIECES: &[&str] = &[
+            "text ",
+            "中文",
+            "\u{5D0}\u{5D1}",
+            "e\u{301}",
+            "👨\u{200D}👩",
+            "\r\n",
+            "\x1b[H",
+            "\x1b[5;30H",
+            "\x1b[2J",
+            "\x1b[K",
+            "\x1b[3L",
+            "\x1b[2M",
+            "\x1b[4@",
+            "\x1b[3P",
+            "\x1b[2;4r",
+            "\x1b[r",
+            "\x1b#3",
+            "\x1b#4",
+            "\x1b#6",
+            "\x1b#8",
+            "\x1b]66;s=3;Big\x07",
+            "\x1b]66;s=7:w=7;x\x07",
+            "\x1b]66;n=1:d=2:w=1;half\x07",
+            "\x1b]133;A\x07$ \x1b]133;B\x07",
+            "\x1b]133;C\x07",
+            "\x1b]133;D\x07",
+            "\x1b]99;i=1:d=0;t\x1b\\",
+            "\x1b]1337;File=inline=1:iVBORw0KGgo=\x07",
+            "\x1b[?40h\x1b[?3h",
+            "\x1b[?3l",
+            "\x1b[?2027l",
+            "\x1b[?1049h",
+            "\x1b[?1049l",
+            "\x1bc",
+        ];
+        let mut seed: u64 = 0x1234_5678_9abc_def1;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..200 {
+            let mut t = Terminal::new(10 + (next() % 30) as usize, 3 + (next() % 8) as usize, 20);
+            let mut parser = Parser::new();
+            for _ in 0..80 {
+                match next() % 12 {
+                    0 => t.resize(1 + (next() % 40) as usize, 1 + (next() % 12) as usize),
+                    1 => {
+                        let (rows, cols) = (t.rows(), t.cols());
+                        let start = t.viewport_point((next() % rows as u64) as usize, (next() % cols as u64) as usize);
+                        let end = t.viewport_point(rows - 1, cols - 1);
+                        t.set_selection(Some(Selection {
+                            kind: crate::SelectionKind::Simple,
+                            anchor: start,
+                            head: end,
+                        }));
+                        let _ = t.selection_text();
+                    }
+                    2 => {
+                        t.scroll_to_prompt(next() % 2 == 0);
+                        let _ = t.command_output(None);
+                    }
+                    _ => parser.advance(&mut t, PIECES[(next() % PIECES.len() as u64) as usize].as_bytes()),
+                }
+                let mut snapshot = crate::Snapshot::default();
+                t.snapshot(&mut snapshot);
+            }
+        }
+    }
+
     /// Mimics how fish 4 repaints its prompt after SIGWINCH: carriage return,
     /// a cursor up when its last paint ended with a newline, then the prompt,
     /// truncated with an ellipsis when it does not fit.
@@ -2242,6 +2930,149 @@ mod tests {
     }
 
     #[test]
+    fn command_marks_jump_between_prompts_and_select_output() {
+        let mut t = Terminal::new(20, 4, 100);
+        let mut parser = Parser::new();
+        for command in ["one", "two", "three"] {
+            let bytes =
+                format!("\x1b]133;A\x07$ \x1b]133;B\x07{command}\r\n\x1b]133;C\x07out {command}\r\n\x1b]133;D\x07");
+            parser.advance(&mut t, bytes.as_bytes());
+        }
+        parser.advance(&mut t, b"\x1b]133;A\x07$ ");
+        assert_eq!(t.command_marks().count(), 4);
+        let (start, end) = t.command_output(None).unwrap();
+        // Prompts are on lines 0, 2, 4 and 6, output on 1, 3 and 5.
+        assert_eq!((start.line, end.line), (5, 5));
+        t.set_selection(Some(Selection { kind: crate::SelectionKind::Simple, anchor: start, head: end }));
+        assert_eq!(t.selection_text().unwrap(), "out three");
+        assert_eq!(t.grid().viewport_line(0), 3);
+        assert!(t.scroll_to_prompt(true));
+        assert_eq!(t.grid().viewport_line(0), 2);
+        assert!(t.scroll_to_prompt(true));
+        assert_eq!(t.grid().viewport_line(0), 0);
+        assert!(!t.scroll_to_prompt(true));
+        assert_eq!(t.command_output(Some(3)).map(|(s, _)| s.line), Some(3));
+        assert!(t.scroll_to_prompt(false));
+        assert_eq!(t.grid().viewport_line(0), 2);
+    }
+
+    #[test]
+    fn notifications_from_osc_9_777_and_99() {
+        let mut t = term(
+            10,
+            2,
+            b"\x1b]9;build done\x07\x1b]9;4;1;50\x07\x1b]777;notify;Title;Body\x07\
+              \x1b]99;i=a:d=0;Hello\x1b\\\x1b]99;i=a:p=body:e=1:o=unfocused;V29ybGQ=\x1b\\\x1b]99;i=q:p=?;\x1b\\",
+        );
+        assert_eq!(
+            t.take_events(),
+            vec![
+                TermEvent::Notification { title: "build done".into(), body: String::new(), when: None },
+                TermEvent::Notification { title: "Title".into(), body: "Body".into(), when: None },
+                TermEvent::Notification {
+                    title: "Hello".into(),
+                    body: "World".into(),
+                    when: Some(NotifyWhen::Unfocused)
+                },
+            ]
+        );
+        let reply = String::from_utf8(t.take_responses().unwrap()).unwrap();
+        assert!(reply.starts_with("\x1b]99;i=q:p=?;p=title,body"), "{reply:?}");
+    }
+
+    #[test]
+    fn iterm2_inline_image_is_placed() {
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 30, 40);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.write_header().unwrap().write_image_data(&[9; 30 * 40 * 3]).unwrap();
+        }
+        let data = base64::engine::general_purpose::STANDARD.encode(&png);
+        let mut t = Terminal::new(20, 10, 100);
+        t.set_cell_pixels(10, 20);
+        let (head, tail) = data.split_at(data.len() / 2);
+        let input = format!(
+            "ab\x1b]1337;File=inline=1:{data}\x07\r\n\x1b]1337;MultipartFile=inline=1;width=1\x07\
+             \x1b]1337;FilePart={head}\x07\x1b]1337;FilePart={tail}\x07\x1b]1337;FileEnd\x07"
+        );
+        Parser::new().advance(&mut t, input.as_bytes());
+        let placements = t.graphics().placements();
+        assert_eq!(placements.len(), 2);
+        assert_eq!((placements[0].line, placements[0].col, placements[0].cols, placements[0].rows), (0, 2, 3, 2));
+        assert_eq!(placements[0].pixel_size, Some([30, 40]));
+        assert_eq!(placements[1].pixel_size, Some([10, 13]));
+        assert_eq!((t.cursor().row, t.cursor().col), (2, 1));
+    }
+
+    #[test]
+    fn double_width_lines_halve_the_columns() {
+        let mut t = term(20, 4, b"\x1b#6abcdefghijkl\x1b[1;20H");
+        assert_eq!(t.grid().row(0).line_size, LineSize::DoubleWidth);
+        assert_eq!(line(&t, 0), "abcdefghij");
+        assert_eq!(line(&t, 1), "kl");
+        assert_eq!(t.cursor().col, 9);
+        Parser::new().advance(&mut t, b"\x1b[2;1H\x1b#3\x1b[H\x1b[2J");
+        assert!((0..4).all(|row| t.grid().row(row).line_size == LineSize::Single));
+    }
+
+    #[test]
+    fn text_sizing_writes_scaled_blocks() {
+        let mut t = term(20, 5, b"\x1b]66;s=2;AB\x07");
+        let size = |t: &Terminal, row: usize, col: usize| t.extended(t.grid().row(row).cells[col].extended).size;
+        assert_eq!(t.grid().row(0).cells[0].ch, 'A');
+        assert_eq!(size(&t, 0, 0).map(|s| (s.scale, s.width, s.dx, s.dy)), Some((2, 1, 0, 0)));
+        assert_eq!(size(&t, 1, 1).map(|s| (s.dx, s.dy)), Some((1, 1)));
+        assert_eq!(t.grid().row(0).cells[2].ch, 'B');
+        assert_eq!((t.cursor().row, t.cursor().col), (0, 4));
+        // Writing over part of a block clears the whole block.
+        Parser::new().advance(&mut t, b"\x1b[2;2Hx");
+        assert_eq!(t.grid().row(0).cells[0].ch, '\0');
+        assert!(size(&t, 1, 0).is_none());
+        assert_eq!(t.grid().row(1).cells[1].ch, 'x');
+        // A two row block on the last row scrolls the screen by one first.
+        Parser::new().advance(&mut t, b"\x1b[5;1H\x1b]66;s=2:w=3;hello\x07");
+        assert_eq!(t.grid().row(0).cells[1].ch, 'x');
+        let mut text = String::new();
+        t.grid().row(3).push_cell_text(0, &mut text);
+        assert_eq!(text, "hello");
+        assert_eq!(size(&t, 4, 5).map(|s| (s.dx, s.dy)), Some((5, 1)));
+        assert_eq!((t.cursor().row, t.cursor().col), (3, 6));
+    }
+
+    #[test]
+    fn grapheme_cluster_mode_can_be_turned_off() {
+        let t = term(10, 1, "\x1b[?2027l👨\u{200D}👩❤\u{FE0F}a".as_bytes());
+        let row = t.grid().row(0);
+        assert!(row.cells[0].flags.contains(Flags::WIDE));
+        assert!(row.cells[2].flags.contains(Flags::WIDE));
+        assert_eq!(row.cells[4].ch, '❤');
+        assert_eq!(row.cells[5].ch, 'a');
+    }
+
+    #[test]
+    fn column_mode_switch_resizes_when_allowed() {
+        let mut t = term(80, 5, b"\x1b[?3h");
+        assert_eq!(t.cols(), 80);
+        Parser::new().advance(&mut t, b"\x1b[?40h\x1b[?3h\x1b[?3$p");
+        assert_eq!(t.cols(), 132);
+        assert!(t.take_events().contains(&TermEvent::ColumnsChanged(132)));
+        assert!(t.take_responses().unwrap().ends_with(b"\x1b[?3;1$y"));
+    }
+
+    #[test]
+    fn selection_follows_text_through_reflow() {
+        let mut t = term(5, 4, b"hello world\r\nnext");
+        let word = t.viewport_point(1, 2);
+        t.set_selection(Some(Selection::new(crate::SelectionKind::Word, word)));
+        assert_eq!(t.selection_text().unwrap(), "world");
+        t.resize(20, 4);
+        assert_eq!(t.selection_text().unwrap(), "world");
+        t.resize(3, 4);
+        assert_eq!(t.selection_text().unwrap(), "world");
+    }
+
+    #[test]
     fn kitty_keyboard_flag_stack() {
         let mut t = term(10, 2, b"\x1b[>1u\x1b[>5u\x1b[?u\x1b[=1;3u\x1b[?u\x1b[<u\x1b[?u\x1b[<5u\x1b[?u");
         assert_eq!(t.take_responses().unwrap(), b"\x1b[?5u\x1b[?4u\x1b[?1u\x1b[?0u");
@@ -2265,10 +3096,10 @@ mod tests {
     fn osc8_hyperlinks_survive_sgr_reset() {
         let t = term(20, 2, b"\x1b]8;id=a;https://tron.dev\x1b\\li\x1b[0mnk\x1b]8;;\x1b\\ x");
         let row = t.grid().row(0);
-        let link = row.cells[0].link;
+        let link = t.extended(row.cells[0].extended).link;
         assert_ne!(link, 0);
-        assert_eq!(row.cells[3].link, link);
-        assert_eq!(row.cells[5].link, 0);
+        assert_eq!(t.extended(row.cells[3].extended).link, link);
+        assert_eq!(t.extended(row.cells[5].extended).link, 0);
         assert_eq!(t.hyperlink(link).unwrap().uri, "https://tron.dev");
         let found = t.link_at(t.viewport_point(0, 2)).unwrap();
         assert_eq!((found.start.col, found.end.col, found.uri.as_str()), (0, 3, "https://tron.dev"));

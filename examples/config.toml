@@ -27,6 +27,8 @@ ligatures = true
 # variations = { wght = 450, wdth = 90 }
 # Outline hinting: auto (on below 1.5x scale), on or off.
 hinting = "auto"
+# Reorder rows with right-to-left text (Arabic, Hebrew) for display.
+bidi = true
 
 [window]
 title = "tron"
@@ -105,14 +107,25 @@ mode = "attention"
 # Program that opens links clicked with Ctrl.
 open_command = "xdg-open"
 
+[notifications]
+# Desktop notifications from applications (OSC 9, 99 and 777): never,
+# unfocused (only while the window has no focus) or always.
+mode = "unfocused"
+# Run as: command --app-name tron -- title body
+command = "notify-send"
+
 # Key combination = action. Entries override the defaults, "none" removes one.
 # Actions: copy, paste, paste_selection, increase_font_size, decrease_font_size,
 # reset_font_size, scroll_line_up, scroll_line_down, scroll_page_up,
-# scroll_page_down, scroll_to_top, scroll_to_bottom, clear_scrollback, search,
-# new_window, reload_config, text:<text to send>, none.
+# scroll_page_down, scroll_to_top, scroll_to_bottom, clear_scrollback,
+# scroll_to_previous_prompt, scroll_to_next_prompt, select_command_output,
+# copy_command_output, search, new_window, reload_config, text:<text to send>, none.
 [keybindings]
 # "ctrl+shift+c" = "copy"
 # "ctrl+shift+v" = "paste"
 # "ctrl+shift+f" = "search"
+# "ctrl+shift+z" = "scroll_to_previous_prompt"
+# "ctrl+shift+x" = "scroll_to_next_prompt"
+# "ctrl+shift+g" = "select_command_output"
 # "ctrl+shift+n" = "new_window"
 # "alt+enter" = "none"
