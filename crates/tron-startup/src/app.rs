@@ -275,6 +275,10 @@ impl App {
 
     /// Carries out a command. `content` is the tab content area, for effects.
     fn apply(&mut self, command: Command, content: Rect) {
+        // A dialog blocks everything else, including the mouse wheel.
+        if self.dialog.is_some() && !matches!(command, Command::Dialog(_) | Command::None) {
+            return;
+        }
         match command {
             Command::None => {}
             Command::Select(tab) => self.select(tab, content),
@@ -507,9 +511,16 @@ impl App {
         }
     }
 
+    /// What is under the pointer. While a dialog is open, only its buttons count,
+    /// so nothing behind it reacts.
     fn target_at(&self, column: u16, row: u16) -> Option<Target> {
         let point = ratatui::layout::Position::new(column, row);
-        self.hits.iter().find(|(area, _)| area.contains(point)).map(|(_, target)| *target)
+        let dialog_open = self.dialog.is_some();
+        self.hits
+            .iter()
+            .filter(|(_, target)| !dialog_open || matches!(target, Target::DialogButton(_)))
+            .find(|(area, _)| area.contains(point))
+            .map(|(_, target)| *target)
     }
 
     fn on_click(&self, column: u16, row: u16) -> Command {
@@ -630,7 +641,7 @@ impl App {
             let label = format!(" {} {} ", index + 1, tab.title());
             let width = label.chars().count() as u16;
             let style = if tab == self.tab {
-                Style::new().fg(CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                Style::new().fg(CYAN).add_modifier(Modifier::BOLD)
             } else if self.hover == Some(Target::Tab(tab)) {
                 Style::new().fg(TEXT).add_modifier(Modifier::BOLD)
             } else {
@@ -722,7 +733,9 @@ impl App {
             };
             let line = Line::from(vec![
                 Span::styled(if selected { "› " } else { "  " }, Style::new().fg(CYAN)),
-                Span::styled(format!("{:<26}", setting.label), label_style),
+                // Padding in its own span, so a hover underline covers only the label.
+                Span::styled(setting.label, label_style),
+                Span::raw(" ".repeat(26usize.saturating_sub(setting.label.chars().count()))),
                 Span::styled(value_text, value_style),
                 Span::styled(if changed { "  ●" } else { "" }, Style::new().fg(MAGENTA)),
             ]);
@@ -1263,6 +1276,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let paths = tron_config::Paths::with_dirs(dir.clone(), dir.join("data"));
         let mut app = App::new(true, Catalog::for_paths(Some(paths.clone())), &[]);
+        app.apply(Command::Select(Tab::Settings), Rect::default());
         let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
         app.apply(app.on_key(ctrl_s), Rect::default());
         assert_eq!(app.dialog, None, "nothing to save");
@@ -1274,7 +1288,14 @@ mod tests {
         assert_eq!(app.dialog, Some(Dialog::Save));
         let text = screen(&mut app);
         assert!(text.contains("Save changes") && text.contains("tron  →  nord"), "{text}");
-        app.apply(app.on_key(key(KeyCode::Enter)), Rect::default());
+        // The buttons sit over list rows; clicking one must reach the dialog, not the row.
+        let (button, _) = *app.hits.iter().find(|(_, t)| *t == Target::DialogButton(DialogButton::Save)).unwrap();
+        assert!(app.hits.iter().any(|(area, t)| matches!(t, Target::Item(_)) && area.intersects(button)));
+        app.on_move(button.x, button.y);
+        assert_eq!(app.hover, Some(Target::DialogButton(DialogButton::Save)));
+        app.apply(Command::Move(1), Rect::default());
+        assert!(app.dialog.is_some(), "the wheel does not reach the list");
+        app.apply(app.on_click(button.x, button.y), Rect::default());
         assert!(app.commit_pending && app.dialog.is_none());
         assert_eq!(tron_config::Config::load(&paths).unwrap().theme.as_deref(), Some("nord"));
         assert_eq!(app.on_key(key(KeyCode::Esc)), Command::StartTerminal, "saved, so no question");
