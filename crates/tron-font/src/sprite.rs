@@ -1,7 +1,9 @@
-//! Box drawing, block element and Powerline glyphs drawn from geometry.
+//! Box drawing, block element, Powerline, arrow and triangle glyphs drawn from geometry.
 //!
 //! Font glyphs for these characters rarely line up with cell edges, which leaves
-//! gaps in TUI borders. Drawing them per cell size makes them seamless.
+//! gaps in TUI borders. Drawing them per cell size makes them seamless. Arrows
+//! often come from a fallback font with a different weight and baseline, so they
+//! are drawn too, centered in the cell with a stroke that matches the cell size.
 
 use crate::{GlyphFormat, RasterizedGlyph};
 
@@ -27,7 +29,7 @@ const HALF_LINES: [&str; 12] =
     ["0001", "1000", "0100", "0010", "0002", "2000", "0200", "0020", "0201", "1020", "0102", "2010"];
 
 pub fn is_sprite(c: char) -> bool {
-    matches!(u32::from(c), 0x2500..=0x259F | 0xE0B0..=0xE0B4 | 0xE0B6)
+    matches!(u32::from(c), 0x2190..=0x2195 | 0x2500..=0x259F | 0x25B2 | 0x25B6 | 0x25BC | 0x25C0 | 0xE0B0..=0xE0B4 | 0xE0B6)
 }
 
 /// Draws `c` into a `width` x `height` mask. `thickness` is the light stroke width.
@@ -52,6 +54,8 @@ pub fn render(c: char, width: u32, height: u32, baseline: u32, thickness: u32) -
         0x2571..=0x2573 => canvas.diagonal(cp, light),
         0x2580..=0x259F => canvas.block(cp),
         0xE0B0..=0xE0B4 | 0xE0B6 => canvas.powerline(cp, light),
+        0x2190..=0x2195 => canvas.arrow(cp, light),
+        0x25B2 | 0x25B6 | 0x25BC | 0x25C0 => canvas.triangle(cp),
         _ => return None,
     }
     Some(RasterizedGlyph {
@@ -251,6 +255,60 @@ impl Canvas {
         }
     }
 
+    /// ← ↑ → ↓ ↔ ↕: a shaft with filled heads, centered in the cell.
+    fn arrow(&mut self, cp: u32, light: i32) {
+        let (w, h) = (self.width as f32, self.height as f32);
+        // Heavier than a box drawing line, so arrows read at the weight of text,
+        // and aligned to whole pixels so the shaft stays crisp.
+        let stroke = light.max((w / 6.0).round() as i32).max(2);
+        let half_stroke = stroke as f32 / 2.0;
+        let pixel_center = |size: f32| (size / 2.0).floor() + if stroke % 2 == 1 { 0.5 } else { 0.0 };
+        let (cx, cy) = (pixel_center(w), pixel_center(h));
+        let horizontal = matches!(cp, 0x2190 | 0x2192 | 0x2194);
+        let double = matches!(cp, 0x2194 | 0x2195);
+        // Cells are about twice as tall as wide: vertical arrows use the height.
+        let length = if horizontal { w * 0.92 } else { (h * 0.62).min(w * 1.6) };
+        let head = w * if double { 0.36 } else { 0.46 };
+        let spread = w * 0.38;
+        let (start_head, end_head) = match cp {
+            0x2190 | 0x2191 => (true, false),
+            0x2192 | 0x2193 => (false, true),
+            _ => (true, true),
+        };
+        self.sample(|x, y| {
+            // Position along the arrow (0 at its start) and across it.
+            let (along, across) =
+                if horizontal { (x - (cx - length / 2.0), y - cy) } else { (y - (cy - length / 2.0), x - cx) };
+            if !(0.0..=length).contains(&along) {
+                return false;
+            }
+            // A head is a point at the tip, `distance` 0, widening toward the shaft.
+            let in_head = |distance: f32| distance <= head && across.abs() <= spread * (distance / head);
+            let shaft_start = if start_head { head * 0.7 } else { 0.0 };
+            let shaft_end = if end_head { length - head * 0.7 } else { length };
+            (along >= shaft_start && along <= shaft_end && across.abs() <= half_stroke)
+                || (start_head && in_head(along))
+                || (end_head && in_head(length - along))
+        });
+    }
+
+    /// ▲ ▶ ▼ ◀: filled triangles, centered in the cell.
+    fn triangle(&mut self, cp: u32) {
+        let (w, h) = (self.width as f32, self.height as f32);
+        let size = w * 0.8;
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        self.sample(|x, y| {
+            // Distance from the base toward the tip, and across.
+            let (along, across) = match cp {
+                0x25B2 => (cy + size / 2.0 - y, x - cx),
+                0x25BC => (y - (cy - size / 2.0), x - cx),
+                0x25B6 => (x - (cx - size / 2.0), y - cy),
+                _ => (cx + size / 2.0 - x, y - cy),
+            };
+            (0.0..=size).contains(&along) && across.abs() <= (size / 2.0) * (1.0 - along / size)
+        });
+    }
+
     fn powerline(&mut self, cp: u32, light: i32) {
         let (w, h) = (self.width as f32, self.height as f32);
         let half = light as f32 / 2.0;
@@ -305,8 +363,29 @@ mod tests {
     }
 
     #[test]
+    fn arrows_are_centered_and_mirror_each_other() {
+        let (left, right) = (coverage('←'), coverage('→'));
+        let mirrored: Vec<u8> = right.chunks(10).flat_map(|row| row.iter().rev().copied()).collect();
+        assert_eq!(left, mirrored);
+        let up = coverage('↑');
+        let flipped: Vec<u8> = coverage('↓').chunks(10).rev().flatten().copied().collect();
+        assert_eq!(up, flipped);
+        // The shaft is two full pixel rows through the middle, not a blurred hairline.
+        assert_eq!((right[9 * 10 + 3], right[10 * 10 + 3], right[8 * 10 + 3]), (255, 255, 0));
+        assert_eq!(right[2 * 10 + 5], 0, "nothing near the top");
+        // The head narrows toward the tip on the right.
+        let column = |x: usize| (0..20).filter(|y| right[y * 10 + x] > 0).count();
+        assert!(column(8) < column(6), "tip {} base {}", column(8), column(6));
+    }
+
+    #[test]
     fn every_sprite_renders() {
-        for cp in (0x2500..=0x259F).chain(0xE0B0..=0xE0B4).chain([0xE0B6]) {
+        for cp in (0x2500..=0x259F)
+            .chain(0xE0B0..=0xE0B4)
+            .chain([0xE0B6])
+            .chain(0x2190..=0x2195)
+            .chain([0x25B2, 0x25B6, 0x25BC, 0x25C0])
+        {
             let c = char::from_u32(cp).unwrap();
             assert!(is_sprite(c));
             let glyph = render(c, 9, 19, 14, 1).unwrap();
