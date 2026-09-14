@@ -38,12 +38,32 @@ impl Picker {
 
     /// Scrolls so the selection is visible in `height` rows. Returns the first visible row.
     pub fn scroll(&mut self, height: usize) -> usize {
-        if self.selected < self.offset {
-            self.offset = self.selected;
-        } else if height > 0 && self.selected >= self.offset + height {
-            self.offset = self.selected + 1 - height;
+        self.scroll_position(self.selected, height, usize::MAX)
+    }
+
+    /// Scrolls so row `position` of a `len` row list is visible in `height` rows.
+    fn scroll_position(&mut self, position: usize, height: usize, len: usize) -> usize {
+        if position < self.offset {
+            self.offset = position;
+        } else if height > 0 && position >= self.offset + height {
+            self.offset = position + 1 - height;
         }
+        // A list that got shorter, such as after filtering, leaves no empty rows at the bottom.
+        self.offset = self.offset.min(len.saturating_sub(height));
         self.offset
+    }
+
+    /// Moves the selection among the `visible` indices, clamped. Selects the first
+    /// visible one when the selection is hidden. Returns whether it changed.
+    pub fn move_within(&mut self, delta: isize, visible: &[usize]) -> bool {
+        let Some(last) = visible.len().checked_sub(1) else { return false };
+        let target = match visible.iter().position(|&index| index == self.selected) {
+            Some(position) => (position as isize).saturating_add(delta).clamp(0, last as isize) as usize,
+            None => 0,
+        };
+        let changed = visible[target] != self.selected;
+        self.selected = visible[target];
+        changed
     }
 }
 
@@ -68,10 +88,29 @@ pub fn draw_list(
     hover: Option<usize>,
     focused: bool,
 ) -> Vec<(Rect, usize)> {
+    let all: Vec<usize> = (0..items.len()).collect();
+    draw_filtered(frame, area, items, &all, picker, hover, focused)
+}
+
+/// Draws the `visible` rows of a list, such as the matches of a search, and
+/// returns the screen area of every drawn row, by index into `items`.
+pub fn draw_filtered(
+    frame: &mut Frame,
+    area: Rect,
+    items: &[Item<'_>],
+    visible: &[usize],
+    picker: &mut Picker,
+    hover: Option<usize>,
+    focused: bool,
+) -> Vec<(Rect, usize)> {
     let height = usize::from(area.height);
-    picker.scroll(height);
+    let position = visible.iter().position(|&index| index == picker.selected).unwrap_or(0);
+    picker.scroll_position(position, height, visible.len());
     let mut rows = Vec::new();
-    for (row, index) in (picker.offset..items.len()).take(height).enumerate() {
+    if visible.is_empty() {
+        frame.render_widget(Paragraph::new(Line::styled("  No matches", Style::new().fg(DIM))), area);
+    }
+    for (row, &index) in visible.iter().skip(picker.offset).take(height).enumerate() {
         let item = &items[index];
         let selected = index == picker.selected;
         let marker = match (item.check, item.chosen) {
@@ -102,7 +141,7 @@ pub fn draw_list(
     if picker.offset > 0 {
         frame.render_widget(Paragraph::new(Line::styled("↑", arrow)).right_aligned(), Rect { height: 1, ..area });
     }
-    if picker.offset + height < items.len() {
+    if picker.offset + height < visible.len() {
         let bottom = Rect { y: area.bottom().saturating_sub(1), height: 1, ..area };
         frame.render_widget(Paragraph::new(Line::styled("↓", arrow)).right_aligned(), bottom);
     }
@@ -261,5 +300,18 @@ mod tests {
     fn ordinals() {
         assert_eq!(ordinal(2), "2nd");
         assert_eq!(ordinal(12), "12th");
+    }
+
+    #[test]
+    fn moving_within_a_filter_skips_hidden_rows() {
+        let mut picker = Picker::new(4);
+        let visible = [1, 5, 9];
+        assert!(picker.move_within(1, &visible), "a hidden selection jumps to the first match");
+        assert_eq!(picker.selected, 1);
+        picker.move_within(10, &visible);
+        assert_eq!(picker.selected, 9);
+        assert!(!picker.move_within(1, &[]));
+        picker.offset = 40;
+        assert_eq!(picker.scroll_position(2, 10, 3), 0, "a short list scrolls back to the top");
     }
 }

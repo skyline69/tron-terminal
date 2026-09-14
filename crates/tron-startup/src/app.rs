@@ -89,8 +89,10 @@ struct Areas {
 impl Areas {
     fn new(screen: Rect) -> Self {
         let screen = screen.inner(Margin::new(2, 1));
-        let [header, tabs, _, content, status] = Layout::vertical([
+        // A blank row between the logo and the tabs, and one between the tabs and the content.
+        let [header, _, tabs, _, content, status] = Layout::vertical([
             Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Fill(1),
@@ -162,6 +164,39 @@ enum Command {
     Dialog(DialogButton),
     /// Leave the startup screen and start the shell.
     StartTerminal,
+    /// Start typing a search for the list on this tab.
+    SearchOpen,
+    SearchType(char),
+    SearchBackspace,
+    /// Stop typing and keep the filter.
+    SearchDone,
+    /// Close the search and show the whole list.
+    SearchClear,
+    /// Take back the last change to the choices.
+    Undo,
+    Redo,
+}
+
+/// A search over the list on the current tab.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Search {
+    query: String,
+    /// Keys type into the query.
+    editing: bool,
+}
+
+/// Changes kept for undo.
+const UNDO_LIMIT: usize = 100;
+
+/// Tabs with lists long enough to search.
+fn searchable(tab: Tab) -> bool {
+    matches!(tab, Tab::Themes | Tab::Shaders | Tab::Credits)
+}
+
+/// Whether every word of `query` appears in one of `fields`, ignoring case.
+fn matches_query(query: &str, fields: &[&str]) -> bool {
+    let fields: Vec<String> = fields.iter().map(|field| field.to_lowercase()).collect();
+    query.to_lowercase().split_whitespace().all(|word| fields.iter().any(|field| field.contains(word)))
 }
 
 pub struct App {
@@ -210,6 +245,10 @@ pub struct App {
     last_screen: Rect,
     credits: Vec<credits::Credit>,
     credits_picker: Picker,
+    search: Option<Search>,
+    /// Earlier choices, most recent last, and choices taken back by undo.
+    undo: Vec<Choices>,
+    redo: Vec<Choices>,
     /// A painted tour page to blank before the next frame.
     tour_erase: Option<Rect>,
     tour_painted: bool,
@@ -243,6 +282,9 @@ impl App {
             last_screen: Rect::default(),
             credits: credits::all(),
             credits_picker: Picker::default(),
+            search: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
             tour_erase: None,
             tour_painted: false,
             tour_link: None,
@@ -282,6 +324,7 @@ impl App {
         if tab == self.tab {
             return;
         }
+        self.search = None;
         let lists = [Tab::Themes, Tab::Shaders];
         let preview_changes = lists.contains(&tab) || lists.contains(&self.tab);
         if tab == Tab::Tour || self.tab == Tab::Tour {
@@ -320,7 +363,21 @@ impl App {
     }
 
     /// Carries out a command. `content` is the tab content area, for effects.
+    /// Carries out `command`. Changes to the choices can be undone.
     fn apply(&mut self, command: Command, content: Rect) {
+        let before = self.choices.clone();
+        let history = matches!(command, Command::Undo | Command::Redo);
+        self.run_command(command, content);
+        if !history && self.choices != before {
+            self.undo.push(before);
+            if self.undo.len() > UNDO_LIMIT {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+    }
+
+    fn run_command(&mut self, command: Command, content: Rect) {
         // A dialog blocks everything else, including the mouse wheel.
         if self.dialog.is_some() && !matches!(command, Command::Dialog(_) | Command::None) {
             return;
@@ -341,10 +398,17 @@ impl App {
                         }
                         false
                     }
-                    Tab::Themes => self.themes.move_by(delta, self.catalog.themes.len()),
-                    Tab::Shaders => self.shaders.move_by(delta, self.catalog.shaders.len()),
+                    Tab::Themes => {
+                        let visible = self.visible(Tab::Themes);
+                        self.themes.move_within(delta, &visible)
+                    }
+                    Tab::Shaders => {
+                        let visible = self.visible(Tab::Shaders);
+                        self.shaders.move_within(delta, &visible)
+                    }
                     Tab::Credits => {
-                        self.credits_picker.move_by(delta, self.credits.len());
+                        let visible = self.visible(Tab::Credits);
+                        self.credits_picker.move_within(delta, &visible);
                         false
                     }
                     _ => false,
@@ -360,14 +424,14 @@ impl App {
             }
             Command::Pick(index) if self.tab == Tab::Credits => {
                 if self.credits_picker.selected == index {
-                    self.apply(Command::Activate, content);
+                    self.run_command(Command::Activate, content);
                 } else {
                     self.credits_picker.set(index, self.credits.len());
                 }
             }
             Command::Pick(index) if self.tab == Tab::Settings => {
                 if self.settings_picker.selected == index {
-                    self.apply(Command::Change(1), content);
+                    self.run_command(Command::Change(1), content);
                 } else {
                     self.settings_picker.set(index, self.settings.len());
                 }
@@ -404,7 +468,7 @@ impl App {
             Command::Pick(index) => {
                 let picker = if self.tab == Tab::Themes { &mut self.themes } else { &mut self.shaders };
                 if picker.selected == index {
-                    self.apply(Command::Activate, content);
+                    self.run_command(Command::Activate, content);
                 } else {
                     let len =
                         if self.tab == Tab::Themes { self.catalog.themes.len() } else { self.catalog.shaders.len() };
@@ -426,6 +490,30 @@ impl App {
                 }
                 _ => {}
             },
+            Command::SearchOpen => self.search.get_or_insert_with(Search::default).editing = true,
+            Command::SearchType(c) => {
+                if let Some(search) = &mut self.search {
+                    search.query.push(c);
+                }
+                self.follow_search();
+            }
+            Command::SearchBackspace => {
+                if let Some(search) = &mut self.search {
+                    search.query.pop();
+                }
+                self.follow_search();
+            }
+            Command::SearchDone => {
+                if let Some(search) = &mut self.search {
+                    search.editing = false;
+                    if search.query.is_empty() {
+                        self.search = None;
+                    }
+                }
+            }
+            Command::SearchClear => self.search = None,
+            Command::Undo => self.step_history(true),
+            Command::Redo => self.step_history(false),
             Command::Toggle(index) => {
                 if self.tab == Tab::Shaders {
                     self.shaders.set(index, self.catalog.shaders.len());
@@ -447,6 +535,94 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Indices of the rows on `tab`'s list that match the search, all of them without one.
+    fn visible(&self, tab: Tab) -> Vec<usize> {
+        let query = self.search.as_ref().map_or("", |search| search.query.as_str());
+        let keep = |fields: &[&str]| matches_query(query, fields);
+        let indices =
+            |matching: Vec<bool>| matching.into_iter().enumerate().filter(|(_, m)| *m).map(|(i, _)| i).collect();
+        match tab {
+            Tab::Themes => indices(self.catalog.themes.iter().map(|theme| keep(&[&theme.name])).collect()),
+            Tab::Shaders => {
+                indices(self.catalog.shaders.iter().map(|shader| keep(&[&shader.file, &shader.description])).collect())
+            }
+            Tab::Credits => indices(
+                self.credits
+                    .iter()
+                    .map(|credit| {
+                        keep(&[
+                            &credit.title,
+                            &credit.kind,
+                            credit.author.as_deref().unwrap_or(""),
+                            credit.license.as_deref().unwrap_or(""),
+                        ])
+                    })
+                    .collect(),
+            ),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Keeps the selection on a match while the search changes.
+    fn follow_search(&mut self) {
+        let visible = self.visible(self.tab);
+        let picker = match self.tab {
+            Tab::Themes => &mut self.themes,
+            Tab::Shaders => &mut self.shaders,
+            Tab::Credits => &mut self.credits_picker,
+            _ => return,
+        };
+        if picker.move_within(0, &visible) && self.tab != Tab::Credits {
+            self.schedule_preview();
+        }
+    }
+
+    /// Undoes (`undo`) or redoes the last change to the choices, saying what changed.
+    fn step_history(&mut self, undo: bool) {
+        let next = if undo { self.undo.pop() } else { self.redo.pop() };
+        let Some(next) = next else {
+            self.show_toast(if undo { "Nothing to undo" } else { "Nothing to redo" });
+            return;
+        };
+        let current = std::mem::replace(&mut self.choices, next);
+        let change = self.choices.changes(&current, &self.settings).into_iter().next();
+        if undo {
+            self.redo.push(current);
+        } else {
+            self.undo.push(current);
+        }
+        let verb = if undo { "Undone" } else { "Redone" };
+        self.show_toast(match change {
+            Some((label, _, value)) => format!("{verb}: {label} {value}"),
+            None => verb.to_owned(),
+        });
+        // The Themes tab previews the highlighted theme, so highlight the chosen one.
+        if let Some(index) = self.catalog.themes.iter().position(|theme| theme.name == self.choices.theme)
+            && self.tab == Tab::Themes
+        {
+            self.themes.set(index, self.catalog.themes.len());
+        }
+        self.schedule_preview();
+    }
+
+    /// Draws the search line above a list while searching. Returns the area left for the list.
+    fn draw_search(&self, frame: &mut Frame, area: Rect, shown: usize, total: usize) -> Rect {
+        let Some(search) = &self.search else { return area };
+        let [line, _, rest] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+        let mut spans = vec![
+            Span::styled("/ ", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
+            Span::styled(search.query.clone(), Style::new().fg(TEXT)),
+        ];
+        if search.editing {
+            spans.push(Span::styled("▏", Style::new().fg(CYAN)));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), line);
+        let count = Line::styled(format!("{shown}/{total}"), Style::new().fg(DIM));
+        frame.render_widget(Paragraph::new(count).right_aligned(), line);
+        rest
     }
 
     /// Checks or unchecks the highlighted shader. Checked shaders run in the order they were checked.
@@ -622,6 +798,28 @@ impl App {
         }
         if ctrl && key.code == KeyCode::Char('s') {
             return Command::OpenSave;
+        }
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Char('z' | 'Z') if ctrl && shift => return Command::Redo,
+            KeyCode::Char('z') if ctrl => return Command::Undo,
+            KeyCode::Char('y') if ctrl => return Command::Redo,
+            _ => {}
+        }
+        if searchable(self.tab) {
+            let editing = self.search.as_ref().is_some_and(|search| search.editing);
+            match key.code {
+                KeyCode::Esc if self.search.is_some() => return Command::SearchClear,
+                KeyCode::Enter if editing => return Command::SearchDone,
+                KeyCode::Backspace if editing => return Command::SearchBackspace,
+                KeyCode::Up if editing => return Command::Move(-1),
+                KeyCode::Down if editing => return Command::Move(1),
+                KeyCode::Char(c) if editing && !ctrl => return Command::SearchType(c),
+                KeyCode::Char('/') => return Command::SearchOpen,
+                KeyCode::Char('f') if ctrl => return Command::SearchOpen,
+                _ if editing && !ctrl => return Command::None,
+                _ => {}
+            }
         }
         if self.tab == Tab::Tour {
             match key.code {
@@ -834,7 +1032,16 @@ impl App {
         let label = |text: &'static str| Span::styled(text, Style::new().fg(DIM));
         let hints = match self.tab {
             Tab::Themes => {
-                vec![key("↑/↓"), label(" browse  "), key("Enter"), label(" choose  "), key("←/→"), label(" tabs")]
+                vec![
+                    key("↑/↓"),
+                    label(" browse  "),
+                    key("Enter"),
+                    label(" choose  "),
+                    key("/"),
+                    label(" search  "),
+                    key("←/→"),
+                    label(" tabs"),
+                ]
             }
             Tab::Shaders => {
                 vec![
@@ -844,6 +1051,8 @@ impl App {
                     label(" check  "),
                     key("Shift+↑/↓"),
                     label(" order  "),
+                    key("/"),
+                    label(" search  "),
                     key("←/→"),
                     label(" tabs"),
                 ]
@@ -855,9 +1064,40 @@ impl App {
                 vec![key("↑/↓"), label(" pages  "), key("←/→"), label(" tabs  "), key("click"), label(" select")]
             }
             Tab::Credits => {
-                vec![key("↑/↓"), label(" browse  "), key("Enter"), label(" open source  "), key("←/→"), label(" tabs")]
+                vec![
+                    key("↑/↓"),
+                    label(" browse  "),
+                    key("Enter"),
+                    label(" open source  "),
+                    key("/"),
+                    label(" search  "),
+                    key("←/→"),
+                    label(" tabs"),
+                ]
             }
-            _ => vec![key("←/→"), label(" switch  "), key("1-8"), label(" jump  "), key("click"), label(" select")],
+            _ => vec![
+                key("←/→"),
+                label(" switch  "),
+                key("1-8"),
+                label(" jump  "),
+                key("click"),
+                label(" select  "),
+                key("Ctrl+Z"),
+                label(" undo"),
+            ],
+        };
+        let hints = if self.search.as_ref().is_some_and(|search| search.editing) {
+            vec![
+                label("type to filter  "),
+                key("↑/↓"),
+                label(" browse  "),
+                key("Enter"),
+                label(" keep  "),
+                key("Esc"),
+                label(" clear"),
+            ]
+        } else {
+            hints
         };
         frame.render_widget(Paragraph::new(Line::from(hints)), area);
         let toast = self.toast.as_ref().filter(|(since, _)| since.elapsed() < TOAST).map(|(_, text)| text.clone());
@@ -1081,7 +1321,9 @@ impl App {
             Some(Target::Item(index)) => Some(index),
             _ => None,
         };
-        let rows = pickers::draw_list(frame, list_area, &items, &mut self.themes, hover, true);
+        let visible = self.visible(Tab::Themes);
+        let list_area = self.draw_search(frame, list_area, visible.len(), items.len());
+        let rows = pickers::draw_filtered(frame, list_area, &items, &visible, &mut self.themes, hover, true);
         self.hits.extend(rows.into_iter().map(|(rect, index)| (rect, Target::Item(index))));
         if let Some(theme) = self.catalog.themes.get(self.themes.selected) {
             pickers::draw_theme_preview(frame, preview_area, theme, theme.name == self.choices.theme);
@@ -1100,7 +1342,9 @@ impl App {
             Some(Target::Item(index)) => Some(index),
             _ => None,
         };
-        let rows = pickers::draw_list(frame, list_area, &items, &mut self.credits_picker, hover, true);
+        let visible = self.visible(Tab::Credits);
+        let list_area = self.draw_search(frame, list_area, visible.len(), items.len());
+        let rows = pickers::draw_filtered(frame, list_area, &items, &visible, &mut self.credits_picker, hover, true);
         self.hits.extend(rows.into_iter().map(|(rect, index)| (rect, Target::Item(index))));
         if let Some(credit) = self.credits.get(self.credits_picker.selected) {
             credits::draw_details(frame, details_area, credit);
@@ -1129,7 +1373,9 @@ impl App {
             Some(Target::Item(index) | Target::Toggle(index)) => Some(index),
             _ => None,
         };
-        let rows = pickers::draw_list(frame, list_area, &items, &mut self.shaders, hover, true);
+        let visible = self.visible(Tab::Shaders);
+        let list_area = self.draw_search(frame, list_area, visible.len(), items.len());
+        let rows = pickers::draw_filtered(frame, list_area, &items, &visible, &mut self.shaders, hover, true);
         for (rect, index) in rows {
             // The checkbox toggles right away; the rest of the row selects first.
             let (offset, width) = pickers::CHECKBOX;
@@ -1556,6 +1802,67 @@ mod tests {
         assert!(app.wants_startup_shader());
         let back = app.take_preview(Instant::now() + PREVIEW_DELAY).unwrap();
         assert!(!back.contains(&app.catalog.shaders[2].file), "leaving drops the highlight: {back}");
+    }
+
+    #[test]
+    fn search_filters_long_lists() {
+        let mut app = App::new(true, catalog(), &[]);
+        app.apply(Command::Select(Tab::Themes), Rect::default());
+        assert_eq!(app.on_key(key(KeyCode::Char('/'))), Command::SearchOpen);
+        app.apply(Command::SearchOpen, Rect::default());
+        assert_eq!(app.on_key(key(KeyCode::Char('j'))), Command::SearchType('j'), "letters type while searching");
+        for c in "DRAC".chars() {
+            app.apply(Command::SearchType(c), Rect::default());
+        }
+        let visible = app.visible(Tab::Themes);
+        assert!(!visible.is_empty() && visible.iter().all(|&i| app.catalog.themes[i].name.contains("drac")));
+        assert!(visible.contains(&app.themes.selected), "the selection follows the filter");
+        let text = screen(&mut app);
+        assert!(text.contains("/ DRAC") && !text.contains("nord"), "{text}");
+        app.apply(Command::SearchDone, Rect::default());
+        assert_eq!(app.on_key(key(KeyCode::Char('j'))), Command::Move(1), "browsing again after Enter");
+        assert_eq!(app.on_key(key(KeyCode::Esc)), Command::SearchClear, "Esc clears before leaving");
+        app.apply(Command::SearchClear, Rect::default());
+        assert_eq!(app.visible(Tab::Themes).len(), app.catalog.themes.len());
+        app.apply(Command::SearchOpen, Rect::default());
+        app.apply(Command::Select(Tab::Shaders), Rect::default());
+        assert!(app.search.is_none(), "switching tabs ends the search");
+    }
+
+    #[test]
+    fn choices_can_be_undone_and_redone() {
+        let mut app = App::new(true, catalog(), &[]);
+        let original = app.choices.clone();
+        app.apply(Command::Select(Tab::Shaders), Rect::default());
+        app.apply(Command::Activate, Rect::default());
+        app.apply(Command::Move(1), Rect::default());
+        app.apply(Command::Activate, Rect::default());
+        let changed = app.choices.clone();
+        assert_eq!(changed.shaders.len(), 2);
+        assert_eq!(app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)), Command::Undo);
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+            Command::Redo
+        );
+        app.apply(Command::Undo, Rect::default());
+        assert_eq!(app.choices.shaders.len(), 1);
+        assert!(app.toast.as_ref().is_some_and(|(_, text)| text.starts_with("Undone: Shaders")), "{:?}", app.toast);
+        app.apply(Command::Undo, Rect::default());
+        assert_eq!(app.choices, original);
+        app.apply(Command::Undo, Rect::default());
+        assert_eq!(app.toast.as_ref().map(|(_, text)| text.as_str()), Some("Nothing to undo"));
+        app.apply(Command::Redo, Rect::default());
+        app.apply(Command::Redo, Rect::default());
+        assert_eq!(app.choices, changed);
+        app.apply(Command::Undo, Rect::default());
+        app.apply(Command::Move(1), Rect::default());
+        app.apply(Command::Activate, Rect::default());
+        app.apply(Command::Redo, Rect::default());
+        assert_eq!(
+            app.toast.as_ref().map(|(_, text)| text.as_str()),
+            Some("Nothing to redo"),
+            "a new change drops redo"
+        );
     }
 
     #[test]
