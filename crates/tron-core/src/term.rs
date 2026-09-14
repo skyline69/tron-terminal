@@ -583,7 +583,9 @@ impl Terminal {
         // Shells that mark their prompt redraw it after SIGWINCH, assuming the
         // prompt was not rewrapped. Clear it instead of reflowing, and keep the
         // cursor where the shell expects it relative to the prompt start.
-        let prompt = self.prompt_redraw_start();
+        // Only a width change rewraps the prompt, and shells such as fish only
+        // redraw on width changes. A height-only resize keeps the prompt as is.
+        let prompt = if cols != self.cols() { self.prompt_redraw_start() } else { None };
         if let Some((prompt_row, _)) = prompt {
             let grid = &mut self.grids[PRIMARY];
             let old_cols = grid.cols();
@@ -614,6 +616,13 @@ impl Terminal {
                 if let Some(saved) = &mut self.saved[index] {
                     (saved.cursor.row, saved.cursor.col) = (row, col);
                 }
+            }
+        }
+        // Reflow renumbers lines: keep images and the prompt mark with their text.
+        if let Some(map) = self.grids[PRIMARY].take_line_map() {
+            self.graphics.remap_lines(|line| map.map(line));
+            if prompt.is_none() {
+                self.prompt_line = self.prompt_line.and_then(|line| map.map(line));
             }
         }
         for saved in self.saved.iter_mut().flatten() {
@@ -2196,6 +2205,32 @@ mod tests {
             assert!(lines[1].ends_with("(main)>"), "cols {cols}: {lines:?}");
             assert!(lines[2..].iter().all(String::is_empty), "cols {cols}: {lines:?}");
         }
+    }
+
+    #[test]
+    fn images_follow_their_text_through_reflow() {
+        let mut t = Terminal::new(10, 6, 100);
+        t.set_cell_pixels(10, 20);
+        // Two wrapped rows of text, then a one cell image on the next row.
+        Parser::new().advance(&mut t, b"0123456789abc\r\n\x1b_Ga=T,f=24,s=1,v=1,q=2;AAAA\x1b\\\r\n");
+        let image_row = |t: &Terminal| t.graphics().placements()[0].line - t.grid().screen_line(0);
+        assert_eq!(image_row(&t), 2);
+        t.resize(20, 6);
+        assert_eq!(line(&t, 0), "0123456789abc");
+        assert_eq!(image_row(&t), 1);
+        t.resize(5, 6);
+        assert_eq!(image_row(&t), 3);
+    }
+
+    #[test]
+    fn height_only_resize_keeps_the_prompt() {
+        let mut t = term(20, 4, b"out\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+        t.resize(20, 8);
+        assert_eq!(line(&t, 0), "out");
+        assert_eq!(line(&t, 1), "$");
+        assert_eq!((t.cursor().row, t.cursor().col), (1, 2));
+        t.resize(20, 3);
+        assert_eq!(line(&t, 1), "$");
     }
 
     #[test]

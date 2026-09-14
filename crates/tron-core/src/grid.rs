@@ -160,6 +160,22 @@ impl Row {
     }
 }
 
+/// Where rows moved during a reflow, in absolute line numbers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineMap {
+    old_oldest: i64,
+    /// New absolute line of each old row, `None` when the row was dropped.
+    rows: Vec<Option<i64>>,
+}
+
+impl LineMap {
+    /// New absolute line of the row that was at `line` before the reflow.
+    pub fn map(&self, line: i64) -> Option<i64> {
+        let index = usize::try_from(line - self.old_oldest).ok()?;
+        self.rows.get(index).copied().flatten()
+    }
+}
+
 /// Visible screen plus scrollback.
 pub struct Grid {
     cols: usize,
@@ -173,6 +189,8 @@ pub struct Grid {
     display_offset: usize,
     damage: Vec<bool>,
     full_damage: bool,
+    /// Set by the last reflow, taken by [`Grid::take_line_map`].
+    line_map: Option<LineMap>,
 }
 
 impl Grid {
@@ -188,7 +206,13 @@ impl Grid {
             display_offset: 0,
             damage: vec![true; rows],
             full_damage: true,
+            line_map: None,
         }
+    }
+
+    /// Row movements of the last reflow, so anchored content can follow its text.
+    pub fn take_line_map(&mut self) -> Option<LineMap> {
+        self.line_map.take()
     }
 
     #[inline]
@@ -470,6 +494,8 @@ impl Grid {
 
     fn reflow(&mut self, cols: usize, cursor: (usize, usize)) -> (usize, usize) {
         let old_base = self.base();
+        let old_oldest = self.oldest_line();
+        let old_len = self.lines.len();
         let cursor_index = old_base + cursor.0;
         // Blank rows below the cursor would otherwise push content into history.
         while self.lines.len() > cursor_index + 1 && self.lines.back().is_some_and(Row::is_blank) {
@@ -477,13 +503,17 @@ impl Grid {
         }
 
         let old: Vec<Row> = self.lines.drain(..).collect();
-        let mut out = Rewrap { cols, lines: VecDeque::with_capacity(old.len()), cursor: None };
+        let mut out =
+            Rewrap { cols, lines: VecDeque::with_capacity(old.len()), cursor: None, row_map: vec![None; old_len] };
         let mut cells: Vec<Cell> = Vec::new();
         let mut extras: Vec<(usize, String)> = Vec::new();
         let mut cursor_offset = None;
+        // Old rows of the logical line being collected, with their offset into it.
+        let mut line_rows: Vec<(usize, usize)> = Vec::new();
 
         for (index, mut row) in old.into_iter().enumerate() {
             let offset = cells.len();
+            line_rows.push((index, offset));
             if index == cursor_index {
                 cursor_offset = Some(offset + cursor.1);
             }
@@ -504,17 +534,19 @@ impl Grid {
             cells.extend_from_slice(&row.cells[..take]);
             if !row.wrapped {
                 extras.sort_by_key(|(c, _)| *c);
-                out.line(&cells, &extras, cursor_offset.take());
+                out.line(&cells, &extras, cursor_offset.take(), &line_rows);
                 cells.clear();
                 extras.clear();
+                line_rows.clear();
             }
         }
-        if !cells.is_empty() || cursor_offset.is_some() {
+        if !cells.is_empty() || cursor_offset.is_some() || !line_rows.is_empty() {
             extras.sort_by_key(|(c, _)| *c);
-            out.line(&cells, &extras, cursor_offset.take());
+            out.line(&cells, &extras, cursor_offset.take(), &line_rows);
         }
 
         let (cursor_index, cursor_col) = out.cursor.unwrap_or((out.lines.len().saturating_sub(1), 0));
+        let row_map = std::mem::take(&mut out.row_map);
         self.lines = out.lines;
         self.cols = cols;
         while self.lines.len() < self.rows {
@@ -523,6 +555,11 @@ impl Grid {
         let new_base = self.base();
         self.history = (self.history - old_base as i64 + new_base as i64).max(new_base as i64);
         self.display_offset = 0;
+        let new_oldest = self.oldest_line();
+        self.line_map = Some(LineMap {
+            old_oldest,
+            rows: row_map.into_iter().map(|row| row.map(|index| new_oldest + index as i64)).collect(),
+        });
         (cursor_index.saturating_sub(new_base), cursor_col)
     }
 }
@@ -532,17 +569,22 @@ struct Rewrap {
     cols: usize,
     lines: VecDeque<Row>,
     cursor: Option<(usize, usize)>,
+    /// New row index of each old row.
+    row_map: Vec<Option<usize>>,
 }
 
 impl Rewrap {
-    fn line(&mut self, cells: &[Cell], extras: &[(usize, String)], cursor: Option<usize>) {
+    fn line(&mut self, cells: &[Cell], extras: &[(usize, String)], cursor: Option<usize>, rows: &[(usize, usize)]) {
         let cols = self.cols;
         let mut row = Row::new(cols);
         let mut col = 0;
         let mut extra = 0;
+        // New row index of every cell, to map old rows through the rewrap.
+        let mut cell_rows: Vec<usize> = Vec::with_capacity(cells.len());
         for (i, cell) in cells.iter().enumerate() {
             let wide = cell.flags.contains(Flags::WIDE);
             if cell.flags.contains(Flags::WIDE_SPACER) && i > 0 && cells[i - 1].flags.contains(Flags::WIDE) {
+                cell_rows.push(self.lines.len());
                 continue;
             }
             let width = if wide && cols > 1 { 2 } else { 1 };
@@ -555,6 +597,7 @@ impl Rewrap {
                 self.lines.push_back(std::mem::replace(&mut row, Row::new(cols)));
                 col = 0;
             }
+            cell_rows.push(self.lines.len());
             if cursor == Some(i) {
                 self.cursor = Some((self.lines.len(), col));
             }
@@ -575,6 +618,10 @@ impl Rewrap {
             }
             col += width;
             row.occupied = col;
+        }
+        let last_row = self.lines.len();
+        for &(old, offset) in rows {
+            self.row_map[old] = Some(cell_rows.get(offset).copied().unwrap_or(last_row));
         }
         if let Some(offset) = cursor
             && offset >= cells.len()
@@ -650,6 +697,22 @@ mod tests {
         assert_eq!(text(grid.row(1)), "def");
         assert!(grid.row(0).wrapped);
         assert_eq!(cursor, (1, 2));
+    }
+
+    #[test]
+    fn reflow_reports_where_rows_moved() {
+        let mut grid = Grid::new(4, 4, 10);
+        write(&mut grid, 0, "abcd");
+        grid.row_mut(0).wrapped = true;
+        write(&mut grid, 1, "ef");
+        write(&mut grid, 2, "g");
+        let (row0, row1, row2) = (grid.screen_line(0), grid.screen_line(1), grid.screen_line(2));
+        grid.resize(8, 4, (2, 1), true);
+        let map = grid.take_line_map().unwrap();
+        assert_eq!(map.map(row0), Some(grid.screen_line(0)));
+        assert_eq!(map.map(row1), Some(grid.screen_line(0)));
+        assert_eq!(map.map(row2), Some(grid.screen_line(1)));
+        assert_eq!(text(grid.line(map.map(row2).unwrap()).unwrap()), "g");
     }
 
     #[test]

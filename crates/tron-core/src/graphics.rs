@@ -768,6 +768,28 @@ impl Graphics {
         self.generation += 1;
     }
 
+    /// Moves primary screen placements after a reflow renumbered lines.
+    /// Placements whose rows no longer exist are removed.
+    pub fn remap_lines(&mut self, map: impl Fn(i64) -> Option<i64>) {
+        if self.placements.is_empty() {
+            return;
+        }
+        self.placements.retain_mut(|p| {
+            if p.alt_screen || p.virtual_placement {
+                return true;
+            }
+            // The top row may already be gone from history; use the first row that remains.
+            match (0..i64::from(p.rows)).find_map(|k| map(p.line + k).map(|new| new - k)) {
+                Some(line) => {
+                    p.line = line;
+                    true
+                }
+                None => false,
+            }
+        });
+        self.generation += 1;
+    }
+
     /// Drops placements that scrolled out of history.
     pub fn prune(&mut self, oldest_line: i64, alt_screen: bool) {
         if self.placements.is_empty() {

@@ -19,9 +19,19 @@ fn main() {
         term: "xterm-256color".into(),
         ..Default::default()
     };
+    // RESIZES="80x12,120x30" overrides the default column sweep.
+    let resizes: Vec<(usize, usize)> = std::env::var("RESIZES")
+        .ok()
+        .map(|spec| {
+            spec.split(',')
+                .filter_map(|s| s.split_once('x'))
+                .map(|(c, r)| (c.parse().unwrap(), r.parse().unwrap()))
+                .collect()
+        })
+        .unwrap_or_else(|| [50, 80, 35, 90, 40, 85].into_iter().map(|c| (c, 12)).collect());
     let rows = 12;
-    let size = |cols| WindowSize { cols, rows: rows as u16, cell_width: 10, cell_height: 20 };
-    let pty = Pty::spawn(&options, size(80)).expect("spawn");
+    let size = |cols: u16, rows: u16| WindowSize { cols, rows, cell_width: 10, cell_height: 20 };
+    let pty = Pty::spawn(&options, size(80, rows as u16)).expect("spawn");
     let mut reader = pty.reader().unwrap();
     let mut writer = pty.writer().unwrap();
     let mut writer_input = pty.writer().unwrap();
@@ -36,6 +46,7 @@ fn main() {
     });
 
     let mut term = Terminal::new(80, rows, 1000);
+    term.set_cell_pixels(10, 20);
     let mut parser = Parser::new();
     let mut pump = |term: &mut Terminal, wait: Duration, show: bool| {
         let deadline = Instant::now() + wait;
@@ -67,7 +78,8 @@ fn main() {
                     row.push_cell_text(col, &mut text);
                 }
             }
-            let marker = if line < grid.screen_line(0) { "h" } else { " " };
+            let marker =
+                if line < grid.screen_line(0) { "h".to_string() } else { format!("{:2}", line - grid.screen_line(0)) };
             println!("{marker}|{}|{}", text.trim_end(), if row.wrapped { " (wrapped)" } else { "" });
         }
     };
@@ -82,10 +94,22 @@ fn main() {
             return;
         }
     }
-    for cols in [50usize, 80, 35, 90, 40, 85] {
+    for (cols, rows) in resizes {
         term.resize(cols, rows);
-        pty.resize(size(cols as u16)).unwrap();
-        pump(&mut term, Duration::from_millis(700), true);
-        dump(&term, &format!("after resize to {cols}"));
+        pty.resize(size(cols as u16, rows as u16)).unwrap();
+        pump(&mut term, Duration::from_millis(700), std::env::var_os("QUIET").is_none());
+        dump(&term, &format!("after resize to {cols}x{rows}"));
+        let top = term.grid().screen_line(0);
+        for p in term.graphics().placements() {
+            let first = p.line - top;
+            println!(
+                "  placement image {} on screen rows {}..={} (line {}), cursor row {}",
+                p.image_id,
+                first,
+                first + i64::from(p.rows) - 1,
+                p.line,
+                term.cursor().row
+            );
+        }
     }
 }
