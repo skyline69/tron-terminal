@@ -24,6 +24,7 @@ use winit::data_transfer::{DataTransferId, TypeHint, TypedData};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ButtonSource, ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, DndAction, EventLoop, EventLoopProxy};
+use winit::icon::{Icon, RgbaIcon};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{
     ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, UserAttentionType, Window, WindowAttributes,
@@ -325,7 +326,8 @@ impl App {
             .with_title(config.window.title.clone())
             .with_surface_size(logical)
             .with_transparent(config.window.opacity < 1.0)
-            .with_decorations(config.window.decorations);
+            .with_decorations(config.window.decorations)
+            .with_window_icon(window_icon());
         let window: Arc<dyn Window> = Arc::from(event_loop.create_window(attributes)?);
         window.set_cursor(CursorIcon::Text.into());
         log::debug!("startup: window created after {:?}", started.elapsed());
@@ -1938,9 +1940,28 @@ fn window_size(cols: usize, rows: usize, metrics: CellMetrics) -> WindowSize {
     }
 }
 
+/// The app icon, for compositors that take it from the window, like KDE Plasma
+/// on Wayland and X11 window managers. Others find it through the desktop entry.
+fn window_icon() -> Option<Icon> {
+    const PNG: &[u8] = include_bytes!("../../../dist/dev.tron.Terminal.png");
+    let mut reader = png::Decoder::new(std::io::Cursor::new(PNG)).read_info().ok()?;
+    let mut rgba = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut rgba).ok()?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    rgba.truncate(info.buffer_size());
+    RgbaIcon::new(rgba, info.width, info.height).ok().map(Icon::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_icon_decodes() {
+        assert!(window_icon().is_some());
+    }
 
     #[test]
     fn pointer_names_map_to_icons() {

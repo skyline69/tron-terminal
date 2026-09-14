@@ -3752,6 +3752,7 @@ dependencies = [
  "env_logger",
  "log",
  "parking_lot",
+ "png",
  "pollster",
  "smithay-clipboard",
  "tron-config",
