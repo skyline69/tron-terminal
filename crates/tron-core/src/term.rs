@@ -884,19 +884,13 @@ impl Terminal {
         if cols == self.cols() && rows == self.rows() {
             return;
         }
-        // Shells that mark their prompt redraw it after SIGWINCH, assuming the
-        // prompt was not rewrapped. Clear it instead of reflowing, and keep the
-        // cursor where the shell expects it relative to the prompt start.
+        // Shells that mark their prompt redraw it after SIGWINCH from where they
+        // expect it to start, clearing to the end of the screen first. Keep the
+        // cursor there relative to the prompt start. The reflowed prompt stays
+        // visible until the shell's redraw replaces it, so it does not flicker.
         // Only a width change rewraps the prompt, and shells such as fish only
         // redraw on width changes. A height-only resize keeps the prompt as is.
         let prompt = if cols != self.cols() { self.prompt_redraw_start() } else { None };
-        if let Some((prompt_row, _)) = prompt {
-            let grid = &mut self.grids[PRIMARY];
-            let old_cols = grid.cols();
-            for row in prompt_row..grid.rows() {
-                grid.erase(row, 0..old_cols, Cell::BLANK);
-            }
-        }
         for index in [PRIMARY, ALTERNATE] {
             let reflow = index == PRIMARY;
             if index == self.active {
@@ -3161,6 +3155,32 @@ mod tests {
         assert_eq!(line(&t, 0), "");
         assert_eq!(line(&t, 1), "");
         assert_eq!((t.cursor().row, t.cursor().col), (0, 0));
+    }
+
+    #[test]
+    fn fish_prompt_repaint_after_resizes_leaves_one_prompt() {
+        // Bytes fish 4 writes for its prompt and after each SIGWINCH: no cursor up,
+        // no new line, just a carriage return, the prompt and a clear below.
+        const PROMPT: &[u8] = b"\x1b]133;A;click_events=1\x07\x1b[92mskyline\x1b[m@\x1b[mfedora\x1b[m \
+            \x1b[32m~/P/t/t/release\x1b[m (main)\x1b[m> \x1b]133;B\x07";
+        let mut t = Terminal::new(100, 8, 100);
+        let mut parser = Parser::new();
+        parser.advance(&mut t, b"\x1b]133;A;click_events=1\x07skyline@fedora ~/P/t/t/release (main)> ls\r\n");
+        parser.advance(&mut t, b"build  deps  examples  incremental  tron  tron.d\r\n");
+        parser.advance(&mut t, PROMPT);
+        parser.advance(&mut t, b"\x1b[K\r\x1b[39C");
+        for cols in [80, 60, 100, 45, 90] {
+            t.resize(cols, 8);
+            let mut repaint = b"\r\r".to_vec();
+            repaint.extend_from_slice(PROMPT);
+            repaint.extend_from_slice(b"\x1b[J\r\x1b[39C");
+            parser.advance(&mut t, &repaint);
+            let lines: Vec<String> = (0..8).map(|row| line(&t, row)).collect();
+            assert!(lines.concat().contains("tron  tron.d"), "the output survives, cols {cols}: {lines:?}");
+            let prompts: Vec<usize> = (0..8).filter(|&row| lines[row].ends_with("(main)>")).collect();
+            assert_eq!(prompts.len(), 1, "one prompt, cols {cols}: {lines:?}");
+            assert_eq!((t.cursor().row, t.cursor().col), (prompts[0], 39), "cols {cols}: {lines:?}");
+        }
     }
 
     #[test]

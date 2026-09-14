@@ -230,6 +230,8 @@ pub struct Renderer {
     previous_cursor: [f32; 4],
     /// Seconds since `started` when the cursor rectangle last changed.
     cursor_change_time: f32,
+    /// Value of `time` when the surface or cell size last changed.
+    resized_at: f32,
     pipeline_cache: Option<PipelineCacheFile>,
     capture: Option<PathBuf>,
     device_lost: Arc<AtomicBool>,
@@ -340,6 +342,7 @@ impl Renderer {
             cursor: [0.0; 4],
             previous_cursor: [0.0; 4],
             cursor_change_time: -1.0e6,
+            resized_at: -1.0e6,
             pipeline_cache,
             capture: None,
             device_lost,
@@ -401,6 +404,7 @@ impl Renderer {
         if width == self.config.width && height == self.config.height {
             return;
         }
+        self.resized_at = self.started.elapsed().as_secs_f32();
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
@@ -435,6 +439,7 @@ impl Renderer {
     /// Call after the font size, font or scale factor changed.
     pub fn set_metrics(&mut self, metrics: CellMetrics, padding: [f32; 2]) {
         self.cells.set_metrics(&self.device, metrics, padding);
+        self.resized_at = self.started.elapsed().as_secs_f32();
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
@@ -571,9 +576,16 @@ impl Renderer {
         let time = self.started.elapsed().as_secs_f32();
         let cursor = self.cells.cursor_rect();
         if cursor != self.cursor {
-            self.previous_cursor = self.cursor;
+            // The grid reflowing on a resize, and the shell redrawing its prompt right
+            // after, move the cursor too. Cursor shaders should not fire for that.
+            const RESIZE_QUIET: f32 = 0.3;
+            if time - self.resized_at < RESIZE_QUIET {
+                self.previous_cursor = cursor;
+            } else {
+                self.previous_cursor = self.cursor;
+                self.cursor_change_time = time;
+            }
             self.cursor = cursor;
-            self.cursor_change_time = time;
         }
         if self.post.is_active() || self.startup.is_active() {
             let m = self.cells.metrics();

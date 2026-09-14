@@ -45,9 +45,6 @@ use clipboard::Clipboard;
 
 /// Delay before re-checking a frame held back by synchronized output.
 const SYNC_POLL: Duration = Duration::from_millis(8);
-/// Pty size changes closer together than this, as while dragging a window edge,
-/// reach the shell once the resizing pauses.
-const PTY_RESIZE_DEBOUNCE: Duration = Duration::from_millis(80);
 /// Maximum time between clicks of a double or triple click.
 const MULTI_CLICK: Duration = Duration::from_millis(400);
 /// Debug aid: a token accepted for startup screen commands in any session.
@@ -278,9 +275,6 @@ struct Session {
     applied_shaders: Option<AppliedShaders>,
     /// Window transparency and blur last set.
     applied_translucency: Option<(bool, bool)>,
-    /// Grid size not yet sent to the pty, and when to send it.
-    pending_pty_size: Option<(usize, usize, Instant)>,
-    last_pty_resize: Instant,
     /// Configuration problems shown at the top of the window, and until when.
     config_errors: Vec<String>,
     config_errors_until: Option<Instant>,
@@ -446,8 +440,6 @@ impl App {
             applied_font: String::new(),
             applied_shaders: None,
             applied_translucency: None,
-            pending_pty_size: None,
-            last_pty_resize: Instant::now() - PTY_RESIZE_DEBOUNCE,
         };
         session.apply_config(config, self.paths.as_ref());
         if let Some(error) = self.config_error.take() {
@@ -1047,7 +1039,6 @@ impl Session {
     }
 
     fn redraw(&mut self, event_loop: &dyn ActiveEventLoop) {
-        self.flush_pty_size();
         {
             let mut term = self.shared.term.lock();
             if term.sync_blocked() {
@@ -1108,10 +1099,6 @@ impl Session {
                 self.renderer.set_flash(0.0);
             }
             None => {}
-        }
-
-        if let Some((_, _, due)) = self.pending_pty_size {
-            wake_at(due);
         }
 
         // Animated images.
@@ -1187,34 +1174,10 @@ impl Session {
             term.resize(cols, rows);
             changed
         };
-        if changed {
-            // Shells redraw their prompt on every resize, which flickers while dragging a
-            // window edge. The first change goes out at once, later ones when resizing pauses.
-            let now = Instant::now();
-            if self.pending_pty_size.is_none() && now.duration_since(self.last_pty_resize) >= PTY_RESIZE_DEBOUNCE {
-                self.send_pty_size(cols, rows);
-            } else {
-                self.pending_pty_size = Some((cols, rows, now + PTY_RESIZE_DEBOUNCE));
-            }
-        }
-        self.window.request_redraw();
-    }
-
-    fn send_pty_size(&mut self, cols: usize, rows: usize) {
-        self.last_pty_resize = Instant::now();
-        if let Err(error) = self.pty.resize(window_size(cols, rows, self.fonts.metrics())) {
+        if changed && let Err(error) = self.pty.resize(window_size(cols, rows, self.fonts.metrics())) {
             log::warn!("failed to resize pty: {error}");
         }
-    }
-
-    /// Sends a debounced pty size once it is due.
-    fn flush_pty_size(&mut self) {
-        if let Some((cols, rows, due)) = self.pending_pty_size
-            && Instant::now() >= due
-        {
-            self.pending_pty_size = None;
-            self.send_pty_size(cols, rows);
-        }
+        self.window.request_redraw();
     }
 
     fn set_font_size(&mut self, size: f32) {
