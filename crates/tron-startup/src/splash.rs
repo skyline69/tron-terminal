@@ -5,7 +5,7 @@
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -15,8 +15,10 @@ use tachyonfx::{Effect, Interpolation, fx};
 
 use crate::Outcome;
 use crate::link::Link;
+use crate::motion::{pulse, smooth};
+use crate::ui::{CYAN, DARK, DIM, MAGENTA, centered};
 
-const LOGO: [&str; 6] = [
+pub const LOGO: [&str; 6] = [
     "████████╗██████╗  ██████╗ ███╗   ██╗",
     "╚══██╔══╝██╔══██╗██╔═══██╗████╗  ██║",
     "   ██║   ██████╔╝██║   ██║██╔██╗ ██║",
@@ -24,19 +26,17 @@ const LOGO: [&str; 6] = [
     "   ██║   ██║  ██║╚██████╔╝██║ ╚████║",
     "   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝",
 ];
-const CYAN: Color = Color::Rgb(0x4f, 0xd6, 0xff);
-const MAGENTA: Color = Color::Rgb(0xc3, 0x8b, 0xff);
-const DIM: Color = Color::Rgb(0x6a, 0x75, 0x88);
-/// Color text fades from and to. Close to tron's default background.
-const DARK: Color = Color::Rgb(0x0a, 0x0e, 0x14);
 const FRAME: Duration = Duration::from_millis(16);
-/// Length of the goodbye animation after a key press.
+/// Length of the animation after a key press.
 const EXIT: Duration = Duration::from_millis(450);
 /// When the logo is fully drawn: the moment of the glitch and bloom flash.
 const LOGO_DONE: f32 = 1.35;
 
 /// Shader scene number of the splash.
 pub const SCENE: u32 = 1;
+/// Grid and bloom strength once the splash is shown, where the next screen starts.
+pub const GRID: f32 = 0.8;
+pub const BLOOM: f32 = 0.45;
 
 struct Areas {
     screen: Rect,
@@ -61,13 +61,22 @@ impl Areas {
     }
 }
 
+/// How the splash ends.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Exit {
+    /// Into the startup screen's tabs: the text dissolves, the screen stays on.
+    Continue,
+    /// Straight to the shell: the screen also powers down.
+    Quit,
+}
+
 pub struct Splash {
     started: Instant,
     animations: bool,
     /// Effects for the logo, subtitle and hint, created on the first frame.
     effects: Vec<Effect>,
     screen: Rect,
-    exit: Option<(Instant, Effect)>,
+    exit: Option<(Instant, Exit, Effect)>,
 }
 
 impl Splash {
@@ -120,94 +129,86 @@ impl Splash {
         for effect in &mut self.effects {
             effect.process(elapsed, buffer, areas.screen);
         }
-        if let Some((_, effect)) = &mut self.exit {
+        if let Some((_, _, effect)) = &mut self.exit {
             effect.process(elapsed, buffer, areas.screen);
         }
     }
 
-    pub fn start_exit(&mut self) {
+    fn start_exit(&mut self, exit: Exit) {
+        let millis = EXIT.as_millis() as u32;
         let effect = fx::parallel(&[
-            fx::dissolve((EXIT.as_millis() as u32, Interpolation::QuadIn)),
-            fx::fade_to_fg(DARK, (EXIT.as_millis() as u32, Interpolation::QuadIn)),
+            fx::dissolve((millis, Interpolation::QuadIn)),
+            fx::fade_to_fg(DARK, (millis, Interpolation::QuadIn)),
         ]);
-        self.exit = Some((Instant::now(), effect));
+        self.exit = Some((Instant::now(), exit, effect));
     }
 
-    pub fn exit_done(&self, now: Instant) -> bool {
-        self.exit.as_ref().is_some_and(|(since, _)| now.saturating_duration_since(*since) >= EXIT)
+    fn exit_done(&self, now: Instant) -> bool {
+        self.exit.as_ref().is_some_and(|(since, _, _)| now.saturating_duration_since(*since) >= EXIT)
     }
 
     /// Startup shader parameters at `now`: power, grid, glitch, bloom.
     pub fn shader_params(&self, now: Instant) -> [f32; 4] {
         if !self.animations {
-            return [1.0, 0.6, 0.0, 0.5];
+            return [1.0, GRID, 0.0, BLOOM];
         }
         let t = now.saturating_duration_since(self.started).as_secs_f32();
-        let power = smooth(t / 0.7);
-        let mut grid = smooth((t - 0.5) / 1.5) * 0.8;
+        let mut power = smooth(t / 0.7);
+        let mut grid = smooth((t - 0.5) / 1.5) * GRID;
         let mut glitch = pulse(t, LOGO_DONE, 0.18) * 0.8;
-        let bloom = 0.45 + 0.7 * pulse(t, LOGO_DONE, 0.5);
-        let mut power = power;
-        if let Some((since, _)) = &self.exit {
+        let bloom = BLOOM + 0.7 * pulse(t, LOGO_DONE, 0.5);
+        if let Some((since, exit, _)) = &self.exit {
             let e = (now.saturating_duration_since(*since).as_secs_f32() / EXIT.as_secs_f32()).min(1.0);
-            power *= 1.0 - smooth(e);
-            grid *= 1.0 - e;
-            glitch = glitch.max(0.6 * (1.0 - e) * smooth(e * 4.0));
+            match exit {
+                Exit::Quit => {
+                    power *= 1.0 - smooth(e);
+                    grid *= 1.0 - e;
+                    glitch = glitch.max(0.6 * (1.0 - e) * smooth(e * 4.0));
+                }
+                Exit::Continue => {
+                    // Reveal fully in case the key came early, with a glitch in the middle.
+                    power = power.max(smooth(e * 2.0));
+                    grid = grid.max(GRID * e);
+                    glitch = glitch.max(pulse(e, 0.5, 0.6) * 0.5);
+                }
+            }
         }
         [power, grid, glitch, bloom]
     }
 }
 
-/// Smoothstep from 0 to 1 for `x` in 0..1.
-fn smooth(x: f32) -> f32 {
-    let x = x.clamp(0.0, 1.0);
-    x * x * (3.0 - 2.0 * x)
-}
-
-/// A bump that peaks at `at` and lasts `width` seconds.
-fn pulse(t: f32, at: f32, width: f32) -> f32 {
-    (1.0 - ((t - at).abs() / (width / 2.0))).max(0.0)
-}
-
-/// `area` narrowed to `width` columns in the middle.
-fn centered(area: Rect, width: usize) -> Rect {
-    let width = (width as u16).min(area.width);
-    Rect { x: area.x + (area.width - width) / 2, width, ..area }
-}
-
-/// Shows the splash until a key is pressed, then plays the goodbye animation.
+/// Shows the splash until a key is pressed. Ctrl+C goes straight to the shell.
 pub fn run<W: Write>(terminal: &mut DefaultTerminal, animations: bool, link: &mut Link<W>) -> io::Result<Outcome> {
     let mut splash = Splash::new(animations);
     link.shader_on(SCENE);
     let mut last = Instant::now();
-    let mut outcome = None;
     loop {
         let now = Instant::now();
         let elapsed = now - last;
         last = now;
         terminal.draw(|frame| splash.draw(frame, elapsed))?;
         link.params(splash.shader_params(now));
-        if outcome.is_some() && (!animations || splash.exit_done(now)) {
-            break;
+        if let Some((_, exit, _)) = &splash.exit
+            && (!animations || splash.exit_done(now))
+        {
+            return Ok(match exit {
+                Exit::Continue => Outcome::Continue,
+                Exit::Quit => Outcome::Quit,
+            });
         }
         let timeout = if animations { FRAME } else { Duration::from_secs(1) };
-        if outcome.is_none()
-            && event::poll(timeout)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            outcome = Some(match key.code {
-                KeyCode::Enter => Outcome::Setup,
-                KeyCode::Char('t') => Outcome::Tour,
-                _ => Outcome::Skip,
-            });
-            splash.start_exit();
-        } else if outcome.is_some() {
+        if splash.exit.is_none() {
+            if event::poll(timeout)?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                let quit = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+                splash.start_exit(if quit { Exit::Quit } else { Exit::Continue });
+            }
+        } else {
             std::thread::sleep(FRAME);
         }
     }
-    link.shader_off();
-    Ok(outcome.unwrap_or(Outcome::Skip))
 }
 
 #[cfg(test)]
@@ -241,16 +242,17 @@ mod tests {
     }
 
     #[test]
-    fn shader_turns_on_and_off_with_the_splash() {
+    fn continuing_keeps_the_screen_on_and_quitting_powers_down() {
         let mut splash = Splash::new(true);
         let start = splash.started;
         assert_eq!(splash.shader_params(start)[0], 0.0);
-        assert_eq!(splash.shader_params(start + Duration::from_secs(1))[0], 1.0);
         assert!(splash.shader_params(start + Duration::from_secs_f32(LOGO_DONE))[2] > 0.7, "glitch at the logo");
-        splash.start_exit();
-        let (exit, _) = splash.exit.as_ref().unwrap();
-        let end = *exit + EXIT;
+        splash.start_exit(Exit::Continue);
+        let end = splash.exit.as_ref().unwrap().0 + EXIT;
         assert!(splash.exit_done(end));
+        assert_eq!(splash.shader_params(end)[..2], [1.0, GRID]);
+        splash.start_exit(Exit::Quit);
+        let end = splash.exit.as_ref().unwrap().0 + EXIT;
         assert_eq!(splash.shader_params(end)[0], 0.0);
     }
 }

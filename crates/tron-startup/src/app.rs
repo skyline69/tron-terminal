@@ -1,0 +1,595 @@
+//! The startup screen's main view: a header, tabs, the selected tab's content
+//! and a status bar. Tab changes and the way in and out are animated, on the
+//! terminal side with tachyonfx and in tron with the startup shader.
+
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
+
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEventKind,
+};
+use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, BorderType, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::{DefaultTerminal, Frame};
+use tachyonfx::{Effect, Interpolation, fx};
+
+use crate::catalog::Catalog;
+use crate::link::Link;
+use crate::motion::{lerp, pulse, smooth};
+use crate::splash;
+use crate::ui::{CYAN, DARK, DIM, MAGENTA, TEXT};
+
+const FRAME: Duration = Duration::from_millis(16);
+/// Shader scene number of the tabs.
+pub const SCENE: u32 = 2;
+/// How long the view takes to settle after the splash.
+const INTRO: Duration = Duration::from_millis(600);
+const SWITCH_MS: u32 = 260;
+/// Length of the goodbye animation.
+const EXIT: Duration = Duration::from_millis(450);
+/// Grid and bloom strength behind the tabs: quieter than the splash.
+const GRID: f32 = 0.35;
+const BLOOM: f32 = 0.25;
+const SMALL_LOGO: [&str; 2] = ["▀█▀ █▀█ █▀█ █▄ █", " █  █▀▄ █▄█ █ ▀█"];
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Tab {
+    Overview,
+    Settings,
+    Themes,
+    Shaders,
+    Keys,
+    Tour,
+    About,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 7] =
+        [Tab::Overview, Tab::Settings, Tab::Themes, Tab::Shaders, Tab::Keys, Tab::Tour, Tab::About];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::Overview => "Overview",
+            Tab::Settings => "Settings",
+            Tab::Themes => "Themes",
+            Tab::Shaders => "Shaders",
+            Tab::Keys => "Keys",
+            Tab::Tour => "Tour",
+            Tab::About => "About",
+        }
+    }
+
+    fn index(self) -> usize {
+        Tab::ALL.iter().position(|&tab| tab == self).unwrap_or(0)
+    }
+
+    fn offset(self, by: isize) -> Tab {
+        let count = Tab::ALL.len() as isize;
+        Tab::ALL[(self.index() as isize + by).rem_euclid(count) as usize]
+    }
+}
+
+struct Areas {
+    header: Rect,
+    tabs: Rect,
+    content: Rect,
+    status: Rect,
+}
+
+impl Areas {
+    fn new(screen: Rect) -> Self {
+        let screen = screen.inner(Margin::new(2, 1));
+        let [header, tabs, _, content, status] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(screen);
+        Self { header, tabs, content, status }
+    }
+}
+
+/// What a key or click asks for.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Command {
+    None,
+    Select(Tab),
+    /// Leave the startup screen and start the shell.
+    StartTerminal,
+}
+
+pub struct App {
+    animations: bool,
+    started: Instant,
+    tab: Tab,
+    catalog: Catalog,
+    shell: String,
+    effects: Vec<Effect>,
+    /// Screen size the effects were made for.
+    screen: Rect,
+    /// Screen columns covered by each tab title, for mouse clicks.
+    tab_spans: Vec<(Tab, u16, u16)>,
+    switched: Option<Instant>,
+    exit: Option<Instant>,
+}
+
+impl App {
+    pub fn new(animations: bool, catalog: Catalog, shell: &[String]) -> Self {
+        Self {
+            animations,
+            started: Instant::now(),
+            tab: Tab::Overview,
+            catalog,
+            shell: shell.join(" "),
+            effects: Vec::new(),
+            screen: Rect::default(),
+            tab_spans: Vec::new(),
+            switched: None,
+            exit: None,
+        }
+    }
+
+    fn intro_effects(areas: &Areas) -> Vec<Effect> {
+        let fade = |delay: u32, ms: u32| fx::prolong_start(delay, fx::fade_from_fg(DARK, (ms, Interpolation::QuadOut)));
+        vec![
+            fx::parallel(&[fade(0, 400), fx::coalesce((400, Interpolation::QuadOut))]).with_area(areas.header),
+            fade(120, 380).with_area(areas.tabs),
+            fx::parallel(&[fade(220, 420), fx::prolong_start(220, fx::coalesce((420, Interpolation::CubicOut)))])
+                .with_area(areas.content),
+            fade(420, 300).with_area(areas.status),
+        ]
+    }
+
+    fn select(&mut self, tab: Tab, content: Rect) {
+        if tab == self.tab {
+            return;
+        }
+        self.tab = tab;
+        self.switched = Some(Instant::now());
+        if self.animations {
+            let effect = fx::parallel(&[
+                fx::coalesce((SWITCH_MS, Interpolation::QuadOut)),
+                fx::fade_from_fg(DARK, (SWITCH_MS, Interpolation::QuadOut)),
+            ]);
+            self.effects.push(effect.with_area(content));
+        }
+    }
+
+    fn start_exit(&mut self) {
+        if self.exit.is_some() {
+            return;
+        }
+        self.exit = Some(Instant::now());
+        if self.animations {
+            let millis = EXIT.as_millis() as u32;
+            self.effects.push(fx::parallel(&[
+                fx::dissolve((millis, Interpolation::QuadIn)),
+                fx::fade_to_fg(DARK, (millis, Interpolation::QuadIn)),
+            ]));
+        }
+    }
+
+    fn exit_done(&self, now: Instant) -> bool {
+        self.exit.is_some_and(|since| !self.animations || now.saturating_duration_since(since) >= EXIT)
+    }
+
+    fn on_key(&self, key: KeyEvent) -> Command {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => Command::StartTerminal,
+            KeyCode::Char('c' | 'q') if ctrl => Command::StartTerminal,
+            KeyCode::Enter if self.tab == Tab::Overview => Command::StartTerminal,
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => Command::Select(self.tab.offset(1)),
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => Command::Select(self.tab.offset(-1)),
+            KeyCode::Char(digit @ '1'..='7') => Command::Select(Tab::ALL[digit as usize - '1' as usize]),
+            _ => Command::None,
+        }
+    }
+
+    fn on_click(&self, column: u16, row: u16, tabs_row: u16) -> Command {
+        if row != tabs_row {
+            return Command::None;
+        }
+        self.tab_spans
+            .iter()
+            .find(|(_, start, end)| (*start..*end).contains(&column))
+            .map_or(Command::None, |(tab, _, _)| Command::Select(*tab))
+    }
+
+    /// Startup shader parameters at `now`: power, grid, glitch, bloom.
+    pub fn shader_params(&self, now: Instant) -> [f32; 4] {
+        if !self.animations {
+            return [if self.exit_done(now) { 0.0 } else { 1.0 }, GRID, 0.0, BLOOM];
+        }
+        let settle = smooth(now.saturating_duration_since(self.started).as_secs_f32() / INTRO.as_secs_f32());
+        let mut power = 1.0;
+        let mut grid = lerp(splash::GRID, GRID, settle);
+        let bloom = lerp(splash::BLOOM, BLOOM, settle);
+        let mut glitch =
+            self.switched.map_or(0.0, |at| pulse(now.saturating_duration_since(at).as_secs_f32(), 0.07, 0.14) * 0.35);
+        if let Some(since) = self.exit {
+            let e = (now.saturating_duration_since(since).as_secs_f32() / EXIT.as_secs_f32()).min(1.0);
+            power = 1.0 - smooth(e);
+            grid *= 1.0 - e;
+            glitch = glitch.max(0.6 * (1.0 - e) * smooth(e * 4.0));
+        }
+        [power, grid, glitch, bloom]
+    }
+
+    pub fn draw(&mut self, frame: &mut Frame, elapsed: Duration) {
+        let screen = frame.area();
+        let areas = Areas::new(screen);
+        self.draw_header(frame, areas.header);
+        self.draw_tabs(frame, areas.tabs);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(DIM))
+            .title(Line::styled(format!(" {} ", self.tab.title()), Style::new().fg(CYAN).add_modifier(Modifier::BOLD)));
+        let inner = block.inner(areas.content).inner(Margin::new(2, 1));
+        frame.render_widget(block, areas.content);
+        match self.tab {
+            Tab::Overview => self.draw_overview(frame, inner),
+            Tab::Keys => draw_keys(frame, inner),
+            Tab::About => draw_about(frame, inner),
+            tab => draw_upcoming(frame, inner, tab),
+        }
+        self.draw_status(frame, areas.status);
+
+        if !self.animations {
+            return;
+        }
+        if self.screen != screen {
+            // Effects are tied to areas; after a resize, start from the settled view.
+            let first = self.screen == Rect::default();
+            self.effects.clear();
+            if first {
+                self.effects = Self::intro_effects(&areas);
+            }
+            self.screen = screen;
+        }
+        let buffer = frame.buffer_mut();
+        for effect in &mut self.effects {
+            effect.process(elapsed, buffer, screen);
+        }
+        let exiting = self.exit.is_some();
+        self.effects.retain(|effect| effect.running() || exiting);
+    }
+
+    fn draw_header(&self, frame: &mut Frame, area: Rect) {
+        let logo = Text::from(
+            SMALL_LOGO.map(|row| Line::styled(row, Style::new().fg(CYAN).add_modifier(Modifier::BOLD))).to_vec(),
+        );
+        frame.render_widget(Paragraph::new(logo), area);
+        let right = Text::from(vec![
+            Line::styled("GPU accelerated terminal", Style::new().fg(MAGENTA)),
+            Line::styled(format!("version {}", env!("CARGO_PKG_VERSION")), Style::new().fg(DIM)),
+        ]);
+        frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
+    }
+
+    fn draw_tabs(&mut self, frame: &mut Frame, area: Rect) {
+        let mut spans = Vec::new();
+        self.tab_spans.clear();
+        let mut column = area.x;
+        for (index, tab) in Tab::ALL.into_iter().enumerate() {
+            let label = format!(" {} {} ", index + 1, tab.title());
+            let width = label.chars().count() as u16;
+            let style = if tab == self.tab {
+                Style::new().fg(CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::new().fg(DIM)
+            };
+            self.tab_spans.push((tab, column, column + width));
+            spans.push(Span::styled(label, style));
+            spans.push(Span::raw(" "));
+            column += width + 1;
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    fn draw_status(&self, frame: &mut Frame, area: Rect) {
+        let key = |text: &'static str| Span::styled(text, Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD));
+        let label = |text: &'static str| Span::styled(text, Style::new().fg(DIM));
+        let hints = Line::from(vec![
+            key("←/→"),
+            label(" switch  "),
+            key("1-7"),
+            label(" jump  "),
+            key("click"),
+            label(" select"),
+        ]);
+        frame.render_widget(Paragraph::new(hints), area);
+        let start = Line::from(vec![key("Esc"), label(" start terminal")]);
+        frame.render_widget(Paragraph::new(start).alignment(Alignment::Right), area);
+    }
+
+    fn draw_overview(&self, frame: &mut Frame, area: Rect) {
+        let heading = Style::new().fg(CYAN).add_modifier(Modifier::BOLD);
+        let label = Style::new().fg(DIM);
+        let value = Style::new().fg(TEXT);
+        let config = self
+            .catalog
+            .paths
+            .as_ref()
+            .map_or_else(|| "defaults (no config directory)".to_owned(), |p| tron_config::display_path(&p.config_file));
+        let value_width = usize::from(area.width).saturating_sub(12);
+        let field = |name: &'static str, text: String| {
+            Line::from(vec![Span::styled(format!("  {name:<10}"), label), Span::styled(fit(&text, value_width), value)])
+        };
+        let mut lines = vec![
+            Line::styled("Welcome to tron", heading),
+            Line::raw(""),
+            Line::styled(
+                "A GPU accelerated terminal with themes, shaders and images. Look around, pick a look, then start the terminal.",
+                value,
+            ),
+            Line::raw(""),
+            field("Shell", self.shell.clone()),
+            field("Config", config),
+            field("Themes", format!("{} available", self.catalog.themes.len())),
+            field("Shaders", format!("{} available", self.catalog.shaders.len())),
+            Line::raw(""),
+        ];
+        lines.push(Line::from(vec![
+            Span::styled("  Enter", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
+            Span::styled("  start the terminal", label),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  tron --startup", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
+            Span::styled("  opens this screen again", label),
+        ]));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    }
+}
+
+fn draw_keys(frame: &mut Frame, area: Rect) {
+    use tron_config::Action;
+    // Grouped the way people look for them: clipboard, search, scrolling, prompts, fonts, window.
+    let order = |action: &Action| match action {
+        Action::Copy => 0,
+        Action::Paste => 1,
+        Action::PasteSelection => 2,
+        Action::Search => 3,
+        Action::ScrollPageUp => 4,
+        Action::ScrollPageDown => 5,
+        Action::ScrollToTop => 6,
+        Action::ScrollToBottom => 7,
+        Action::ScrollToPreviousPrompt => 8,
+        Action::ScrollToNextPrompt => 9,
+        Action::SelectCommandOutput => 10,
+        Action::IncreaseFontSize => 11,
+        Action::DecreaseFontSize => 12,
+        Action::ResetFontSize => 13,
+        Action::NewWindow => 14,
+        Action::ReloadConfig => 15,
+        _ => 16,
+    };
+    let (mut bindings, _) = tron_config::Config::default().bindings();
+    bindings.sort_by_key(|binding| order(&binding.action));
+    // Two columns when the list would not fit, as long as there is room for them.
+    let columns = if bindings.len() + 1 > usize::from(area.height) && area.width >= 80 { 2 } else { 1 };
+    let per_column = bindings.len().div_ceil(columns);
+    let areas = Layout::horizontal(vec![Constraint::Fill(1); columns]).spacing(4).split(area);
+    for (column, chunk) in bindings.chunks(per_column.max(1)).enumerate() {
+        let rows = chunk.iter().map(|binding| {
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    combo_text(&binding.combo),
+                    Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(action_text(&binding.action), Style::new().fg(TEXT))),
+            ])
+        });
+        let header = Row::new(vec!["Keys", "Action"]).style(Style::new().fg(CYAN).add_modifier(Modifier::BOLD));
+        let table = Table::new(rows, [Constraint::Length(16), Constraint::Fill(1)]).header(header).column_spacing(2);
+        frame.render_widget(table, areas[column]);
+    }
+}
+
+/// `text` shortened to `width` characters with an ellipsis in the middle.
+fn fit(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width || width < 5 {
+        return text.to_owned();
+    }
+    let keep = width - 1;
+    let head: String = text.chars().take(keep / 2).collect();
+    let tail: String = text.chars().skip(count - (keep - keep / 2)).collect();
+    format!("{head}…{tail}")
+}
+
+fn draw_about(frame: &mut Frame, area: Rect) {
+    let label = Style::new().fg(DIM);
+    let value = Style::new().fg(TEXT);
+    let field = |name: &'static str, text: &'static str| {
+        Line::from(vec![Span::styled(format!("{name:<10}"), label), Span::styled(text, value)])
+    };
+    let lines = vec![
+        Line::styled(format!("tron {}", env!("CARGO_PKG_VERSION")), Style::new().fg(CYAN).add_modifier(Modifier::BOLD)),
+        Line::styled("GPU accelerated terminal emulator, written in Rust.", value),
+        Line::raw(""),
+        field("License", "MIT OR Apache-2.0"),
+        field("Source", "https://github.com/skyline69/tron-terminal"),
+        field("Built on", "wgpu, harfrust, swash, fontique, winit, ratatui, tachyonfx"),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn draw_upcoming(frame: &mut Frame, area: Rect, tab: Tab) {
+    let text = match tab {
+        Tab::Settings => "Font, size, opacity, cursor and more, previewed live.",
+        Tab::Themes => "Browse the themes; the window previews each one as you move.",
+        Tab::Shaders => "Try the shaders live on this window.",
+        _ => "Ligatures, emoji, right-to-left text, images and scaled text.",
+    };
+    let lines = vec![
+        Line::styled(text, Style::new().fg(TEXT)),
+        Line::raw(""),
+        Line::styled("Coming soon.", Style::new().fg(DIM)),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// `ctrl+shift+c` style text for a key combination.
+fn combo_text(combo: &tron_config::KeyCombo) -> String {
+    let mut parts = Vec::new();
+    for (held, name) in [(combo.ctrl, "Ctrl"), (combo.alt, "Alt"), (combo.shift, "Shift"), (combo.super_key, "Super")] {
+        if held {
+            parts.push(name.to_owned());
+        }
+    }
+    parts.push(match &combo.key {
+        tron_config::BindKey::Char(' ') => "Space".to_owned(),
+        tron_config::BindKey::Char(c) => c.to_uppercase().collect(),
+        tron_config::BindKey::Named(name) => {
+            name.split('_').map(|word| word[..1].to_uppercase() + &word[1..]).collect::<Vec<_>>().join(" ")
+        }
+    });
+    parts.join("+")
+}
+
+/// "Scroll to previous prompt" for `ScrollToPreviousPrompt`.
+fn action_text(action: &tron_config::Action) -> String {
+    let name = format!("{action:?}");
+    let name = name.split('(').next().unwrap_or(&name);
+    let mut text = String::new();
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() && i > 0 {
+            text.push(' ');
+            text.extend(ch.to_lowercase());
+        } else {
+            text.push(ch);
+        }
+    }
+    text
+}
+
+/// Runs the tabs until the user starts the terminal, then plays the goodbye animation.
+pub fn run<W: Write>(
+    terminal: &mut DefaultTerminal,
+    animations: bool,
+    link: &mut Link<W>,
+    shell: &[String],
+    tab: Option<Tab>,
+) -> io::Result<()> {
+    let mut app = App::new(animations, Catalog::load(), shell);
+    app.tab = tab.unwrap_or(Tab::Overview);
+    ratatui::crossterm::execute!(io::stdout(), EnableMouseCapture)?;
+    link.scene(SCENE);
+    let mut last = Instant::now();
+    let result = loop {
+        let now = Instant::now();
+        let elapsed = now - last;
+        last = now;
+        if let Err(error) = terminal.draw(|frame| app.draw(frame, elapsed)) {
+            break Err(error);
+        }
+        link.params(app.shader_params(now));
+        if app.exit_done(now) {
+            break Ok(());
+        }
+        let content = Areas::new(terminal.get_frame().area()).content;
+        let tabs_row = Areas::new(terminal.get_frame().area()).tabs.y;
+        match event::poll(FRAME) {
+            Ok(true) if app.exit.is_none() => {
+                let command = match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+                    Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                        app.on_click(mouse.column, mouse.row, tabs_row)
+                    }
+                    _ => Command::None,
+                };
+                match command {
+                    Command::Select(tab) => app.select(tab, content),
+                    Command::StartTerminal => app.start_exit(),
+                    Command::None => {}
+                }
+            }
+            Ok(_) => {}
+            Err(error) => break Err(error),
+        }
+    };
+    let _ = ratatui::crossterm::execute!(io::stdout(), DisableMouseCapture);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn app() -> App {
+        App::new(true, Catalog::for_paths(None), &["fish".into(), "-l".into()])
+    }
+
+    fn screen(app: &mut App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame, Duration::from_secs(2))).unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer.content().chunks(100).map(|row| row.iter().map(|c| c.symbol()).collect::<String>() + "\n").collect()
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn keys_move_between_tabs_and_start_the_terminal() {
+        let mut app = app();
+        assert_eq!(app.on_key(key(KeyCode::Left)), Command::Select(Tab::About), "wraps around");
+        assert_eq!(app.on_key(key(KeyCode::Char('3'))), Command::Select(Tab::Themes));
+        assert_eq!(app.on_key(key(KeyCode::Enter)), Command::StartTerminal);
+        app.select(Tab::Keys, Rect::default());
+        assert_eq!(app.on_key(key(KeyCode::Tab)), Command::Select(Tab::Tour));
+        assert_eq!(app.on_key(key(KeyCode::Enter)), Command::None, "Enter only starts from the overview");
+        assert_eq!(app.on_key(key(KeyCode::Esc)), Command::StartTerminal);
+    }
+
+    #[test]
+    fn every_tab_renders_and_titles_are_clickable() {
+        let mut app = app();
+        let overview = screen(&mut app);
+        assert!(overview.contains("1 Overview") && overview.contains("Welcome to tron"), "{overview}");
+        assert!(overview.contains("fish -l"), "{overview}");
+        let (tab, start, _) = app.tab_spans[4];
+        assert_eq!(app.on_click(start + 1, 99, 3), Command::None);
+        assert_eq!(app.on_click(start + 1, 3, 3), Command::Select(tab));
+        for tab in Tab::ALL {
+            app.tab = tab;
+            let text = screen(&mut app);
+            assert!(text.contains(&format!(" {} ", tab.title())), "{tab:?}: {text}");
+        }
+        app.tab = Tab::Keys;
+        assert!(screen(&mut app).contains("Scroll to previous prompt"));
+    }
+
+    #[test]
+    fn leaving_powers_the_screen_down() {
+        let mut app = app();
+        let now = app.started + INTRO;
+        assert_eq!(app.shader_params(now)[1], GRID);
+        app.start_exit();
+        let end = app.exit.unwrap() + EXIT;
+        assert!(app.exit_done(end));
+        assert_eq!(app.shader_params(end)[0], 0.0);
+    }
+
+    #[test]
+    fn long_values_are_shortened_in_the_middle() {
+        assert_eq!(fit("/home/user/.config/tron/config.toml", 20), "/home/use…onfig.toml");
+        assert_eq!(fit("short", 20), "short");
+    }
+
+    #[test]
+    fn key_and_action_names_read_well() {
+        let combo = tron_config::KeyCombo::parse("ctrl+shift+page_up").unwrap();
+        assert_eq!(combo_text(&combo), "Ctrl+Shift+Page Up");
+        assert_eq!(action_text(&tron_config::Action::ScrollToPreviousPrompt), "Scroll to previous prompt");
+    }
+}

@@ -30,6 +30,13 @@ impl<W: Write> Link<W> {
         self.send(&format!("shader=on,scene={scene}"));
     }
 
+    /// Switches the shader to another scene.
+    pub fn scene(&mut self, scene: u32) {
+        if self.shader_on {
+            self.send(&format!("scene={scene}"));
+        }
+    }
+
     pub fn shader_off(&mut self) {
         if std::mem::take(&mut self.shader_on) {
             self.send("params=0:0:0:0,shader=off");

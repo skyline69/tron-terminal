@@ -2,9 +2,12 @@
 //! before the shell. When it ends, the process replaces itself with the shell,
 //! so the session continues in the same pty.
 
+mod app;
 pub mod catalog;
 pub mod link;
+mod motion;
 mod splash;
+mod ui;
 
 use std::io;
 use std::os::unix::process::CommandExt;
@@ -19,24 +22,26 @@ pub const ANIMATIONS_ENV: &str = "TRON_STARTUP_ANIMATIONS";
 pub const TOKEN_ENV: &str = "TRON_STARTUP_TOKEN";
 /// Environment variable naming tron's configuration directory.
 pub const CONFIG_DIR_ENV: &str = "TRON_STARTUP_CONFIG_DIR";
+/// Debug aid: skip the splash and open this tab (by title) directly.
+const DEBUG_TAB_ENV: &str = "TRON_STARTUP_DEBUG_TAB";
 /// Variables for the startup screen only, removed before the shell starts.
-const ENV: [&str; 4] = [MARKER_ENV, ANIMATIONS_ENV, TOKEN_ENV, CONFIG_DIR_ENV];
+const ENV: [&str; 5] = [MARKER_ENV, ANIMATIONS_ENV, TOKEN_ENV, CONFIG_DIR_ENV, DEBUG_TAB_ENV];
 
-/// What the user chose on the startup screen.
+/// How the splash ended.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Skip,
-    Setup,
-    Tour,
+    /// On to the tabs.
+    Continue,
+    /// Straight to the shell.
+    Quit,
 }
 
 /// Shows the startup screen, then runs `shell` (program and arguments) in
 /// this process. Never returns.
 pub fn run(shell: &[String]) -> ! {
     let animations = std::env::var_os(ANIMATIONS_ENV).is_none_or(|value| value != "0");
-    match show(animations) {
-        Ok(outcome) => log::debug!("startup screen finished: {outcome:?}"),
-        Err(error) => eprintln!("tron: startup screen failed: {error}"),
+    if let Err(error) = show(animations, shell) {
+        eprintln!("tron: startup screen failed: {error}");
     }
     if let Some(marker) = std::env::var_os(MARKER_ENV) {
         mark_shown(Path::new(&marker));
@@ -44,14 +49,28 @@ pub fn run(shell: &[String]) -> ! {
     hand_off(shell)
 }
 
-fn show(animations: bool) -> io::Result<Outcome> {
+fn show(animations: bool, shell: &[String]) -> io::Result<()> {
     let mut link = link::Link::new(std::env::var(TOKEN_ENV).ok(), io::stdout());
     let mut terminal = ratatui::try_init()?;
-    let outcome = splash::run(&mut terminal, animations, &mut link);
-    // Turns the shader off even when the screen failed.
+    let debug_tab = std::env::var(DEBUG_TAB_ENV)
+        .ok()
+        .and_then(|title| app::Tab::ALL.into_iter().find(|tab| tab.title().eq_ignore_ascii_case(&title)));
+    let splash = match debug_tab {
+        Some(_) => {
+            link.shader_on(splash::SCENE);
+            Ok(Outcome::Continue)
+        }
+        None => splash::run(&mut terminal, animations, &mut link),
+    };
+    let result = match splash {
+        Ok(Outcome::Continue) => app::run(&mut terminal, animations, &mut link, shell, debug_tab),
+        Ok(Outcome::Quit) => Ok(()),
+        Err(error) => Err(error),
+    };
+    // Restores the configuration and turns the shader off, also after a failure.
     drop(link);
     ratatui::try_restore()?;
-    outcome
+    result
 }
 
 /// Remembers that the screen was shown, so it does not start automatically again.
