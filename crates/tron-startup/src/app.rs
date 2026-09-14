@@ -679,8 +679,9 @@ impl App {
             let note = Line::from(vec![
                 Span::styled("● unsaved changes  ", Style::new().fg(MAGENTA)),
                 Span::styled("Ctrl+S", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
+                Span::raw(" "),
                 Span::styled(
-                    " save",
+                    "save",
                     if hovered {
                         Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED)
                     } else {
@@ -696,11 +697,12 @@ impl App {
         }
         let hovered = self.hover == Some(Target::StartTerminal);
         let start_label = if hovered {
-            Span::styled(" start terminal", Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED))
+            Span::styled("start terminal", Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED))
         } else {
-            label(" start terminal")
+            label("start terminal")
         };
-        let start = Line::from(vec![key("Esc"), start_label]);
+        // The space stays outside the underlined label.
+        let start = Line::from(vec![key("Esc"), Span::raw(" "), start_label]);
         let width = start.width() as u16;
         let start_area = Rect::new(area.right().saturating_sub(width), area.y, width, 1).intersection(area);
         self.hits.push((start_area, Target::StartTerminal));
@@ -819,7 +821,8 @@ impl App {
                 if hovered { Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED) } else { Style::new().fg(DIM) };
             let line = Line::from(vec![
                 Span::styled(key, Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" {text}"), text_style),
+                Span::raw(" "),
+                Span::styled(text, text_style),
             ]);
             let width = line.width() as u16;
             let rect = Rect::new(column, row, width, 1).intersection(inner);
@@ -920,7 +923,8 @@ impl App {
         let start_label = if hovered { Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED) } else { label };
         let start = Line::from(vec![
             Span::styled("Enter", Style::new().fg(MAGENTA).add_modifier(Modifier::BOLD)),
-            Span::styled("  start the terminal", start_label),
+            Span::raw("  "),
+            Span::styled("start the terminal", start_label),
         ]);
         let start_area = Rect::new(hints_area.x, hints_area.y, start.width() as u16, 1).intersection(hints_area);
         self.hits.push((start_area, Target::StartTerminal));
