@@ -358,3 +358,18 @@ author_url = "https://github.com/sahaj-b"
 source_url = "https://github.com/sahaj-b/ghostty-cursor-shaders/blob/main/sonic_boom_cursor.glsl"
 license = "MIT"
 note = "Built in as sonic-boom-cursor.wgsl."
+[[credit]]
+title = "Party Sparks"
+kind = "Cursor shader"
+author = "yakovgal"
+author_url = "https://www.shadertoy.com/user/yakovgal"
+source_url = "https://www.shadertoy.com/user/yakovgal"
+note = "Built in as party-sparks.wgsl."
+
+[[credit]]
+title = "Starfield Dark"
+kind = "Shader"
+author = "0xhckr (hackr-sh), tuned dimmer and slower"
+author_url = "https://github.com/hackr-sh"
+source_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/starfield.glsl"
+note = "Built in as starfield-dark.wgsl."
