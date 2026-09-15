@@ -129,6 +129,9 @@ pub struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline_cache: Option<PipelineCacheFile>,
+    /// Set when the device is lost. Shared by every renderer on the device,
+    /// since the device has one lost callback.
+    device_lost: Option<Arc<AtomicBool>>,
 }
 
 /// Compiled pipelines kept on disk, so later launches skip shader compilation.
@@ -245,12 +248,13 @@ impl Gpu {
         } else {
             None
         };
-        Ok(Self { instance, adapter, device, queue, pipeline_cache })
+        Ok(Self { instance, adapter, device, queue, pipeline_cache, device_lost: None })
     }
 }
 
 pub struct Renderer {
-    _instance: wgpu::Instance,
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -377,13 +381,16 @@ impl Renderer {
         theme: Theme,
     ) -> Result<Self, RenderError> {
         let started = Instant::now();
-        let Gpu { instance, adapter, device, queue, mut pipeline_cache } = gpu;
+        let Gpu { instance, adapter, device, queue, mut pipeline_cache, device_lost } = gpu;
         let cache = pipeline_cache.as_ref().map(|c| &c.cache);
-        let device_lost = Arc::new(AtomicBool::new(false));
-        let lost = device_lost.clone();
-        device.set_device_lost_callback(move |reason, message| {
-            log::error!("GPU device lost ({reason:?}): {message}");
-            lost.store(true, Ordering::Release);
+        let device_lost = device_lost.unwrap_or_else(|| {
+            let lost = Arc::new(AtomicBool::new(false));
+            let flag = lost.clone();
+            device.set_device_lost_callback(move |reason, message| {
+                log::error!("GPU device lost ({reason:?}): {message}");
+                flag.store(true, Ordering::Release);
+            });
+            lost
         });
         let surface = instance.create_surface(target)?;
         if !adapter.is_surface_supported(&surface) {
@@ -435,7 +442,8 @@ impl Renderer {
             top_inset: 0.0,
             drawn_terminal: None,
             srgb_output: format.is_srgb(),
-            _instance: instance,
+            instance,
+            adapter,
             surface,
             device,
             queue,
@@ -472,6 +480,20 @@ impl Renderer {
     }
 
     /// True after the GPU device was lost. The renderer must be recreated.
+    /// This renderer's GPU, for the renderer of another window. Windows share one
+    /// instance and device: a second Vulkan instance torn down while the first
+    /// lives crashes some drivers, and one device is lighter.
+    pub fn gpu(&self) -> Gpu {
+        Gpu {
+            instance: self.instance.clone(),
+            adapter: self.adapter.clone(),
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            pipeline_cache: None,
+            device_lost: Some(self.device_lost.clone()),
+        }
+    }
+
     pub fn is_device_lost(&self) -> bool {
         self.device_lost.load(Ordering::Acquire)
     }

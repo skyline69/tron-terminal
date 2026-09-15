@@ -530,7 +530,12 @@ impl App {
         log::debug!("startup: shell spawned after {:?}", started.elapsed());
 
         let theme = Theme { opacity: config.window.opacity.clamp(0.0, 1.0), ..Theme::default() };
-        let preloaded = self.gpu.take().and_then(|handle| handle.join().ok());
+        // Later windows share the first window's GPU instead of opening their own.
+        let preloaded = self
+            .gpu
+            .take()
+            .and_then(|handle| handle.join().ok())
+            .or_else(|| self.sessions.values().next().map(|session| Ok(session.renderer.gpu())));
         let renderer = match preloaded {
             Some(Ok(gpu)) => {
                 Renderer::with_gpu(gpu, window.clone(), size.width, size.height, metrics, window_padding, theme.clone())
@@ -831,7 +836,7 @@ impl App {
         options.program = Some(exe.to_string_lossy().into_owned());
         options.args = vec!["settings".to_owned()];
         let Some(session) = self.active.and_then(|id| self.sessions.get_mut(&id)) else { return };
-        if let Err(error) = session.run_in_place(&options, &self.proxy) {
+        if let Err(error) = session.run_in_place(&options, &self.proxy, &self.config, self.paths.as_ref()) {
             log::error!("cannot open settings: {error:#}");
         }
     }
@@ -882,7 +887,7 @@ impl ApplicationHandler for App {
         for (&id, session) in &mut self.sessions {
             // The program run in the shell's place ended: the shell comes back.
             if session.suspended.is_some() && session.shared.exited.load(Ordering::Acquire) {
-                session.restore_shell();
+                session.restore_shell(&self.config, self.paths.as_ref());
             }
             session.shared.wake_pending.store(false, Ordering::Release);
             session.poll_shaders();
@@ -1686,6 +1691,10 @@ impl Session {
         if changed && let Err(error) = self.pty.resize(window_size(cols, rows, self.fonts.metrics())) {
             log::warn!("failed to resize pty: {error}");
         }
+        // The Find box and the command palette sit at the right edge, which moved.
+        if changed && (self.search.is_some() || self.palette.is_some()) {
+            self.update_overlays();
+        }
         self.window.request_redraw();
     }
 
@@ -1817,12 +1826,13 @@ impl Session {
     }
 
     fn palette_key(&mut self, event: &KeyEvent) {
+        let rows = self.renderer.grid_size().1;
         let Some(palette) = &mut self.palette else { return };
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => return self.close_palette(),
             Key::Named(NamedKey::Enter) => return self.run_palette_item(),
-            Key::Named(NamedKey::ArrowUp) => palette.move_selection(-1),
-            Key::Named(NamedKey::ArrowDown | NamedKey::Tab) => palette.move_selection(1),
+            Key::Named(NamedKey::ArrowUp) => palette.move_selection(-1, rows),
+            Key::Named(NamedKey::ArrowDown | NamedKey::Tab) => palette.move_selection(1, rows),
             Key::Named(NamedKey::Backspace) => palette.pop_char(),
             _ => match event.text.clone() {
                 Some(text) if !self.modifiers.control_key() && !self.modifiers.meta_key() => palette.push_text(&text),
@@ -1845,6 +1855,14 @@ impl Session {
         self.palette = None;
         self.update_overlays();
         self.window.request_redraw();
+    }
+
+    /// What the pointer is over on the command palette, or `None` while it is closed.
+    fn palette_hit(&self) -> Option<panel::PaletteHit> {
+        let palette = self.palette.as_ref()?;
+        let (row, col) = self.renderer.cell_at(self.mouse.position.0, self.mouse.position.1);
+        let (cols, rows) = self.renderer.grid_size();
+        Some(panel::palette_hit(palette, cols, rows, row, col))
     }
 
     /// Closes the command palette and runs the highlighted command.
@@ -1951,7 +1969,13 @@ impl Session {
 
     /// Runs `options` in this window in place of its shell, which keeps running
     /// out of sight and comes back when the program exits.
-    fn run_in_place(&mut self, options: &SpawnOptions, proxy: &EventLoopProxy) -> anyhow::Result<()> {
+    fn run_in_place(
+        &mut self,
+        options: &SpawnOptions,
+        proxy: &EventLoopProxy,
+        config: &Config,
+        paths: Option<&Paths>,
+    ) -> anyhow::Result<()> {
         if self.suspended.is_some() || self.exited {
             return Ok(());
         }
@@ -1975,19 +1999,21 @@ impl Session {
         self.search = None;
         // Every row of the new terminal is drawn, not only the ones it changes.
         self.snapshot = Snapshot::default();
-        self.window.request_redraw();
+        // A new terminal starts with the built-in colors: give it the theme and settings.
+        self.apply_config(config, paths);
         Ok(())
     }
 
-    /// Brings the shell back after the program run in its place exited.
-    fn restore_shell(&mut self) {
+    /// Brings the shell back after the program run in its place exited. Settings
+    /// changed there applied to that program's terminal, so the shell's gets them now.
+    fn restore_shell(&mut self, config: &Config, paths: Option<&Paths>) {
         let Some(shell) = self.suspended.take() else { return };
         self.pty = shell.pty;
         self.shared = shell.shared;
         self.input = shell.input;
         self.search = None;
         self.snapshot = Snapshot::default();
-        self.shared.term.lock().grid_mut().damage_all();
+        self.apply_config(config, paths);
         // The window may have been resized meanwhile.
         self.resize_grid();
         self.program_title = None;
@@ -2197,7 +2223,8 @@ impl Session {
         if !modes.intersects(Modes::MOUSE_TRACKING) {
             self.app_pointer = None;
         }
-        let icon = if self.in_title_bar(self.mouse.position.1) || self.scrollbar.hovered {
+        let over_palette = self.palette_hit().is_some_and(|hit| hit != panel::PaletteHit::Outside);
+        let icon = if self.in_title_bar(self.mouse.position.1) || self.scrollbar.hovered || over_palette {
             CursorIcon::Default
         } else if self.hovered_link.is_some() {
             CursorIcon::Pointer
@@ -2246,6 +2273,21 @@ impl Session {
     }
 
     fn pointer_button(&mut self, pressed: bool, button: MouseButton) {
+        // The command palette takes clicks on it, before an application reading the
+        // mouse sees them. Clicking a command runs it; clicking elsewhere closes it.
+        if let Some(hit) = self.palette_hit() {
+            match hit {
+                panel::PaletteHit::Entry(index) if pressed && button == MouseButton::Left => {
+                    if let Some(palette) = &mut self.palette {
+                        palette.selected = index;
+                    }
+                    self.run_palette_item();
+                }
+                panel::PaletteHit::Outside if pressed => self.close_palette(),
+                _ => {}
+            }
+            return;
+        }
         if button == MouseButton::Left {
             if !pressed && self.scrollbar.grab.take().is_some() {
                 self.scrollbar.shown_at = Some(Instant::now());
@@ -2355,6 +2397,22 @@ impl Session {
             self.drag_scrollbar(y);
             return;
         }
+        // Over the command palette, the pointer highlights the command under it.
+        if let Some(hit) = self.palette_hit() {
+            if let panel::PaletteHit::Entry(index) = hit
+                && let Some(palette) = &mut self.palette
+                && palette.selected != index
+            {
+                palette.selected = index;
+                self.update_overlays();
+                self.window.request_redraw();
+            }
+            let modes = self.shared.term.lock().modes();
+            self.update_pointer_icon(modes);
+            if hit != panel::PaletteHit::Outside {
+                return;
+            }
+        }
         let hovered = self.over_scrollbar(x);
         if hovered != self.scrollbar.hovered {
             self.scrollbar.hovered = hovered;
@@ -2425,6 +2483,16 @@ impl Session {
         let whole = self.scroll_accumulator.trunc();
         self.scroll_accumulator -= whole;
         if whole == 0.0 {
+            return;
+        }
+        // The wheel over the command palette scrolls its list.
+        if self.palette_hit().is_some_and(|hit| hit != panel::PaletteHit::Outside) {
+            let rows = self.renderer.grid_size().1;
+            if let Some(palette) = &mut self.palette {
+                palette.scroll(-(whole as isize), rows);
+            }
+            self.update_overlays();
+            self.window.request_redraw();
             return;
         }
         let count = whole.abs() as usize;

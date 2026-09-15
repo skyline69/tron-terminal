@@ -5,7 +5,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
+use ratatui::widgets::{
+    Block, BorderType, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget,
+};
 use tron_config::{BindKey, Binding, KeyCombo};
 use tron_core::Palette;
 use tron_render::Overlay;
@@ -19,12 +21,14 @@ const PALETTE_WIDTH: usize = 56;
 /// Commands listed at once; the list scrolls to the highlighted one.
 const PALETTE_ROWS: usize = 10;
 
-/// The command palette's query and highlighted command.
+/// The command palette's query, highlighted command and list scroll position.
 #[derive(Debug, Default)]
 pub struct PaletteState {
     pub query: String,
     /// Index into [`PaletteState::entries`].
     pub selected: usize,
+    /// Index of the first command shown in the list.
+    pub first: usize,
 }
 
 impl PaletteState {
@@ -44,22 +48,93 @@ impl PaletteState {
         self.entries().get(self.selected).copied()
     }
 
-    /// Moves the highlight by `delta` entries, wrapping around the ends.
-    pub fn move_selection(&mut self, delta: isize) {
+    /// Moves the highlight by `delta` entries, wrapping around the ends, and scrolls
+    /// the list of a window `rows` tall to keep it in view.
+    pub fn move_selection(&mut self, delta: isize, rows: usize) {
         let count = self.entries().len();
-        if count > 0 {
-            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+        if count == 0 {
+            return;
         }
+        self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+        let shown = shown_rows(count, rows);
+        if self.selected < self.first {
+            self.first = self.selected;
+        } else if self.selected >= self.first + shown {
+            self.first = self.selected + 1 - shown;
+        }
+    }
+
+    /// Scrolls the list of a window `rows` tall by `delta` entries, keeping the highlight.
+    pub fn scroll(&mut self, delta: isize, rows: usize) {
+        let count = self.entries().len();
+        let last = count.saturating_sub(shown_rows(count, rows));
+        self.first = self.first.saturating_add_signed(delta).min(last);
     }
 
     pub fn push_text(&mut self, text: &str) {
         self.query.extend(text.chars().filter(|c| !c.is_control()));
         self.selected = 0;
+        self.first = 0;
     }
 
     pub fn pop_char(&mut self) {
         self.query.pop();
         self.selected = 0;
+        self.first = 0;
+    }
+}
+
+/// What a viewport cell is on the command palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteHit {
+    /// The command at this index of [`PaletteState::entries`].
+    Entry(usize),
+    /// The palette's border, query or hints.
+    Inside,
+    Outside,
+}
+
+/// Commands listed at once for `count` matches in a window `rows` tall.
+fn shown_rows(count: usize, rows: usize) -> usize {
+    count.clamp(1, PALETTE_ROWS).min(rows.saturating_sub(6).max(1))
+}
+
+/// Where the command palette is drawn, in viewport cells.
+struct PaletteLayout {
+    top: usize,
+    left: usize,
+    width: usize,
+    height: usize,
+    /// Commands listed at once, and the first of them.
+    shown: usize,
+    first: usize,
+    count: usize,
+}
+
+fn palette_layout(state: &PaletteState, cols: usize, rows: usize) -> Option<PaletteLayout> {
+    let count = state.entries().len();
+    let width = PALETTE_WIDTH.min(cols.saturating_sub(2));
+    let shown = shown_rows(count, rows);
+    // Borders, the query and the rule under it.
+    let height = shown + 4;
+    let (top, left) = place(cols, rows, width, height).filter(|_| width >= 24)?;
+    let first = state.first.min(count.saturating_sub(shown));
+    Some(PaletteLayout { top, left, width, height, shown, first, count })
+}
+
+/// What the viewport cell at `row` and `col` is on the command palette.
+pub fn palette_hit(state: &PaletteState, cols: usize, rows: usize, row: usize, col: usize) -> PaletteHit {
+    let Some(layout) = palette_layout(state, cols, rows) else { return PaletteHit::Outside };
+    let (right, bottom) = (layout.left + layout.width, layout.top + layout.height);
+    if !(layout.top..bottom).contains(&row) || !(layout.left..right).contains(&col) {
+        return PaletteHit::Outside;
+    }
+    // Commands start below the top border, the query and the rule, and end at the right border.
+    let list = layout.top + 3;
+    if (list..list + layout.shown).contains(&row) && col + 1 < right && layout.first + row - list < layout.count {
+        PaletteHit::Entry(layout.first + row - list)
+    } else {
+        PaletteHit::Inside
     }
 }
 
@@ -132,11 +207,8 @@ pub fn palette_overlays(
 ) -> Vec<Overlay> {
     let colors = Colors::new(palette);
     let entries = state.entries();
-    let width = PALETTE_WIDTH.min(cols.saturating_sub(2));
-    let shown = entries.len().clamp(1, PALETTE_ROWS).min(rows.saturating_sub(6).max(1));
-    // Borders, the query and the rule under it.
-    let height = shown + 4;
-    let Some((top, left)) = place(cols, rows, width, height).filter(|_| width >= 24) else { return Vec::new() };
+    let Some(layout) = palette_layout(state, cols, rows) else { return Vec::new() };
+    let PaletteLayout { top, left, width, height, shown, first, count } = layout;
     let mut buffer = Buffer::empty(Rect::new(0, 0, width as u16, height as u16));
     let hints = Line::styled(" ↑↓ select  ⏎ run  esc close ", Style::new().fg(color(colors.dim)));
     let block = frame(&colors, " Commands ").title_bottom(hints.right_aligned());
@@ -151,7 +223,6 @@ pub fn palette_overlays(
     if entries.is_empty() {
         lines.push(Line::styled(" no matching commands", Style::new().fg(color(colors.dim))));
     }
-    let first = state.selected.saturating_sub(shown - 1);
     for (index, item) in entries.iter().enumerate().skip(first).take(shown) {
         let title = item.title();
         let shortcut = item.shortcut(bindings).map(|(_, combo)| combo_label(combo)).unwrap_or_default();
@@ -167,6 +238,20 @@ pub fn palette_overlays(
         ]));
     }
     Paragraph::new(lines).render(inner, &mut buffer);
+    // A scrollbar on the right border when the list is longer than the box.
+    if count > shown {
+        // Scaled so the thumb reaches the end when the last commands are shown.
+        let position = first * (count - 1) / (count - shown);
+        let mut state = ScrollbarState::new(count).position(position).viewport_content_length(shown);
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .track_style(Style::new().fg(color(colors.dim)))
+            .thumb_symbol("┃")
+            .thumb_style(Style::new().fg(color(colors.accent)))
+            .render(Rect::new(0, 3, width as u16, shown as u16), &mut buffer, &mut state);
+    }
     overlays(&buffer, top, left, &colors)
 }
 
@@ -276,7 +361,7 @@ mod tests {
     use super::*;
 
     fn palette_with(query: &str) -> PaletteState {
-        PaletteState { query: query.to_owned(), selected: 0 }
+        PaletteState { query: query.to_owned(), ..PaletteState::default() }
     }
 
     #[test]
@@ -296,12 +381,64 @@ mod tests {
     fn palette_selection_wraps() {
         let mut state = palette_with("scroll to");
         let count = state.entries().len();
-        state.move_selection(-1);
+        state.move_selection(-1, 24);
         assert_eq!(state.selected, count - 1);
-        state.move_selection(1);
+        state.move_selection(1, 24);
         assert_eq!(state.selected, 0);
         state.push_text("p");
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn keys_keep_the_highlight_in_view_and_the_wheel_scrolls() {
+        let mut state = palette_with("");
+        let count = state.entries().len();
+        assert!(count > PALETTE_ROWS);
+        state.move_selection(-1, 24);
+        assert_eq!(state.first, count - PALETTE_ROWS, "wrapping to the last command shows it");
+        state.move_selection(1, 24);
+        assert_eq!(state.first, 0);
+        state.scroll(3, 24);
+        assert_eq!((state.first, state.selected), (3, 0), "the wheel keeps the highlight");
+        state.scroll(100, 24);
+        assert_eq!(state.first, count - PALETTE_ROWS);
+        state.scroll(-100, 24);
+        assert_eq!(state.first, 0);
+    }
+
+    #[test]
+    fn pointer_hits_commands_in_the_list() {
+        let mut state = palette_with("");
+        let (top, left) = (1, 80 - PALETTE_WIDTH - 1);
+        let list = top + 3;
+        assert_eq!(palette_hit(&state, 80, 24, list, left + 5), PaletteHit::Entry(0));
+        assert_eq!(palette_hit(&state, 80, 24, list + 2, left + 5), PaletteHit::Entry(2));
+        assert_eq!(palette_hit(&state, 80, 24, top + 1, left + 5), PaletteHit::Inside, "the query line");
+        assert_eq!(palette_hit(&state, 80, 24, list, left + PALETTE_WIDTH - 1), PaletteHit::Inside, "the border");
+        assert_eq!(palette_hit(&state, 80, 24, list, left - 1), PaletteHit::Outside);
+        assert_eq!(palette_hit(&state, 80, 24, 20, left + 5), PaletteHit::Outside);
+        state.scroll(4, 24);
+        assert_eq!(palette_hit(&state, 80, 24, list, left + 5), PaletteHit::Entry(4));
+    }
+
+    #[test]
+    fn long_lists_get_a_scrollbar() {
+        let palette = Palette::default();
+        let right = 80 - 2;
+        let thumb_rows = |state: &PaletteState| -> Vec<usize> {
+            palette_overlays(state, &[], 80, 24, &palette)
+                .iter()
+                .filter(|o| o.text.contains('┃') && o.col + Span::raw(&o.text).width() - 1 == right)
+                .map(|o| o.row)
+                .collect()
+        };
+        let mut state = palette_with("");
+        let at_top = thumb_rows(&state);
+        assert!(at_top.contains(&4), "thumb at the top: {at_top:?}");
+        state.scroll(100, 24);
+        let at_end = thumb_rows(&state);
+        assert!(at_end.contains(&(4 + PALETTE_ROWS - 1)), "thumb at the end: {at_end:?}");
+        assert!(thumb_rows(&palette_with("copy")).is_empty(), "short lists have none");
     }
 
     #[test]
