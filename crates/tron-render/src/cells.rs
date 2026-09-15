@@ -1140,7 +1140,11 @@ impl CellPipeline {
 fn row_key(row: &Row, cursor_col: Option<usize>) -> u64 {
     use std::hash::{BuildHasher, Hash, Hasher};
     let mut hasher = foldhash::fast::FixedState::with_seed(0x7472_6f6e).build_hasher();
-    row.cells.hash(&mut hasher);
+    // Hash the cells as one byte slice. Their derived `Hash` feeds every field
+    // separately, several hasher rounds per cell instead of one per 16 bytes.
+    // SAFETY: `Cell` is `repr(C)`, 16 bytes without padding (`cell_is_compact`), so every byte is initialized.
+    let bytes = unsafe { std::slice::from_raw_parts(row.cells.as_ptr().cast::<u8>(), size_of_val(&row.cells[..])) };
+    hasher.write(bytes);
     row.line_size.hash(&mut hasher);
     for (col, cell) in row.cells.iter().enumerate() {
         if cell.flags.contains(Flags::GRAPHEME) {
