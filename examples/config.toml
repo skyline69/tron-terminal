@@ -105,6 +105,11 @@ files = []
 # auto redraws continuously when a shader reads tron.time or tron.frame.
 # always or never force it.
 animation = "auto"
+# Frames per second of continuous animations, 0 for the display's refresh rate.
+# Output, typing and cursor shaders always draw at the display's rate. While
+# the window has no focus animations run at 10 frames per second at most, and
+# while it is hidden they stop.
+fps = 30
 
 [images]
 # Memory for decoded kitty graphics protocol images, in MiB.

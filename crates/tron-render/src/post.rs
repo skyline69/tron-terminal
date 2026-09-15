@@ -202,6 +202,17 @@ impl PostChain {
         !self.passes.is_empty()
     }
 
+    /// Changes whenever the chain is replaced.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Whether the input texture still holds the rendered terminal after [`Self::run`].
+    /// Chains of three or more passes write intermediate results into it.
+    pub fn keeps_input(&self) -> bool {
+        self.passes.len() <= 2
+    }
+
     /// Whether the chain must redraw every frame.
     pub fn is_animated(&self) -> bool {
         self.is_active() && self.animated

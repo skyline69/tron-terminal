@@ -791,12 +791,20 @@ pub enum Animation {
     Never,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShaderConfig {
     /// WGSL files, relative to `shaders/` or absolute. Applied in order.
     pub files: Vec<String>,
     pub animation: Animation,
+    /// Frames per second of continuous animations, 0 for the display's refresh rate.
+    pub fps: u32,
+}
+
+impl Default for ShaderConfig {
+    fn default() -> Self {
+        Self { files: Vec::new(), animation: Animation::default(), fps: 30 }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -323,6 +323,9 @@ pub struct CellPipeline {
     shape_cache_len: usize,
     rows: Vec<RowInstances>,
     frame: Vec<Instance>,
+    /// The frame and uniforms last written to the GPU.
+    uploaded: Vec<Instance>,
+    uploaded_uniforms: Uniforms,
     split: usize,
     uniforms: Uniforms,
     metrics: CellMetrics,
@@ -444,6 +447,8 @@ impl CellPipeline {
             shape_cache_len: 0,
             rows: Vec::new(),
             frame: Vec::new(),
+            uploaded: Vec::new(),
+            uploaded_uniforms: Uniforms::zeroed(),
             split: 0,
             uniforms: Uniforms::zeroed(),
             metrics,
@@ -1117,7 +1122,14 @@ impl CellPipeline {
         entry
     }
 
-    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+    /// Writes the frame to the GPU. Returns whether it differs from the last frame
+    /// written; an unchanged frame is not written again.
+    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+        if self.frame == self.uploaded
+            && bytemuck::bytes_of(&self.uniforms) == bytemuck::bytes_of(&self.uploaded_uniforms)
+        {
+            return false;
+        }
         if self.frame.len() > self.instance_capacity {
             self.instance_capacity = self.frame.len().next_power_of_two();
             self.instance_buffer = create_instance_buffer(device, self.instance_capacity);
@@ -1126,6 +1138,9 @@ impl CellPipeline {
             queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&self.frame));
         }
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniforms));
+        self.uploaded.clone_from(&self.frame);
+        self.uploaded_uniforms = self.uniforms;
+        true
     }
 
     /// Instance range of backgrounds and cursor, then of text and decorations.

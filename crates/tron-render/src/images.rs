@@ -345,6 +345,11 @@ impl ImagePipeline {
         gpu.generation = image.generation;
     }
 
+    /// Whether no image is placed on the screen.
+    pub fn is_empty(&self) -> bool {
+        self.instances.is_empty()
+    }
+
     pub fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, viewport: [f32; 2]) {
         if self.instances.is_empty() {
             return;

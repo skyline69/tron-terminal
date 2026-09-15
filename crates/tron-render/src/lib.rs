@@ -248,6 +248,9 @@ pub struct Renderer {
     /// Space above the top padding covered by window decorations, such as a
     /// transparent macOS title bar. The cells' padding includes it at the top only.
     top_inset: f32,
+    /// What the terminal was last drawn into a shader chain's input texture with,
+    /// see [`TerminalKey`]. `None` when it was drawn to the surface.
+    drawn_terminal: Option<TerminalKey>,
     images: ImagePipeline,
     post: PostChain,
     /// The startup screen's own chain, after the user's shaders.
@@ -287,6 +290,16 @@ fn metal_layer(surface: &wgpu::Surface<'_>, f: impl FnOnce(&objc2_quartz_core::C
         Some(surface) => f(&surface.render_layer().lock()),
         None => log::debug!("surface has no Metal layer"),
     }
+}
+
+/// Everything besides the uploaded cells that the terminal drawn into a shader
+/// chain's input texture depends on. While it stays the same, the texture is reused.
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct TerminalKey {
+    size: (u32, u32),
+    /// Generations of the user and startup chains, whose textures are replaced with them.
+    chains: (u64, u64),
+    clear: [u64; 4],
 }
 
 /// Mailbox where available: frames are paced by tron, never blocking on vsync.
@@ -408,6 +421,7 @@ impl Renderer {
 
         Ok(Self {
             top_inset: 0.0,
+            drawn_terminal: None,
             srgb_output: format.is_srgb(),
             _instance: instance,
             surface,
@@ -624,9 +638,20 @@ impl Renderer {
 
     /// Whether frames should be drawn continuously for shader animation.
     pub fn is_animated(&self) -> bool {
-        const CURSOR_ANIMATION: f32 = 1.0;
+        self.has_ambient_animation() || self.has_smooth_animation()
+    }
+
+    /// Whether a user shader animates continuously, like a background. These
+    /// animations can run below the display's refresh rate.
+    pub fn has_ambient_animation(&self) -> bool {
         self.post.is_animated()
-            || self.startup.is_animated()
+    }
+
+    /// Whether an animation needs every display frame: the startup screen's shader,
+    /// or a cursor shader shortly after the cursor moved.
+    pub fn has_smooth_animation(&self) -> bool {
+        const CURSOR_ANIMATION: f32 = 1.0;
+        self.startup.is_animated()
             || (self.post.uses_cursor_motion()
                 && self.started.elapsed().as_secs_f32() - self.cursor_change_time < CURSOR_ANIMATION)
     }
@@ -680,7 +705,7 @@ impl Renderer {
             }
         };
         let viewport = [self.config.width as f32, self.config.height as f32];
-        self.cells.upload(&self.device, &self.queue);
+        let cells_changed = self.cells.upload(&self.device, &self.queue);
         self.images.upload_instances(&self.device, &self.queue, viewport);
 
         let background = cells::to_rgba(self.background, self.srgb_output);
@@ -693,7 +718,17 @@ impl Renderer {
         };
         let surface_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
-        {
+        // A shader chain keeps the rendered terminal in its input texture. When only an
+        // animation moved, the shaders run on it again instead of every glyph being drawn.
+        let chain = [&self.post, &self.startup].into_iter().find(|chain| chain.is_active());
+        let key = chain.filter(|chain| chain.keeps_input()).map(|_| TerminalKey {
+            size: (self.config.width, self.config.height),
+            chains: (self.post.generation(), self.startup.generation()),
+            clear: [clear.r, clear.g, clear.b, clear.a].map(f64::to_bits),
+        });
+        let reuse = key.is_some() && key == self.drawn_terminal && !cells_changed && self.images.is_empty();
+        self.drawn_terminal = key;
+        if !reuse {
             let target = self.post.input_view().or(self.startup.input_view()).unwrap_or(&surface_view);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal"),

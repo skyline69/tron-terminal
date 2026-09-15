@@ -30,8 +30,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, DndAction, EventLoop, Even
 use winit::icon::{Icon, RgbaIcon};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{
-    ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, UserAttentionType, Window, WindowAttributes,
-    WindowId,
+    ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, Theme as WindowTheme, UserAttentionType, Window,
+    WindowAttributes, WindowId,
 };
 
 use tron_config::{
@@ -62,6 +62,8 @@ const STARTUP_SHADER_IDLE: Duration = Duration::from_secs(5);
 const CONFIG_ERROR_TIME: Duration = Duration::from_secs(15);
 /// Duration of the visual bell flash.
 const FLASH: Duration = Duration::from_millis(150);
+/// Frame rate of continuous shader animations while the window has no focus.
+const UNFOCUSED_FPS: u32 = 10;
 /// Link schemes opened on Ctrl+click.
 const LINK_SCHEMES: [&str; 9] =
     ["http://", "https://", "file://", "mailto:", "ftp://", "sftp://", "ssh://", "git://", "gemini://"];
@@ -322,6 +324,10 @@ struct Session {
     ime_area: Option<[f32; 4]>,
     /// Physical pixels at the top covered by window decorations, see [`top_inset`].
     top_inset: f32,
+    /// `[shader] fps`: frame rate of continuous animations, 0 for the display's.
+    animation_fps: u32,
+    /// The window is hidden, minimized or covered: animations stop.
+    occluded: bool,
     /// `TRON_TRACE_LATENCY`: log the time from a key press to the frame showing its effect.
     trace_latency: bool,
     pending_key: Option<Instant>,
@@ -465,6 +471,8 @@ impl App {
             exited: false,
             ime_area: None,
             top_inset: inset,
+            animation_fps: config.shader.fps,
+            occluded: false,
             trace_latency: std::env::var_os("TRON_TRACE_LATENCY").is_some(),
             pending_key: None,
             focused: true,
@@ -717,6 +725,12 @@ impl ApplicationHandler for App {
                 }
                 session.update_hover();
             }
+            WindowEvent::Occluded(occluded) => {
+                session.occluded = occluded;
+                if !occluded {
+                    session.window.request_redraw();
+                }
+            }
             WindowEvent::Focused(focused) => {
                 // Screenshots show the window as it looks focused, even when the compositor gives no focus.
                 let focused = focused || session.screenshot.is_some();
@@ -861,6 +875,7 @@ impl Session {
 
     fn apply_config(&mut self, config: &Config, paths: Option<&Paths>) {
         self.settings = Settings::new(config);
+        self.animation_fps = config.shader.fps;
         let mut problems = Vec::new();
         let (bindings, errors) = config.bindings();
         for error in errors {
@@ -886,6 +901,9 @@ impl Session {
                     colors.ansi(),
                 );
                 self.shared.term.lock().set_default_palette(palette);
+                // Decorations follow the background: light title text on dark themes, and on
+                // macOS a matching blur material.
+                self.window.set_theme(Some(window_theme(colors.background.to_array())));
                 self.renderer.set_theme(Theme {
                     cursor_text: colors.cursor_text.map(|c| c.to_array()),
                     selection_background: colors.selection_background.to_array(),
@@ -1293,8 +1311,14 @@ impl Session {
         if let Some((_, due)) = &self.screenshot {
             wake_at(*due);
         }
-        if self.renderer.is_animated() {
-            wake_at(self.next_frame);
+        // Animations stop while nobody can see them. Cursor effects and the startup
+        // screen keep the display's rate; backgrounds run at `[shader] fps`.
+        if !self.occluded {
+            if self.renderer.has_smooth_animation() {
+                wake_at(self.next_frame);
+            } else if self.renderer.has_ambient_animation() {
+                wake_at(self.last_frame + animation_interval(self.animation_fps, self.focused, self.frame_interval));
+            }
         }
         event_loop.set_control_flow(next_wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -1686,13 +1710,21 @@ impl Session {
         }
     }
 
-    /// Arrow while the application receives mouse events, I-beam while the
-    /// mouse selects text (including Shift held over a mouse-reporting app).
+    /// Whether `y` (physical pixels) lies in a title bar drawn over the content (macOS).
+    fn in_title_bar(&self, y: f64) -> bool {
+        y < f64::from(self.top_inset)
+    }
+
+    /// Arrow over the title bar and while the application receives mouse events,
+    /// I-beam while the mouse selects text (including Shift held over a
+    /// mouse-reporting app).
     fn update_pointer_icon(&mut self, modes: Modes) {
         if !modes.intersects(Modes::MOUSE_TRACKING) {
             self.app_pointer = None;
         }
-        let icon = if self.hovered_link.is_some() {
+        let icon = if self.in_title_bar(self.mouse.position.1) {
+            CursorIcon::Default
+        } else if self.hovered_link.is_some() {
             CursorIcon::Pointer
         } else if self.mouse_reporting(modes) {
             self.app_pointer.unwrap_or(CursorIcon::Default)
@@ -1739,6 +1771,10 @@ impl Session {
     }
 
     fn pointer_button(&mut self, pressed: bool, button: MouseButton) {
+        // Clicks on the title bar move the window; they select nothing.
+        if pressed && self.in_title_bar(self.mouse.position.1) {
+            return;
+        }
         if pressed
             && button == MouseButton::Left
             && self.link_modifier()
@@ -1821,6 +1857,13 @@ impl Session {
         }
         let (row, col) = self.renderer.cell_at(x, y);
         let modes = self.shared.term.lock().modes();
+        if self.top_inset > 0.0 {
+            // Arrow over the title bar, the usual pointer below it.
+            self.update_pointer_icon(modes);
+            if self.in_title_bar(y) && !self.mouse.selecting {
+                return;
+            }
+        }
         if self.mouse_reporting(modes) {
             let report =
                 modes.contains(Modes::MOUSE_ANY) || (modes.contains(Modes::MOUSE_BUTTON) && self.mouse.buttons != 0);
@@ -1841,7 +1884,7 @@ impl Session {
         if !self.mouse.selecting {
             return;
         }
-        let edge = f64::from(self.settings.padding.1) * self.scale_factor;
+        let edge = f64::from(self.settings.padding.1) * self.scale_factor + f64::from(self.top_inset);
         let height = f64::from(self.renderer.size().1);
         let mut term = self.shared.term.lock();
         if y < edge {
@@ -2096,6 +2139,13 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Light or dark window decorations for a background color, so the title text
+/// contrasts with the terminal drawn under a transparent title bar.
+fn window_theme([r, g, b]: [u8; 3]) -> WindowTheme {
+    let luma = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
+    if luma < 128.0 { WindowTheme::Dark } else { WindowTheme::Light }
+}
+
 /// Physical pixels at the top of the surface covered by window decorations: the
 /// transparent macOS title bar (see `macos::window_attributes`), zero elsewhere
 /// and in full screen.
@@ -2106,6 +2156,19 @@ fn top_inset(window: &dyn Window) -> f32 {
 fn padding(padding: (u16, u16), scale_factor: f64) -> [f32; 2] {
     let scale = scale_factor as f32;
     [f32::from(padding.0) * scale, f32::from(padding.1) * scale]
+}
+
+/// Time between frames of continuous shader animations: `fps` frames per second
+/// (0 for the display's rate), at most [`UNFOCUSED_FPS`] without focus, and never
+/// faster than the display.
+fn animation_interval(fps: u32, focused: bool, frame_interval: Duration) -> Duration {
+    let fps = match (fps, focused) {
+        (0, true) => return frame_interval,
+        (0, false) => UNFOCUSED_FPS,
+        (fps, true) => fps,
+        (fps, false) => fps.min(UNFOCUSED_FPS),
+    };
+    Duration::from_secs_f64(1.0 / f64::from(fps)).max(frame_interval)
 }
 
 fn frame_interval(window: &dyn Window) -> Duration {
@@ -2147,6 +2210,25 @@ mod tests {
     #[test]
     fn window_icon_decodes() {
         assert!(window_icon().is_some());
+    }
+
+    #[test]
+    fn animations_slow_down_without_focus() {
+        let display = Duration::from_micros(16_667);
+        assert_eq!(animation_interval(30, true, display), Duration::from_secs_f64(1.0 / 30.0));
+        assert_eq!(animation_interval(0, true, display), display, "0 follows the display");
+        assert_eq!(animation_interval(240, true, display), display, "never faster than the display");
+        assert_eq!(animation_interval(30, false, display), Duration::from_millis(100));
+        assert_eq!(animation_interval(0, false, display), Duration::from_millis(100));
+        assert_eq!(animation_interval(5, false, display), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn decorations_contrast_with_the_background() {
+        assert_eq!(window_theme([0x0a, 0x0e, 0x14]), WindowTheme::Dark, "tron");
+        assert_eq!(window_theme([0xf4, 0xf7, 0xfa]), WindowTheme::Light, "tron-light");
+        assert_eq!(window_theme([0x1e, 0x1e, 0x2e]), WindowTheme::Dark, "catppuccin-mocha");
+        assert_eq!(window_theme([0xfd, 0xf6, 0xe3]), WindowTheme::Light, "solarized-light");
     }
 
     #[test]
