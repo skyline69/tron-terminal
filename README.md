@@ -67,9 +67,19 @@ reinstalling or downgrading. From a checkout, run `./install.sh`.
 - **macOS:** `tron.app` goes to `/Applications`, where Spotlight and Launchpad
   find it, and `~/.local/bin/tron` links to it.
 
-Archives on the [releases page](https://github.com/skyline69/tron-terminal/releases)
-hold a prebuilt binary for Linux and macOS (x86_64 and aarch64). Unpack one and
-run its `./install.sh` to install without Rust.
+Each [release](https://github.com/skyline69/tron-terminal/releases) also has
+packages you can install by hand:
+
+| Package | For |
+|---|---|
+| `tron-VERSION-macos.dmg` | macOS: open it and drag tron to Applications. Universal (Apple Silicon and Intel) |
+| `tron-VERSION-ARCH.AppImage` | Any Linux distribution: make it executable and run it |
+| `tron-VERSION-ARCH.flatpak` | Linux with Flatpak: `flatpak install --user tron-VERSION-ARCH.flatpak`. Shells run on the host |
+| `tron-VERSION-ARCH-linux.tar.gz`, `-macos.tar.gz` | The binary with `install.sh`, which installs it without Rust |
+
+Linux packages need glibc 2.34 or newer (2021 and later distributions). The
+macOS app is not notarized: the first time, open it with right click > Open, or
+allow it under System Settings > Privacy & Security.
 
 Options: `--prebuilt` or `--build` choose without asking, `--system` installs
 for all users under `/usr/local`, `--prefix DIR` picks another location,

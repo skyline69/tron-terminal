@@ -15,8 +15,8 @@ readonly REPO_SLUG="skyline69/tron-terminal"
 readonly REPO_URL="https://github.com/$REPO_SLUG.git"
 readonly APP_ID="dev.tron.Terminal"
 readonly MIN_RUST="1.98"
-# glibc of the Ubuntu runner that builds the Linux release archives (release.yml).
-readonly MIN_GLIBC="2.39"
+# glibc of the AlmaLinux 9 container that builds the Linux release archives (release.yml).
+readonly MIN_GLIBC="2.34"
 # Where releases and sources are fetched from. The overrides serve mirrors and tests.
 readonly API_URL=${TRON_INSTALL_API_URL:-https://api.github.com/repos/$REPO_SLUG}
 readonly DOWNLOAD_URL=${TRON_INSTALL_DOWNLOAD_URL:-https://github.com/$REPO_SLUG/releases/download}

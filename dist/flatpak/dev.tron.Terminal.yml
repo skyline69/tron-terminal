@@ -1,0 +1,47 @@
+# Flatpak manifest for tron, built into a .flatpak bundle by the release workflow.
+#
+#   flatpak-builder --user --install --force-clean build dist/flatpak/dev.tron.Terminal.yml
+#
+# A terminal is only useful with the host's shell and tools, so tron runs shells
+# on the host through flatpak-spawn (org.freedesktop.Flatpak) and can read files
+# anywhere, for dropped paths and image transfers.
+app-id: dev.tron.Terminal
+runtime: org.freedesktop.Platform
+runtime-version: "26.08"
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: tron
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=host
+  - --talk-name=org.freedesktop.Flatpak
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.a11y.Bus
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  # Crates are downloaded during the build; the bundle is not built for Flathub.
+  build-args:
+    - --share=network
+  env:
+    CARGO_HOME: /run/build/tron/cargo-home
+modules:
+  - name: tron
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked -p tron
+      - install -Dm755 target/release/tron /app/bin/tron
+      - install -Dm644 dist/dev.tron.Terminal.desktop /app/share/applications/dev.tron.Terminal.desktop
+      - install -Dm644 dist/dev.tron.Terminal.metainfo.xml /app/share/metainfo/dev.tron.Terminal.metainfo.xml
+      - install -Dm644 dist/dev.tron.Terminal.svg /app/share/icons/hicolor/scalable/apps/dev.tron.Terminal.svg
+      - install -Dm644 dist/dev.tron.Terminal.png /app/share/icons/hicolor/256x256/apps/dev.tron.Terminal.png
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .git
+          - .flatpak-builder
