@@ -14,6 +14,8 @@
   <img src="https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-ff4fd8" alt="License: MIT or Apache-2.0">
 </p>
 
+<img width="1022" height="675" alt="image" src="https://github.com/user-attachments/assets/0d25a6ea-165a-461f-81bd-2afd85ac7cf4" />
+
 - **Fast.** Custom parser and screen model with SIMD friendly fast paths,
   lock-free frame building and frame pacing. Faster than Alacritty and Ghostty
   in the throughput benchmarks below.
