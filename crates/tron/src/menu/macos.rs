@@ -7,9 +7,9 @@ use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Imp, NSObject, Sel};
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
+use objc2::{MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2_app_kit::{NSApplication, NSApplicationDelegate, NSEventModifierFlags, NSMenu, NSMenuItem, NSView};
 use objc2_foundation::{NSPoint, NSString};
 use tron_config::{Binding, KeyCombo};
 use winit::event_loop::EventLoopProxy;
@@ -25,6 +25,15 @@ static PROXY: OnceLock<EventLoopProxy> = OnceLock::new();
 thread_local! {
     /// The installed menu bar. AppKit objects are main thread only, as is this.
     static MENU_BAR: RefCell<Option<MenuBar>> = const { RefCell::new(None) };
+    /// A context menu waiting to open.
+    static PENDING_CONTEXT_MENU: RefCell<Option<PendingMenu>> = const { RefCell::new(None) };
+}
+
+/// A context menu, with the view and the point in it where it opens.
+struct PendingMenu {
+    menu: Retained<NSMenu>,
+    view: Retained<NSView>,
+    location: NSPoint,
 }
 
 struct MenuBar {
@@ -34,6 +43,8 @@ struct MenuBar {
     items: Vec<(Item, Retained<NSMenuItem>)>,
     /// Shown when the Dock icon is right-clicked; AppKit adds the window list and Options itself.
     dock: Retained<NSMenu>,
+    /// The application does not retain its delegate, so the delegate lives here.
+    _delegate: Retained<AppDelegate>,
 }
 
 define_class!(
@@ -53,6 +64,13 @@ define_class!(
                 proxy.wake_up();
             }
         }
+
+        // SAFETY: sent by `performSelector:withObject:afterDelay:` with no object, returning nothing.
+        #[unsafe(method(showContextMenu:))]
+        fn show_context_menu(&self, _object: Option<&AnyObject>) {
+            let Some(pending) = PENDING_CONTEXT_MENU.take() else { return };
+            pending.menu.popUpMenuPositioningItem_atLocation_inView(None, pending.location, Some(&pending.view));
+        }
     }
 );
 
@@ -64,12 +82,38 @@ impl MenuTarget {
     }
 }
 
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and `AppDelegate` does not implement `Drop`.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TronAppDelegate"]
+    struct AppDelegate;
+
+    unsafe impl NSObjectProtocol for AppDelegate {}
+
+    unsafe impl NSApplicationDelegate for AppDelegate {
+        // SAFETY: AppKit sends this with the application and expects a menu or nil back.
+        #[unsafe(method_id(applicationDockMenu:))]
+        fn application_dock_menu(&self, _sender: &NSApplication) -> Option<Retained<NSMenu>> {
+            MENU_BAR.with_borrow(|menu_bar| menu_bar.as_ref().map(|bar| bar.dock.clone()))
+        }
+    }
+);
+
+impl AppDelegate {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: `init` is NSObject's designated initializer.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
 /// Opens the context menu at `position`, in physical pixels from the top left of
-/// the window's content, until an item is chosen or the menu is dismissed.
+/// the window's content.
 ///
-/// AppKit tracks the menu in a nested run loop. winit queues the events that
-/// arrive meanwhile and delivers them afterwards, so the window does not redraw
-/// while the menu is open.
+/// The menu opens right after the current event is handled. AppKit tracks a menu
+/// in a nested run loop, and winit panics when events arrive there while one of
+/// its event handlers is still running.
 pub fn show_context_menu(window: &dyn Window, position: (f64, f64), has_selection: bool) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let Some(target) = MENU_BAR.with_borrow(|menu_bar| menu_bar.as_ref().map(|bar| bar.target.clone())) else {
@@ -87,7 +131,16 @@ pub fn show_context_menu(window: &dyn Window, position: (f64, f64), has_selectio
     // winit's view is flipped, with its origin at the top left, and measured in points.
     let scale = window.scale_factor();
     let location = NSPoint::new(position.0 / scale, position.1 / scale);
-    menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(view));
+    PENDING_CONTEXT_MENU.set(Some(PendingMenu { menu, view: view.retain(), location }));
+    // SAFETY: `showContextMenu:` is defined on `MenuTarget` and takes one object, here nil.
+    let _: () = unsafe {
+        msg_send![
+            &*builder.target,
+            performSelector: sel!(showContextMenu:),
+            withObject: None::<&AnyObject>,
+            afterDelay: 0.0_f64
+        ]
+    };
 }
 
 /// Commands chosen from the menu since the last call.
@@ -165,45 +218,11 @@ pub fn install(proxy: EventLoopProxy, bindings: &[Binding]) {
 
     let dock = NSMenu::new(mtm);
     builder.item(&dock, Item::NewWindow);
-    MENU_BAR.set(Some(MenuBar { target: builder.target, items: builder.items, dock }));
-    add_dock_menu(&app);
+    let delegate = AppDelegate::new(mtm);
+    MENU_BAR.set(Some(MenuBar { target: builder.target, items: builder.items, dock, _delegate: delegate.clone() }));
+    // winit never registers an application delegate, so tron's answers for the Dock menu.
+    app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     update(bindings);
-}
-
-/// Makes the application delegate answer `applicationDockMenu:` with `MenuBar::dock`.
-///
-/// AppKit asks the delegate for the Dock menu, and the delegate is winit's own
-/// class, which tron cannot subclass. The method is added to that class at
-/// runtime instead; `class_addMethod` leaves the class unchanged if winit ever
-/// implements the method itself.
-fn add_dock_menu(app: &NSApplication) {
-    /// `- (NSMenu *)applicationDockMenu:(NSApplication *)sender`
-    extern "C-unwind" fn dock_menu(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) -> *const NSMenu {
-        // Not owned by the caller: `MENU_BAR` keeps the menu alive. AppKit asks on the main thread.
-        MENU_BAR.with_borrow(|menu_bar| menu_bar.as_ref().map_or(std::ptr::null(), |bar| Retained::as_ptr(&bar.dock)))
-    }
-    type DockMenu = extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> *const NSMenu;
-
-    let Some(delegate) = app.delegate() else {
-        log::warn!("no application delegate for the Dock menu");
-        return;
-    };
-    let object: &AnyObject = (*delegate).as_ref();
-    let class = std::ptr::from_ref(object.class()).cast_mut();
-    // SAFETY: the implementation takes self, the selector and one object and returns an
-    // object, as the type encoding `@@:@` says, which is the signature AppKit calls
-    // `applicationDockMenu:` with. Function pointers all have the size of `Imp`.
-    let added = unsafe {
-        let imp = std::mem::transmute::<DockMenu, Imp>(dock_menu);
-        objc2::ffi::class_addMethod(class, sel!(applicationDockMenu:), imp, c"@@:@".as_ptr())
-    };
-    if !added.as_bool() {
-        log::warn!("the application delegate already has a Dock menu");
-        return;
-    }
-    // AppKit may check which optional methods a delegate implements when it is set,
-    // so set it again now that it has one more.
-    app.setDelegate(Some(&delegate));
 }
 
 /// Shows the shortcuts of `bindings` on the menu items, after the configuration
