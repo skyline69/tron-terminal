@@ -855,6 +855,16 @@ impl Terminal {
         self.selection.as_ref()?.range(self.grid(), &self.word_separators)
     }
 
+    /// The word at a viewport cell, as a double click selects it, and the column it
+    /// starts at. None on blank cells and for words that start on an earlier line.
+    pub fn word_at(&self, row: usize, col: usize) -> Option<(String, usize)> {
+        let point = self.viewport_point(row, col);
+        let range = Selection::new(crate::SelectionKind::Word, point).range(self.grid(), &self.word_separators)?;
+        let text = range.text(self.grid());
+        let word = text.trim();
+        (!word.is_empty() && range.start.line == point.line).then(|| (word.to_owned(), range.start.col))
+    }
+
     pub fn selection_text(&self) -> Option<String> {
         let text = self.selection_range()?.text(self.grid());
         (!text.is_empty()).then_some(text)
@@ -2706,6 +2716,15 @@ mod tests {
         assert_eq!(t.take_responses().unwrap(), b"\x1b]11;rgb:0000/0000/0000\x07");
         assert_eq!(t.palette().colors[1], [255, 0, 0]);
         assert_eq!(t.take_events(), vec![TermEvent::ClipboardStore { primary: false, text: "hello".into() }]);
+    }
+
+    #[test]
+    fn word_at_finds_the_word_under_a_cell() {
+        let t = term(24, 1, b"echo Discharging now");
+        assert_eq!(t.word_at(0, 7), Some(("Discharging".to_owned(), 5)));
+        assert_eq!(t.word_at(0, 0), Some(("echo".to_owned(), 0)));
+        assert_eq!(t.word_at(0, 4), None);
+        assert_eq!(t.word_at(0, 22), None);
     }
 
     #[test]

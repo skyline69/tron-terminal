@@ -12,6 +12,7 @@ mod menu;
 mod mouse;
 mod terminfo;
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -151,7 +152,8 @@ fn main() -> anyhow::Result<()> {
         config_dirty,
         _watcher: watcher,
         gpu,
-        session: None,
+        sessions: HashMap::new(),
+        active: None,
         max_fps: None,
     })?;
     Ok(())
@@ -163,6 +165,66 @@ struct Shared {
     /// Set by the reader when it woke the event loop and the wake is unhandled.
     wake_pending: AtomicBool,
     exited: AtomicBool,
+}
+
+/// What a new window runs.
+#[derive(Default)]
+struct Launch {
+    /// A program instead of the shell (`tron -e`).
+    command: Option<Vec<String>>,
+    cwd: Option<PathBuf>,
+    /// The startup screen runs before the shell, on `tab` when given.
+    startup: bool,
+    tab: Option<&'static str>,
+}
+
+/// A window's shell, set aside while another program such as Settings… runs in its place.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct Suspended {
+    pty: Pty,
+    shared: Arc<Shared>,
+    input: mpsc::Sender<Vec<u8>>,
+}
+
+/// Where a window's terminal is and how its cells are laid out, for Look Up.
+#[cfg(target_os = "macos")]
+struct LookUpTarget(std::cell::RefCell<LookUpLayout>);
+
+#[cfg(target_os = "macos")]
+struct LookUpLayout {
+    shared: Arc<Shared>,
+    /// Top left of the cell grid in physical pixels.
+    origin: [f32; 2],
+    metrics: tron_font::CellMetrics,
+    grid: (usize, usize),
+    scale_factor: f64,
+    font_family: String,
+    font_size: f32,
+}
+
+#[cfg(target_os = "macos")]
+impl macos::WordAt for LookUpTarget {
+    fn word_at(&self, x: f64, y: f64) -> Option<macos::LookUpWord> {
+        let layout = self.0.borrow();
+        let (width, height) = (f64::from(layout.metrics.width), f64::from(layout.metrics.height));
+        let [left, top] = layout.origin.map(f64::from);
+        let col = ((x * layout.scale_factor - left) / width).floor();
+        let row = ((y * layout.scale_factor - top) / height).floor();
+        let (cols, rows) = layout.grid;
+        if col < 0.0 || row < 0.0 || col >= cols as f64 || row >= rows as f64 {
+            return None;
+        }
+        let (text, start) = layout.shared.term.lock().word_at(row as usize, col as usize)?;
+        Some(macos::LookUpWord {
+            text,
+            baseline: (
+                (left + start as f64 * width) / layout.scale_factor,
+                (top + row * height + f64::from(layout.metrics.baseline)) / layout.scale_factor,
+            ),
+            font_family: layout.font_family.clone(),
+            font_size: f64::from(layout.font_size),
+        })
+    }
 }
 
 struct App {
@@ -182,7 +244,10 @@ struct App {
     _watcher: Option<Watcher>,
     /// GPU initialization started at launch, joined when the window exists.
     gpu: Option<thread::JoinHandle<Result<Gpu, tron_render::RenderError>>>,
-    session: Option<Session>,
+    /// Every window runs in this one process, so macOS shows one app in the Dock.
+    sessions: HashMap<WindowId, Session>,
+    /// The window menu commands act on: the one focused last.
+    active: Option<WindowId>,
     /// Highest refresh rate of the connected monitors, for the startup screen's frame rate choices.
     max_fps: Option<u32>,
 }
@@ -377,8 +442,16 @@ struct Session {
     /// The folder shown beside the title, and when the shell's directory was last read.
     #[cfg(target_os = "macos")]
     represented_directory: (Option<PathBuf>, Instant),
+    #[cfg(target_os = "macos")]
+    look_up: std::rc::Rc<LookUpTarget>,
     /// The title a program set, none when it was never set or set empty.
     program_title: Option<String>,
+    /// When this window needs the event loop to wake it next.
+    wake_at: Option<Instant>,
+    /// A window this one asked for, opened by the `App`.
+    window_request: Option<Launch>,
+    /// The shell, while Settings… runs in its place.
+    suspended: Option<Suspended>,
     /// `TRON_TRACE_LATENCY`: log the time from a key press to the frame showing its effect.
     trace_latency: bool,
     pending_key: Option<Instant>,
@@ -394,7 +467,7 @@ struct Session {
 }
 
 impl App {
-    fn create_session(&mut self, event_loop: &dyn ActiveEventLoop) -> anyhow::Result<Session> {
+    fn create_session(&mut self, event_loop: &dyn ActiveEventLoop, launch: Launch) -> anyhow::Result<Session> {
         self.max_fps = max_refresh_rate(event_loop);
         let config = &self.config;
         let started = Instant::now();
@@ -438,7 +511,7 @@ impl App {
         let mut term = Terminal::new(cols, rows, config.scrollback.lines);
         // Images sent before the first frame must be sized with the real cell size.
         term.set_cell_pixels(metrics.width, metrics.height);
-        let pty = Pty::spawn(&self.spawn_options(), window_size(cols, rows, metrics))?;
+        let pty = Pty::spawn(&self.spawn_options(&launch), window_size(cols, rows, metrics))?;
         let shared = Arc::new(Shared {
             term: Mutex::new(term),
             wake_pending: AtomicBool::new(false),
@@ -491,6 +564,16 @@ impl App {
         let accessibility = (std::env::var_os("TRON_ACCESSIBILITY").is_none_or(|v| v != "0"))
             .then(|| accessibility::Accessibility::new(self.proxy.clone(), window.as_ref()))
             .flatten();
+        #[cfg(target_os = "macos")]
+        let look_up = std::rc::Rc::new(LookUpTarget(std::cell::RefCell::new(LookUpLayout {
+            shared: shared.clone(),
+            origin: [window_padding[0], window_padding[1] + inset],
+            metrics,
+            grid: (cols, rows),
+            scale_factor,
+            font_family: config.font.family.clone(),
+            font_size: config.font.size,
+        })));
         let mut session = Session {
             clipboard: Clipboard::new(window.as_ref()),
             accessibility,
@@ -528,7 +611,12 @@ impl App {
             scrollbar: ScrollbarState::new(),
             #[cfg(target_os = "macos")]
             represented_directory: (None, Instant::now() - REPRESENTED_DIRECTORY_POLL),
+            #[cfg(target_os = "macos")]
+            look_up,
             program_title: None,
+            wake_at: None,
+            window_request: None,
+            suspended: None,
             trace_latency: std::env::var_os("TRON_TRACE_LATENCY").is_some(),
             pending_key: None,
             focused: true,
@@ -555,10 +643,17 @@ impl App {
             applied_translucency: None,
         };
         session.apply_config(config, self.paths.as_ref());
+        #[cfg(target_os = "macos")]
+        {
+            let target: std::rc::Rc<dyn macos::WordAt> = session.look_up.clone();
+            macos::install_look_up(session.window.as_ref(), &target);
+        }
         if let Some(error) = self.config_error.take() {
             session.show_config_errors(vec![error]);
         }
-        if let Some(path) = std::env::var_os("TRON_SCREENSHOT") {
+        if let Some(path) = std::env::var_os("TRON_SCREENSHOT")
+            && self.sessions.is_empty()
+        {
             let delay = std::env::var("TRON_SCREENSHOT_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
             if session.renderer.enable_capture() {
                 session.screenshot = Some((path.into(), Instant::now() + Duration::from_millis(delay)));
@@ -567,9 +662,9 @@ impl App {
         Ok(session)
     }
 
-    fn spawn_options(&self) -> SpawnOptions {
+    fn spawn_options(&self, launch: &Launch) -> SpawnOptions {
         let shell = &self.config.shell;
-        let (program, args) = match &self.cli.command {
+        let (program, args) = match &launch.command {
             Some(command) => (Some(command[0].clone()), command[1..].to_vec()),
             None => (shell.program.clone(), shell.args.clone()),
         };
@@ -577,7 +672,7 @@ impl App {
             program,
             args,
             term: shell.term.clone(),
-            cwd: self.cli.working_directory.clone(),
+            cwd: launch.cwd.clone(),
             env: Vec::new(),
             remove_env: vec![DEBUG_STARTUP_TOKEN_ENV.into()],
         };
@@ -611,7 +706,7 @@ impl App {
             options.program = Some(program);
             options.args = args;
         }
-        if self.show_startup
+        if launch.startup
             && let Ok(exe) = std::env::current_exe()
         {
             // The startup screen runs first and then replaces itself with the shell.
@@ -630,7 +725,7 @@ impl App {
             if self.config.startup_animations == Some(false) {
                 options.env.push((tron_startup::ANIMATIONS_ENV.into(), "0".into()));
             }
-            if let Some(tab) = self.cli.startup_tab() {
+            if let Some(tab) = launch.tab {
                 options.env.push((tron_startup::TAB_ENV.into(), tab.into()));
             }
         }
@@ -646,13 +741,13 @@ impl App {
                 // A running preview stays on top of the reloaded file.
                 let previewed =
                     self.preview.as_deref().and_then(|overlay| Config::with_overlay(Some(paths), overlay).ok());
-                if let Some(session) = &mut self.session {
+                for session in self.sessions.values_mut() {
                     session.apply_config(previewed.as_ref().unwrap_or(&self.config), self.paths.as_ref());
                 }
             }
             Err(error) => {
                 log::error!("{error}");
-                if let Some(session) = &mut self.session {
+                for session in self.sessions.values_mut() {
                     session.show_config_errors(vec![error.to_string()]);
                 }
             }
@@ -667,7 +762,7 @@ impl App {
             PreviewRequest::Show(overlay) => match Config::with_overlay(self.paths.as_ref(), &overlay) {
                 Ok(config) => {
                     let started = Instant::now();
-                    if let Some(session) = &mut self.session {
+                    for session in self.sessions.values_mut() {
                         session.warm_shaders(self.paths.as_ref());
                         session.apply_config(&config, self.paths.as_ref());
                     }
@@ -677,10 +772,10 @@ impl App {
                 Err(error) => log::warn!("ignoring startup screen preview: {error}"),
             },
             PreviewRequest::Restore => {
-                if self.preview.take().is_some()
-                    && let Some(session) = &mut self.session
-                {
-                    session.apply_config(&self.config, self.paths.as_ref());
+                if self.preview.take().is_some() {
+                    for session in self.sessions.values_mut() {
+                        session.apply_config(&self.config, self.paths.as_ref());
+                    }
                 }
             }
             PreviewRequest::Commit => {
@@ -698,7 +793,7 @@ impl App {
         match command {
             menu::MenuCommand::Action(Action::ReloadConfig) => self.reload_config(),
             menu::MenuCommand::Action(action) => {
-                let Some(session) = self.session.as_mut() else { return };
+                let Some(session) = self.active.and_then(|id| self.sessions.get_mut(&id)) else { return };
                 // While searching, Find moves to the next match like its key binding does.
                 if action == Action::Search && session.search.is_some() {
                     session.search_step(true, false);
@@ -706,50 +801,60 @@ impl App {
                     session.run_action(action);
                 }
             }
-            menu::MenuCommand::OpenSettings => {
-                let Ok(exe) = std::env::current_exe() else { return };
-                let mut command = Command::new(exe);
-                // Without TERM_PROGRAM a tron started from a tron shell opens a window
-                // instead of taking over a terminal it does not have.
-                command.arg("settings").env_remove("TERM_PROGRAM");
-                spawn_detached(command);
-            }
+            menu::MenuCommand::OpenSettings => self.open_settings(),
             menu::MenuCommand::OpenUrl(url) => {
-                if let Some(session) = &self.session {
+                if let Some(session) = self.active.and_then(|id| self.sessions.get(&id)) {
                     session.open_link(url);
                 }
             }
+        }
+    }
+
+    /// Runs the startup screen's Settings tab in the active window, in place of its
+    /// shell until it closes, as `tron settings` typed there does.
+    fn open_settings(&mut self) {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let mut options = self.spawn_options(&Launch::default());
+        // tron itself, also in a Flatpak where the shell's command runs on the host.
+        options.program = Some(exe.to_string_lossy().into_owned());
+        options.args = vec!["settings".to_owned()];
+        let Some(session) = self.active.and_then(|id| self.sessions.get_mut(&id)) else { return };
+        if let Err(error) = session.run_in_place(&options, &self.proxy) {
+            log::error!("cannot open settings: {error:#}");
         }
     }
 }
 
 impl ApplicationHandler for App {
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
-        if self.session.is_some() {
+        if !self.sessions.is_empty() {
             return;
         }
-        match self.create_session(event_loop) {
-            Ok(session) => {
-                // Output may have arrived while the session was being created.
-                session.shared.wake_pending.store(false, Ordering::Release);
-                session.window.request_redraw();
-                #[cfg(target_os = "macos")]
-                menu::install(self.proxy.clone(), &session.bindings);
-                self.session = Some(session);
-            }
-            Err(error) => {
-                log::error!("{error:#}");
-                event_loop.exit();
+        let launch = Launch {
+            command: self.cli.command.clone(),
+            cwd: self.cli.working_directory.clone(),
+            startup: self.show_startup,
+            tab: self.cli.startup_tab(),
+        };
+        self.open_window(event_loop, launch);
+    }
+
+    fn new_events(&mut self, _event_loop: &dyn ActiveEventLoop, cause: StartCause) {
+        if let StartCause::ResumeTimeReached { .. } = cause {
+            let now = Instant::now();
+            for session in self.sessions.values_mut() {
+                if session.wake_at.is_some_and(|at| at <= now) {
+                    session.wake_at = None;
+                    session.window.request_redraw();
+                }
             }
         }
     }
 
-    fn new_events(&mut self, _event_loop: &dyn ActiveEventLoop, cause: StartCause) {
-        if let StartCause::ResumeTimeReached { .. } = cause
-            && let Some(session) = &self.session
-        {
-            session.window.request_redraw();
-        }
+    /// Sleeps until the earliest window needs to wake.
+    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
+        let next = self.sessions.values().filter_map(|session| session.wake_at).min();
+        event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
@@ -760,46 +865,108 @@ impl ApplicationHandler for App {
         for command in menu::take_commands() {
             self.run_menu_command(command);
         }
-        let Some(session) = self.session.as_mut() else { return };
-        session.shared.wake_pending.store(false, Ordering::Release);
-        session.poll_shaders();
-        if session.shared.exited.load(Ordering::Acquire) && !session.exited {
-            if session.settings.close_on_exit {
-                event_loop.exit();
-                return;
+        let mut closed = Vec::new();
+        let mut previews = Vec::new();
+        for (&id, session) in &mut self.sessions {
+            // The program run in the shell's place ended: the shell comes back.
+            if session.suspended.is_some() && session.shared.exited.load(Ordering::Acquire) {
+                session.restore_shell();
             }
-            session.exited = true;
-            let mut term = session.shared.term.lock();
-            Parser::new().advance(&mut *term, b"\r\n\x1b[0;2m[process exited, press any key to close]\x1b[0m");
+            session.shared.wake_pending.store(false, Ordering::Release);
+            session.poll_shaders();
+            if session.shared.exited.load(Ordering::Acquire) && !session.exited {
+                if session.settings.close_on_exit {
+                    closed.push(id);
+                    continue;
+                }
+                session.exited = true;
+                let mut term = session.shared.term.lock();
+                Parser::new().advance(&mut *term, b"\r\n\x1b[0;2m[process exited, press any key to close]\x1b[0m");
+            }
+            let (events, modes) = {
+                let mut term = session.shared.term.lock();
+                (term.take_events(), term.modes())
+            };
+            session.handle_events(events);
+            session.update_pointer_icon(modes);
+            session.schedule_redraw();
+            previews.extend(session.preview_request.take());
         }
-        let (events, modes) = {
-            let mut term = session.shared.term.lock();
-            (term.take_events(), term.modes())
-        };
-        session.handle_events(events);
-        session.update_pointer_icon(modes);
-        session.schedule_redraw(event_loop);
-        if let Some(request) = session.preview_request.take() {
+        for id in closed {
+            self.close_window(event_loop, id);
+        }
+        for request in previews {
             self.preview(request);
+        }
+        self.open_requested_windows(event_loop);
+    }
+
+    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.session_event(event_loop, id, event);
+        self.open_requested_windows(event_loop);
+    }
+}
+
+impl App {
+    fn open_window(&mut self, event_loop: &dyn ActiveEventLoop, launch: Launch) {
+        match self.create_session(event_loop, launch) {
+            Ok(session) => {
+                // Output may have arrived while the session was being created.
+                session.shared.wake_pending.store(false, Ordering::Release);
+                session.window.request_redraw();
+                #[cfg(target_os = "macos")]
+                if self.sessions.is_empty() {
+                    menu::install(self.proxy.clone(), &session.bindings);
+                }
+                let id = session.window.id();
+                self.active = Some(id);
+                self.sessions.insert(id, session);
+            }
+            Err(error) => {
+                log::error!("{error:#}");
+                if self.sessions.is_empty() {
+                    event_loop.exit();
+                }
+            }
         }
     }
 
-    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(session) = self.session.as_mut() else { return };
+    /// Closes a window, and quits after the last one.
+    fn close_window(&mut self, event_loop: &dyn ActiveEventLoop, id: WindowId) {
+        self.sessions.remove(&id);
+        if self.active == Some(id) {
+            self.active = self.sessions.keys().next().copied();
+        }
+        if self.sessions.is_empty() {
+            event_loop.exit();
+        }
+    }
+
+    /// Opens the windows that windows asked for, such as with New Window.
+    fn open_requested_windows(&mut self, event_loop: &dyn ActiveEventLoop) {
+        let requests: Vec<Launch> =
+            self.sessions.values_mut().filter_map(|session| session.window_request.take()).collect();
+        for launch in requests {
+            self.open_window(event_loop, launch);
+        }
+    }
+
+    fn session_event(&mut self, event_loop: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let Some(session) = self.sessions.get_mut(&id) else { return };
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.close_window(event_loop, id),
             WindowEvent::RedrawRequested => {
                 session.redraw(event_loop);
                 if let Some(request) = session.preview_request.take() {
                     self.preview(request);
                     return;
                 }
-                let Some(session) = self.session.as_mut() else { return };
+                let Some(session) = self.sessions.get_mut(&id) else { return };
                 if session.renderer.is_device_lost() {
                     let config = &self.config;
                     if let Err(error) = session.recreate_renderer(config, self.paths.as_ref(), &self.proxy) {
                         log::error!("cannot recover from GPU device loss: {error:#}");
-                        event_loop.exit();
+                        self.close_window(event_loop, id);
                     }
                 }
             }
@@ -832,6 +999,9 @@ impl ApplicationHandler for App {
                 // Screenshots show the window as it looks focused, even when the compositor gives no focus.
                 let focused = focused || session.screenshot.is_some();
                 session.focused = focused;
+                if focused {
+                    self.active = Some(id);
+                }
                 if let Some(accessibility) = &mut session.accessibility {
                     accessibility.set_focused(focused);
                 }
@@ -848,7 +1018,7 @@ impl ApplicationHandler for App {
                 }
                 if pressed {
                     if session.exited {
-                        event_loop.exit();
+                        self.close_window(event_loop, id);
                         return;
                     }
                     session.blink_epoch = Instant::now();
@@ -1284,21 +1454,24 @@ impl Session {
 
     /// Redraws at most once per display refresh. Output that arrives faster is
     /// batched into the next frame instead of rendering every chunk.
-    fn schedule_redraw(&mut self, event_loop: &dyn ActiveEventLoop) {
+    fn schedule_redraw(&mut self) {
         if Instant::now() >= self.next_frame {
             self.window.request_redraw();
         } else {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+            self.wake_at = Some(self.wake_at.map_or(self.next_frame, |at| at.min(self.next_frame)));
         }
     }
 
     fn redraw(&mut self, event_loop: &dyn ActiveEventLoop) {
         #[cfg(target_os = "macos")]
-        self.update_represented_directory();
+        {
+            self.update_represented_directory();
+            self.update_look_up();
+        }
         {
             let mut term = self.shared.term.lock();
             if term.sync_blocked() {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + SYNC_POLL));
+                self.wake_at = Some(Instant::now() + SYNC_POLL);
                 return;
             }
             if let Some(title) = term.take_title() {
@@ -1441,7 +1614,7 @@ impl Session {
                 wake_at(self.last_frame + animation_interval(self.animation_fps, self.focused, self.frame_interval));
             }
         }
-        event_loop.set_control_flow(next_wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+        self.wake_at = next_wake;
     }
 
     /// Tells the input method where the cursor is, so its popup appears there.
@@ -1688,8 +1861,77 @@ impl Session {
     /// The shell's working directory: reported through OSC 7, else read from the
     /// shell process, since shells without integration do not report it.
     fn working_directory(&self) -> Option<PathBuf> {
-        let reported = self.shared.term.lock().cwd().map(percent_decode).map(PathBuf::from);
-        reported.or_else(|| self.pty.cwd()).filter(|path| path.is_dir())
+        let (shared, pty) = match &self.suspended {
+            Some(shell) => (&shell.shared, &shell.pty),
+            None => (&self.shared, &self.pty),
+        };
+        let reported = shared.term.lock().cwd().map(percent_decode).map(PathBuf::from);
+        reported.or_else(|| pty.cwd()).filter(|path| path.is_dir())
+    }
+
+    /// Runs `options` in this window in place of its shell, which keeps running
+    /// out of sight and comes back when the program exits.
+    #[cfg(target_os = "macos")]
+    fn run_in_place(&mut self, options: &SpawnOptions, proxy: &EventLoopProxy) -> anyhow::Result<()> {
+        if self.suspended.is_some() || self.exited {
+            return Ok(());
+        }
+        let (cols, rows) = self.renderer.grid_size();
+        let metrics = self.fonts.metrics();
+        let mut term = Terminal::new(cols, rows, 0);
+        term.set_cell_pixels(metrics.width, metrics.height);
+        let pty = Pty::spawn(options, window_size(cols, rows, metrics))?;
+        let shared = Arc::new(Shared {
+            term: Mutex::new(term),
+            wake_pending: AtomicBool::new(false),
+            exited: AtomicBool::new(false),
+        });
+        let input = spawn_writer(pty.writer()?)?;
+        spawn_reader(pty.reader()?, shared.clone(), proxy.clone(), input.clone())?;
+        self.suspended = Some(Suspended {
+            pty: std::mem::replace(&mut self.pty, pty),
+            shared: std::mem::replace(&mut self.shared, shared),
+            input: std::mem::replace(&mut self.input, input),
+        });
+        self.search = None;
+        // Every row of the new terminal is drawn, not only the ones it changes.
+        self.snapshot = Snapshot::default();
+        self.window.request_redraw();
+        Ok(())
+    }
+
+    /// Brings the shell back after the program run in its place exited.
+    fn restore_shell(&mut self) {
+        let Some(shell) = self.suspended.take() else { return };
+        self.pty = shell.pty;
+        self.shared = shell.shared;
+        self.input = shell.input;
+        self.search = None;
+        self.snapshot = Snapshot::default();
+        self.shared.term.lock().grid_mut().damage_all();
+        // The window may have been resized meanwhile.
+        self.resize_grid();
+        self.program_title = None;
+        let home = std::env::home_dir();
+        self.window.set_title(&window_title(None, self.title_directory(), home.as_deref(), &self.settings.title));
+    }
+
+    /// Gives Look Up the current terminal and cell layout.
+    #[cfg(target_os = "macos")]
+    fn update_look_up(&self) {
+        let mut layout = self.look_up.0.borrow_mut();
+        if !Arc::ptr_eq(&layout.shared, &self.shared) {
+            layout.shared = self.shared.clone();
+        }
+        let [left, top] = padding(self.settings.padding, self.scale_factor);
+        layout.origin = [left, top + self.top_inset];
+        layout.metrics = self.fonts.metrics();
+        layout.grid = self.renderer.grid_size();
+        layout.scale_factor = self.scale_factor;
+        if layout.font_family != self.font_family {
+            layout.font_family.clone_from(&self.font_family);
+        }
+        layout.font_size = self.font_size;
     }
 
     /// Follows the shell's directory with the folder icon beside the title.
@@ -1724,15 +1966,9 @@ impl Session {
         None
     }
 
-    fn new_window(&self) {
-        let cwd = self.working_directory();
-        let Ok(exe) = std::env::current_exe() else { return };
-        let mut command = Command::new(exe);
-        command.arg("--no-startup");
-        if let Some(cwd) = cwd.or_else(|| std::env::current_dir().ok()) {
-            command.arg("--working-directory").arg(cwd);
-        }
-        spawn_detached(command);
+    /// Asks for a window in the shell's directory, opened in this process.
+    fn new_window(&mut self) {
+        self.window_request = Some(Launch { cwd: self.working_directory(), ..Launch::default() });
     }
 
     fn open_link(&self, uri: &str) {
