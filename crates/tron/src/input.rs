@@ -11,6 +11,14 @@ const REPORT_ALTERNATE_KEYS: u8 = 4;
 const REPORT_ALL_KEYS: u8 = 8;
 const REPORT_TEXT: u8 = 16;
 
+/// Whether Option, when it is not configured as Alt, composes a character with
+/// `key` on macOS. It composes nothing with Backspace, so Option+Backspace always
+/// acts as Alt and sends `ESC DEL`, which deletes the word before the cursor.
+#[cfg(any(target_os = "macos", test))]
+pub fn option_composes(key: &Key) -> bool {
+    !matches!(key, Key::Named(NamedKey::Backspace))
+}
+
 /// Modifier keys held during a key event, as the kitty protocol distinguishes them.
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
 pub struct Mods {
@@ -535,6 +543,18 @@ fn control_byte(c: char) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn option_backspace_acts_as_alt() {
+        assert!(!option_composes(&Key::Named(NamedKey::Backspace)));
+        assert!(option_composes(&Key::Character("e".into())));
+        assert!(option_composes(&Key::Named(NamedKey::ArrowLeft)));
+        // With Alt kept, shells, readline and tmux see a delete-word key.
+        let backspace = key(Key::Named(NamedKey::Backspace), KeyCode::Backspace, KeyLocation::Standard, None);
+        let alt = Mods { alt: true, ..Mods::default() };
+        assert_eq!(encode(&backspace, alt, KeyModes::default()).as_deref(), Some(&b"\x1b\x7f"[..]));
+        assert_eq!(encode(&backspace, alt, kitty_modes(DISAMBIGUATE)).as_deref(), Some(&b"\x1b[127;3u"[..]));
+    }
 
     #[test]
     fn control_bytes() {

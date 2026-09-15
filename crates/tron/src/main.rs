@@ -1132,7 +1132,7 @@ impl App {
                         kitty_flags: term.keyboard_flags(),
                     }
                 };
-                let mods = input::Mods::new(session.key_modifiers(), session.hyper, false);
+                let mods = input::Mods::new(session.key_modifiers(&event), session.hyper, false);
                 if let Some(bytes) = input::encode(&event, mods, key_modes) {
                     if pressed {
                         session.prepare_input();
@@ -1188,16 +1188,19 @@ impl Session {
 
     /// Modifiers for encoding keys.
     #[cfg(not(target_os = "macos"))]
-    fn key_modifiers(&self) -> ModifiersState {
+    fn key_modifiers(&self, _event: &KeyEvent) -> ModifiersState {
         self.modifiers
     }
 
     /// Modifiers for encoding keys. Option keys not configured as Alt compose
-    /// characters, which are sent as they are.
+    /// characters, which are sent as they are, except with keys where Option
+    /// composes nothing, such as Backspace: Option+Backspace deletes a word.
     #[cfg(target_os = "macos")]
-    fn key_modifiers(&self) -> ModifiersState {
+    fn key_modifiers(&self, event: &KeyEvent) -> ModifiersState {
         let mut modifiers = self.modifiers;
-        if !macos::option_is_alt(self.settings.option_as_alt, self.option_keys) {
+        if !macos::option_is_alt(self.settings.option_as_alt, self.option_keys)
+            && input::option_composes(&event.logical_key)
+        {
             modifiers.remove(ModifiersState::ALT);
         }
         modifiers
