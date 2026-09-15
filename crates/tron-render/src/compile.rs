@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 
 use crate::post::{BLIT, Layouts, PRELUDE, PostShader};
 
@@ -61,6 +62,7 @@ pub struct Compiler {
     sender: Sender<Request>,
     results: Arc<Mutex<Vec<Compiled>>>,
     notify: Arc<Mutex<Option<Notify>>>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl Compiler {
@@ -70,12 +72,12 @@ impl Compiler {
         let notify = Arc::new(Mutex::new(None));
         let worker =
             Worker { device, layouts, pipelines: HashMap::new(), results: results.clone(), notify: notify.clone() };
-        if let Err(error) =
-            std::thread::Builder::new().name("shader-compiler".into()).spawn(move || worker.run(receiver))
-        {
-            log::error!("cannot start the shader compiler, shaders are disabled: {error}");
-        }
-        Self { sender, results, notify }
+        let thread = std::thread::Builder::new()
+            .name("shader-compiler".into())
+            .spawn(move || worker.run(receiver))
+            .map_err(|error| log::error!("cannot start the shader compiler, shaders are disabled: {error}"))
+            .ok();
+        Self { sender, results, notify, thread }
     }
 
     /// Called from the compiler thread whenever a chain is ready to be taken.
@@ -95,6 +97,19 @@ impl Compiler {
 
     pub fn take_results(&self) -> Vec<Compiled> {
         std::mem::take(&mut *lock(&self.results))
+    }
+}
+
+impl Drop for Compiler {
+    /// Waits for the worker to release its device and pipelines. A worker still
+    /// running when `main` returns destroys the Vulkan device while the driver's
+    /// exit handlers run, which crashes the NVIDIA driver.
+    fn drop(&mut self) {
+        // Disconnect the channel so the worker returns after its current compile.
+        self.sender = channel().0;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 

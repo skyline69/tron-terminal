@@ -120,12 +120,13 @@ pub struct Gpu {
 }
 
 /// Compiled pipelines kept on disk, so later launches skip shader compilation.
-#[derive(Clone)]
 struct PipelineCacheFile {
     cache: wgpu::PipelineCache,
     path: PathBuf,
     /// Size of the data loaded at startup, to skip saving an unchanged cache.
     loaded_len: usize,
+    /// The last save, which holds the cache and with it the device.
+    saving: Option<std::thread::JoinHandle<()>>,
 }
 
 impl PipelineCacheFile {
@@ -148,33 +149,50 @@ impl PipelineCacheFile {
                 fallback: true,
             })
         };
-        Some(Self { cache, path, loaded_len: data.map_or(0, |d| d.len()) })
+        Some(Self { cache, path, loaded_len: data.map_or(0, |d| d.len()), saving: None })
     }
 
     /// Writes the cache on a background thread when it grew.
-    fn save(&self) {
-        let this = self.clone();
+    fn save(&mut self) {
+        // One save at a time: both write the same temporary file.
+        self.wait();
+        let (cache, path, loaded_len) = (self.cache.clone(), self.path.clone(), self.loaded_len);
         let spawned = std::thread::Builder::new().name("pipeline-cache".into()).spawn(move || {
-            let Some(data) = this.cache.get_data() else { return };
-            if data.len() == this.loaded_len {
+            let Some(data) = cache.get_data() else { return };
+            if data.len() == loaded_len {
                 return;
             }
             let write = || -> std::io::Result<()> {
-                if let Some(dir) = this.path.parent() {
+                if let Some(dir) = path.parent() {
                     std::fs::create_dir_all(dir)?;
                 }
-                let temp = this.path.with_extension("tmp");
+                let temp = path.with_extension("tmp");
                 std::fs::write(&temp, &data)?;
-                std::fs::rename(&temp, &this.path)
+                std::fs::rename(&temp, &path)
             };
             match write() {
-                Ok(()) => log::debug!("saved pipeline cache to {}", this.path.display()),
+                Ok(()) => log::debug!("saved pipeline cache to {}", path.display()),
                 Err(error) => log::debug!("cannot save pipeline cache: {error}"),
             }
         });
-        if let Err(error) = spawned {
-            log::debug!("cannot save pipeline cache: {error}");
+        match spawned {
+            Ok(thread) => self.saving = Some(thread),
+            Err(error) => log::debug!("cannot save pipeline cache: {error}"),
         }
+    }
+
+    fn wait(&mut self) {
+        if let Some(thread) = self.saving.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for PipelineCacheFile {
+    /// A save still running when `main` returns would release the device during
+    /// the driver's exit handlers, like the shader compiler (see `compile.rs`).
+    fn drop(&mut self) {
+        self.wait();
     }
 }
 
@@ -331,7 +349,7 @@ impl Renderer {
         theme: Theme,
     ) -> Result<Self, RenderError> {
         let started = Instant::now();
-        let Gpu { instance, adapter, device, queue, pipeline_cache } = gpu;
+        let Gpu { instance, adapter, device, queue, mut pipeline_cache } = gpu;
         let cache = pipeline_cache.as_ref().map(|c| &c.cache);
         let device_lost = Arc::new(AtomicBool::new(false));
         let lost = device_lost.clone();
@@ -381,7 +399,7 @@ impl Renderer {
         let compiler = Compiler::new(device.clone(), layouts);
         post.resize(&device, config.width, config.height);
         log::debug!("gpu init: post chain after {:?}", started.elapsed());
-        if let Some(cache) = &pipeline_cache {
+        if let Some(cache) = &mut pipeline_cache {
             cache.save();
         }
 
@@ -575,7 +593,7 @@ impl Renderer {
                 self.post_frame = 0;
                 installed.user_errors = Some(errors);
             }
-            if let Some(cache) = &self.pipeline_cache {
+            if let Some(cache) = &mut self.pipeline_cache {
                 cache.save();
             }
         }
