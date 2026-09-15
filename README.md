@@ -48,17 +48,18 @@ scope: use your window manager or a multiplexer.
 
 ## Installation
 
-The install script builds tron from source and installs it for the current
-user, on Linux and macOS:
+The install script installs tron for the current user, on Linux and macOS:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/skyline69/tron-terminal/main/install.sh | bash
 ```
 
-From a checkout, run `./install.sh`. The script checks for Rust and the build
-libraries and offers to install what is missing. When tron is already
-installed, it compares versions and asks before upgrading, reinstalling or
-downgrading.
+When the latest release has a prebuilt tron for your system, the script asks
+whether to install it, which takes seconds, or to build from source. It
+verifies downloads against their SHA-256 checksums. For a build, it checks for
+Rust and the build libraries and offers to install what is missing. When tron
+is already installed, it compares versions and asks before upgrading,
+reinstalling or downgrading. From a checkout, run `./install.sh`.
 
 - **Linux:** the binary goes to `~/.local/bin`, with a desktop entry, icons,
   AppStream metadata and shell completions under `~/.local/share`, so
@@ -70,9 +71,11 @@ Archives on the [releases page](https://github.com/skyline69/tron-terminal/relea
 hold a prebuilt binary for Linux and macOS (x86_64 and aarch64). Unpack one and
 run its `./install.sh` to install without Rust.
 
-Options: `--system` installs for all users under `/usr/local`, `--prefix DIR`
-picks another location, `--ref TAG` builds a branch or tag, `--yes` answers
-every question and `--uninstall` removes tron again. See `./install.sh --help`.
+Options: `--prebuilt` or `--build` choose without asking, `--system` installs
+for all users under `/usr/local`, `--prefix DIR` picks another location,
+`--ref vX.Y.Z` installs a release (a branch name builds that branch), `--yes`
+answers every question and `--uninstall` removes tron again. See
+`./install.sh --help`.
 
 ## Building
 

@@ -1,36 +1,47 @@
 #!/usr/bin/env bash
 # Installs, upgrades or removes tron on Linux and macOS.
 #
-#   ./install.sh               build this checkout and install it for the current user
+#   curl -fsSL https://raw.githubusercontent.com/skyline69/tron-terminal/main/install.sh | bash
+#   ./install.sh               from a checkout or an unpacked release archive
 #   ./install.sh --uninstall   remove what an earlier run installed
 #
-# Without a checkout next to it, the script clones the repository first:
-#
-#   curl -fsSL https://raw.githubusercontent.com/skyline69/tron-terminal/main/install.sh | bash
-#
-# Written for bash 3.2, the version macOS ships. Run with --help for options.
+# When a release has a prebuilt tron for this system, the script asks whether to
+# install it or build from source. Written for bash 3.2, the version macOS ships.
+# Run with --help for options.
 
 set -euo pipefail
 
-readonly REPO_URL="https://github.com/skyline69/tron-terminal.git"
+readonly REPO_SLUG="skyline69/tron-terminal"
+readonly REPO_URL="https://github.com/$REPO_SLUG.git"
 readonly APP_ID="dev.tron.Terminal"
 readonly MIN_RUST="1.98"
+# glibc of the Ubuntu runner that builds the Linux release archives (release.yml).
+readonly MIN_GLIBC="2.39"
+# Where releases and sources are fetched from. The overrides serve mirrors and tests.
+readonly API_URL=${TRON_INSTALL_API_URL:-https://api.github.com/repos/$REPO_SLUG}
+readonly DOWNLOAD_URL=${TRON_INSTALL_DOWNLOAD_URL:-https://github.com/$REPO_SLUG/releases/download}
+readonly RAW_URL=${TRON_INSTALL_RAW_URL:-https://raw.githubusercontent.com/$REPO_SLUG}
 
 usage() {
 	cat <<EOF
 Usage: install.sh [options]
 
-Builds tron from source and installs it, or installs the prebuilt binary when
-run from an unpacked release archive. When tron is already installed, the
+Installs tron. When a release has a prebuilt tron for this system, you choose
+between installing it, which takes seconds, and building from source, which
+needs Rust and takes a few minutes. Run from an unpacked release archive, the
+script installs the binary in the archive. When tron is already installed, the
 installed and new versions are compared and you are asked before anything
 changes.
 
 Options:
-  -y, --yes         Answer yes to every question
+  -y, --yes         Answer yes to every question; choose the prebuilt release
+                    unless the sources are newer
+      --prebuilt    Install a prebuilt release without asking
+      --build       Build from source without asking
       --system      Install for all users (/usr/local, needs sudo)
       --prefix DIR  Install under DIR instead of ~/.local or /usr/local
       --source DIR  Build the tron checkout in DIR
-      --ref REF     Branch or tag to clone when there is no checkout (default: main)
+      --ref REF     Release tag (vX.Y.Z) or branch to install (default: latest release, or main)
       --uninstall   Remove tron as installed by this script
   -h, --help        Show this help
 
@@ -60,21 +71,27 @@ die() {
 	exit 1
 }
 
+# prompt TEXT HINT: shows a question and reads the answer from the terminal into
+# $answer. Reading the terminal also works when the script is piped into bash.
+prompt() {
+	if ! { exec 3</dev/tty; } 2>/dev/null; then
+		die "cannot ask \"$1\" without a terminal; run again with --yes"
+	fi
+	printf '%s%s%s %s ' "$bold" "$1" "$reset" "$2" >&2
+	answer=""
+	IFS= read -r answer <&3 || true
+	exec 3<&-
+}
+
 # ask QUESTION DEFAULT: succeeds when the answer is yes. DEFAULT is y or n.
-# Reads from the terminal, so it also works when the script is piped into bash.
 ask() {
-	local question=$1 default=$2 hint reply=""
+	local question=$1 default=$2 hint
 	if [ "$assume_yes" = 1 ]; then
 		return 0
 	fi
 	if [ "$default" = y ]; then hint="[Y/n]"; else hint="[y/N]"; fi
-	if ! { exec 3</dev/tty; } 2>/dev/null; then
-		die "cannot ask \"$question\" without a terminal; run again with --yes"
-	fi
-	printf '%s%s%s %s ' "$bold" "$question" "$reset" "$hint" >&2
-	IFS= read -r reply <&3 || true
-	exec 3<&-
-	case $reply in
+	prompt "$question" "$hint"
+	case $answer in
 	[Yy]*) return 0 ;;
 	[Nn]*) return 1 ;;
 	"") [ "$default" = y ] ;;
@@ -90,6 +107,17 @@ run() {
 		sudo "$@"
 	else
 		"$@"
+	fi
+}
+
+# fetch URL [FILE]: downloads URL to FILE, or to standard output.
+fetch() {
+	if has curl; then
+		curl -fsSL --connect-timeout 10 --retry 2 -o "${2:--}" "$1"
+	elif has wget; then
+		wget -q --timeout=10 -O "${2:--}" "$1"
+	else
+		return 1
 	fi
 }
 
@@ -114,14 +142,16 @@ version_cmp() {
 assume_yes=0
 system=0
 action=install
+method=""
 prefix=""
 source_dir=""
 ref=""
-prebuilt=0
 
 while [ $# -gt 0 ]; do
 	case $1 in
 	-y | --yes) assume_yes=1 ;;
+	--prebuilt) method=prebuilt ;;
+	--build) method=build ;;
 	--system) system=1 ;;
 	--prefix)
 		[ $# -ge 2 ] || die "--prefix needs a directory"
@@ -136,7 +166,7 @@ while [ $# -gt 0 ]; do
 		;;
 	--source=*) source_dir=${1#*=} ;;
 	--ref)
-		[ $# -ge 2 ] || die "--ref needs a branch or tag"
+		[ $# -ge 2 ] || die "--ref needs a tag or branch"
 		ref=$2
 		shift
 		;;
@@ -199,6 +229,15 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/tron-install.XXXXXX")
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
 
+# Set while choosing what to install.
+src=""             # directory with the tron sources, or with an unpacked release archive
+binary=""          # the tron binary to install
+target_version=""  # version that will be installed
+source_version=""  # version a build from source would install, when known
+release_tag=""     # release to download, such as v0.1.0
+release_archive="" # archive of that release for this system
+release_reason=""  # why no prebuilt release can be installed
+
 # ---------------------------------------------------------------------------
 # The installed copy
 
@@ -222,6 +261,108 @@ binary_version() {
 }
 
 # ---------------------------------------------------------------------------
+# Prebuilt releases
+
+# Release archive suffix for this machine, such as x86_64-linux.
+platform_name() {
+	local arch
+	case $(uname -m) in
+	x86_64 | amd64) arch=x86_64 ;;
+	aarch64 | arm64) arch=aarch64 ;;
+	*) return 1 ;;
+	esac
+	printf '%s-%s\n' "$arch" "$os"
+}
+
+# Whether the C library can run the prebuilt Linux binary.
+glibc_supported() {
+	local version
+	version=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{ print $2 }')
+	[ -n "$version" ] && [ "$(version_cmp "$version" "$MIN_GLIBC")" != -1 ]
+}
+
+# Looks for a release with an archive for this system. Sets release_tag and
+# release_archive, or release_reason when there is none.
+find_release() {
+	local platform path json version
+	if ! platform=$(platform_name); then
+		release_reason="there is no prebuilt tron for $(uname -m)"
+		return 1
+	fi
+	if [ "$os" = linux ] && ! glibc_supported; then
+		release_reason="the prebuilt tron needs glibc $MIN_GLIBC or newer"
+		return 1
+	fi
+	if ! has curl && ! has wget; then
+		release_reason="downloading a release needs curl or wget"
+		return 1
+	fi
+	case $ref in
+	"") path=releases/latest ;;
+	v[0-9]*) path=releases/tags/$ref ;;
+	*)
+		release_reason="$ref is a branch, not a release"
+		return 1
+		;;
+	esac
+	if ! json=$(fetch "$API_URL/$path" 2>/dev/null); then
+		release_reason="no release was found${ref:+ for $ref}"
+		return 1
+	fi
+	release_tag=$(printf '%s\n' "$json" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')
+	version=${release_tag#v}
+	release_archive=tron-$version-$platform.tar.gz
+	if [ -z "$release_tag" ] || ! printf '%s\n' "$json" | grep -q "\"name\": *\"$release_archive\""; then
+		release_reason="the release ${release_tag:-found} has no archive for $platform"
+		return 1
+	fi
+	target_version=$version
+}
+
+# Downloads, verifies and unpacks the release archive into the work directory.
+download_release() {
+	local archive=$work/$release_archive expected actual=""
+	info "Downloading $release_archive"
+	fetch "$DOWNLOAD_URL/$release_tag/$release_archive" "$archive" || die "downloading $release_archive failed"
+	fetch "$DOWNLOAD_URL/$release_tag/$release_archive.sha256" "$archive.sha256" ||
+		die "downloading the checksum of $release_archive failed"
+	expected=$(awk '{ print $1; exit }' "$archive.sha256")
+	if has sha256sum; then
+		actual=$(sha256sum "$archive" | awk '{ print $1 }')
+	elif has shasum; then
+		actual=$(shasum -a 256 "$archive" | awk '{ print $1 }')
+	fi
+	if [ -z "$actual" ]; then
+		warn "neither sha256sum nor shasum is installed; the download is not verified"
+	elif [ "$actual" != "$expected" ]; then
+		die "the checksum of $release_archive does not match; the download is damaged or was altered"
+	fi
+	tar -xzf "$archive" -C "$work"
+	src=$work/${release_archive%.tar.gz}
+	is_archive "$src" || die "$release_archive does not contain a tron build"
+}
+
+# Checks that the prebuilt binary can run here.
+check_prebuilt() {
+	local missing version
+	version=$(binary_version "$binary")
+	if [ -z "$version" ]; then
+		die "the prebuilt tron does not run on this system. Build from source with --build."
+	fi
+	if [ "$version" != "$target_version" ]; then
+		warn "the archive holds tron $version, not $target_version"
+		target_version=$version
+	fi
+	if [ "$os" = linux ]; then
+		if has ldd; then
+			missing=$(ldd "$binary" 2>/dev/null | awk '/not found/ { printf " %s", $1 }')
+			[ -z "$missing" ] || die "the prebuilt tron needs missing libraries:$missing. Install fontconfig, or build from source with --build."
+		fi
+		has tic || warn "tic from ncurses is missing; tron needs it to install its terminfo entry."
+	fi
+}
+
+# ---------------------------------------------------------------------------
 # Source and build
 
 script_dir() {
@@ -236,35 +377,39 @@ is_checkout() { [ -f "$1/Cargo.toml" ] && [ -f "$1/crates/tron/Cargo.toml" ]; }
 # An unpacked release archive: the binary next to this script, nothing to build.
 is_archive() { [ -x "$1/tron" ] && [ -f "$1/dist/$APP_ID.desktop" ] && [ ! -f "$1/Cargo.toml" ]; }
 
-resolve_source() {
-	local here
-	if [ -n "$source_dir" ]; then
-		is_checkout "$source_dir" || die "$source_dir is not a tron checkout"
-		src=$(cd "$source_dir" && pwd)
-		return
-	fi
-	here=$(script_dir)
-	if [ -z "$ref" ] && [ -n "$here" ] && is_archive "$here"; then
-		src=$here
-		prebuilt=1
-		return
-	fi
-	if [ -z "$ref" ] && [ -n "$here" ] && is_checkout "$here"; then
-		src=$here
-		return
-	fi
-	has git || die "git is needed to download tron. Install git, or run this script from a tron checkout."
-	info "Cloning $REPO_URL${ref:+ ($ref)}"
-	git clone --quiet --depth 1 ${ref:+--branch "$ref"} "$REPO_URL" "$work/tron-terminal"
-	src=$work/tron-terminal
-}
-
-source_version() {
+# Version in the [workspace.package] table of a Cargo.toml.
+cargo_version() {
 	awk -F'"' '
 		/^\[workspace\.package\]/ { section = 1; next }
 		/^\[/ { section = 0 }
 		section && /^version[[:space:]]*=/ { print $2; exit }
-	' "$1/Cargo.toml"
+	' "$1"
+}
+
+# Clones the repository when there is no checkout to build.
+clone_source() {
+	has git || die "git is needed to download the tron sources. Install git, or run this script from a tron checkout."
+	info "Cloning $REPO_URL${ref:+ ($ref)}"
+	git clone --quiet --depth 1 ${ref:+--branch "$ref"} "$REPO_URL" "$work/tron-terminal"
+	src=$work/tron-terminal
+	source_version=$(cargo_version "$src/Cargo.toml")
+}
+
+# Finds the checkout to build, or the version the clone would build.
+locate_source() {
+	local here
+	here=$(script_dir)
+	if [ -n "$source_dir" ]; then
+		is_checkout "$source_dir" || die "$source_dir is not a tron checkout"
+		src=$(cd "$source_dir" && pwd)
+	elif [ -z "$ref" ] && [ -n "$here" ] && is_checkout "$here"; then
+		src=$here
+	fi
+	if [ -n "$src" ]; then
+		source_version=$(cargo_version "$src/Cargo.toml")
+	elif fetch "$RAW_URL/${ref:-main}/Cargo.toml" "$work/Cargo.toml" 2>/dev/null; then
+		source_version=$(cargo_version "$work/Cargo.toml")
+	fi
 }
 
 check_rust() {
@@ -336,6 +481,77 @@ build() {
 	(cd "$src" && cargo build --release --locked -p tron)
 	binary=$src/target/release/tron
 	[ -x "$binary" ] || die "the build did not produce $binary"
+}
+
+# ---------------------------------------------------------------------------
+# Choosing between a prebuilt release and a build
+
+# Asks which way to install when both are possible. Defaults to the prebuilt
+# release, unless the sources to build are newer than it.
+choose_method() {
+	local default=p hint="[P/b]" build_label="build from source"
+	if [ -n "$source_version" ]; then
+		build_label="build $source_version from source"
+		if [ "$(version_cmp "$source_version" "$target_version")" = 1 ]; then
+			default=b
+			hint="[p/B]"
+		fi
+	fi
+	if [ "$assume_yes" = 1 ]; then
+		answer=$default
+	else
+		info "tron $target_version is available prebuilt for $(platform_name)."
+		while :; do
+			prompt "Install the prebuilt tron $target_version (p), or $build_label (b)?" "$hint"
+			case ${answer:-$default} in
+			[Pp]*)
+				answer=p
+				break
+				;;
+			[Bb]*)
+				answer=b
+				break
+				;;
+			*) warn "answer p for prebuilt or b for build" ;;
+			esac
+		done
+	fi
+	case ${answer:-$default} in
+	p) method=prebuilt ;;
+	*) method=build ;;
+	esac
+}
+
+# Settles src, method and target_version before anything is downloaded or built.
+pick_method() {
+	local here
+	here=$(script_dir)
+	if [ "$method" != build ] && [ -z "$source_dir" ] && [ -z "$ref" ] && [ -n "$here" ] && is_archive "$here"; then
+		src=$here
+		binary=$src/tron
+		method=prebuilt
+		target_version=$(binary_version "$binary")
+		return
+	fi
+
+	locate_source
+	if [ "$method" = build ]; then
+		target_version=$source_version
+		return
+	fi
+	if find_release; then
+		if [ "$method" != prebuilt ]; then
+			choose_method
+		fi
+	elif [ "$method" = prebuilt ]; then
+		die "no prebuilt tron can be installed: $release_reason"
+	else
+		info "Building from source, as $release_reason."
+		method=build
+	fi
+	if [ "$method" = build ]; then
+		target_version=$source_version
+	fi
 }
 
 # ---------------------------------------------------------------------------
@@ -505,50 +721,58 @@ path_hints() {
 	fi
 }
 
-do_install() {
-	local current="" current_version="" comparison
-	resolve_source
-	if [ "$prebuilt" = 1 ]; then
-		binary=$src/tron
-		target_version=$(binary_version "$binary")
-	else
-		target_version=$(source_version "$src")
-	fi
-	[ -n "$target_version" ] || die "cannot read the version of tron in $src"
-
+# Asks before replacing an installed tron. Exits when the user declines.
+confirm_change() {
+	local current="" current_version="" again="Rebuild and reinstall it?"
+	[ "$method" = prebuilt ] && again="Reinstall it?"
 	current=$(installed_binary)
 	if [ -n "$current" ]; then
 		current_version=$(binary_version "$current")
 	fi
 	if [ -n "$current_version" ]; then
-		comparison=$(version_cmp "$current_version" "$target_version")
-		case $comparison in
-		-1)
-			ask "tron $current_version is installed at $current. Upgrade to $target_version?" y ||
-				{ info "Nothing changed."; exit 0; }
-			;;
-		0)
-			ask "tron $target_version is already installed at $current. Rebuild and reinstall it?" n ||
-				{ info "Nothing changed."; exit 0; }
-			;;
-		1)
-			ask "tron $current_version at $current is newer than $target_version. Downgrade?" n ||
-				{ info "Nothing changed."; exit 0; }
-			;;
-		esac
+		previous_version=$current_version
+		case $(version_cmp "$current_version" "$target_version") in
+		-1) ask "tron $current_version is installed at $current. Upgrade to $target_version?" y ;;
+		0) ask "tron $target_version is already installed at $current. $again" n ;;
+		*) ask "tron $current_version at $current is newer than $target_version. Downgrade?" n ;;
+		esac || {
+			info "Nothing changed."
+			exit 0
+		}
 	elif [ -n "$current" ]; then
 		ask "A tron without a readable version is installed at $current. Replace it with $target_version?" y ||
-			{ info "Nothing changed."; exit 0; }
+			{
+				info "Nothing changed."
+				exit 0
+			}
 	else
 		info "Installing tron $target_version into $prefix"
 	fi
+}
 
-	if [ "$prebuilt" = 1 ]; then
-		info "Installing the prebuilt tron $target_version from $src"
-		if [ "$os" = linux ] && ! has tic; then
-			warn "tic from ncurses is missing; tron needs it to install its terminfo entry."
+do_install() {
+	previous_version=""
+	pick_method
+	# Without a known version to compare, clone first and read it from the sources.
+	if [ "$method" = build ] && [ -z "$target_version" ]; then
+		[ -n "$src" ] || clone_source
+		target_version=$source_version
+	fi
+	[ -n "$target_version" ] || die "cannot tell which version of tron would be installed"
+	confirm_change
+
+	if [ "$method" = prebuilt ]; then
+		if [ -z "$src" ]; then
+			download_release
+			binary=$src/tron
 		fi
+		check_prebuilt
+		info "Installing the prebuilt tron $target_version"
 	else
+		if [ -z "$src" ]; then
+			clone_source
+			target_version=$source_version
+		fi
 		check_rust
 		if [ "$os" = linux ]; then check_linux_libraries; else check_macos_tools; fi
 		build
@@ -556,8 +780,8 @@ do_install() {
 	if [ "$os" = linux ]; then install_linux; else install_macos; fi
 	write_manifest
 
-	if [ -n "$current_version" ] && [ "$current_version" != "$target_version" ]; then
-		success "tron upgraded from $current_version to $target_version"
+	if [ -n "$previous_version" ] && [ "$previous_version" != "$target_version" ]; then
+		success "tron upgraded from $previous_version to $target_version"
 	else
 		success "tron $target_version installed"
 	fi
