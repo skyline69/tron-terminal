@@ -4,6 +4,7 @@ mod accessibility;
 mod cli;
 mod clipboard;
 mod input;
+mod launcher;
 #[cfg(target_os = "macos")]
 mod macos;
 mod mouse;
@@ -76,12 +77,13 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some(cli::Command::StartupScreen { shell }) => tron_startup::run(shell),
-        None => {}
+        // Tab commands such as `tron settings` open the startup screen below.
+        _ => {}
     }
     // Inside a tron window the startup screen takes over that window instead of opening another.
-    if cli.startup && tron_startup::inside_tron() {
+    if (cli.startup || cli.startup_tab().is_some()) && tron_startup::inside_tron() {
         let config = Paths::discover().and_then(|paths| Config::load(&paths).ok()).unwrap_or_default();
-        return Ok(tron_startup::run_here(config.startup_animations != Some(false))?);
+        return Ok(tron_startup::run_here(config.startup_animations != Some(false), cli.startup_tab())?);
     }
     let gpu = thread::Builder::new().name("gpu-init".into()).spawn(|| pollster::block_on(Gpu::new())).ok();
     let paths = match (Paths::discover(), &cli.config_dir) {
@@ -318,6 +320,8 @@ struct Session {
     /// The shell exited but the window stays open.
     exited: bool,
     ime_area: Option<[f32; 4]>,
+    /// Physical pixels at the top covered by window decorations, see [`top_inset`].
+    top_inset: f32,
     /// `TRON_TRACE_LATENCY`: log the time from a key press to the frame showing its effect.
     trace_latency: bool,
     pending_key: Option<Instant>,
@@ -359,14 +363,20 @@ impl App {
 
         let scale_factor = window.scale_factor();
         fonts.set_size(config.font.size, scale_factor);
-        let size = window.surface_size();
+        let inset = top_inset(window.as_ref());
+        let mut size = window.surface_size();
+        if inset > 0.0 {
+            // Content under a macOS title bar: grow the window so the configured rows still fit.
+            let taller = PhysicalSize::new(size.width, size.height + inset.ceil() as u32);
+            size = window.request_surface_size(taller.into()).unwrap_or(taller);
+        }
         let settings = Settings::new(config);
         let window_padding = padding(settings.padding, scale_factor);
 
         // Start the shell before the renderer so the prompt is ready by the first frame.
         let metrics = fonts.metrics();
         let cols = ((size.width as f32 - 2.0 * window_padding[0]) / metrics.width as f32).max(1.0) as usize;
-        let rows = ((size.height as f32 - 2.0 * window_padding[1]) / metrics.height as f32).max(1.0) as usize;
+        let rows = ((size.height as f32 - 2.0 * window_padding[1] - inset) / metrics.height as f32).max(1.0) as usize;
         let mut term = Terminal::new(cols, rows, config.scrollback.lines);
         // Images sent before the first frame must be sized with the real cell size.
         term.set_cell_pixels(metrics.width, metrics.height);
@@ -389,7 +399,7 @@ impl App {
             Some(Err(error)) => Err(error),
             None => Err(tron_render::RenderError::Unsupported),
         };
-        let renderer = match renderer {
+        let mut renderer = match renderer {
             Ok(renderer) => renderer,
             Err(error) => {
                 log::debug!("preloaded GPU unusable ({error}), initializing again");
@@ -403,6 +413,7 @@ impl App {
                 ))?
             }
         };
+        renderer.set_padding(window_padding, inset);
         log::debug!("startup: renderer ready after {:?}", started.elapsed());
         let proxy = self.proxy.clone();
         renderer.set_shader_notify(move || proxy.wake_up());
@@ -453,6 +464,7 @@ impl App {
             flash_until: None,
             exited: false,
             ime_area: None,
+            top_inset: inset,
             trace_latency: std::env::var_os("TRON_TRACE_LATENCY").is_some(),
             pending_key: None,
             focused: true,
@@ -505,19 +517,19 @@ impl App {
             env: Vec::new(),
             remove_env: vec![DEBUG_STARTUP_TOKEN_ENV.into()],
         };
+        let data_dir = self.paths.as_ref().map(|p| p.data_dir.as_path());
         if options.term == "xterm-tron" {
-            match self.paths.as_ref().and_then(|p| terminfo::install(&p.data_dir)) {
-                Some(dir) => {
-                    options.env.push(("TERMINFO_DIRS".into(), terminfo::search_path(&dir)));
-                    if let Some(bin) = self.paths.as_ref().and_then(|p| terminfo::install_ssh_wrapper(&p.data_dir)) {
-                        options.env.push(("PATH".into(), terminfo::path_with(&bin)));
-                    }
-                }
+            match data_dir.and_then(terminfo::install) {
+                Some(dir) => options.env.push(("TERMINFO_DIRS".into(), terminfo::search_path(&dir))),
                 None => {
                     log::warn!("xterm-tron terminfo unavailable, using TERM=xterm-256color");
                     options.term = "xterm-256color".into();
                 }
             }
+        }
+        // `tron` in the shell runs this tron, and `ssh` copies the terminfo entry to hosts.
+        if let Some(bin) = data_dir.and_then(|dir| launcher::install(dir, options.term == "xterm-tron")) {
+            options.env.push(("PATH".into(), terminfo::path_with(&bin)));
         }
         options.env.extend(shell.env.iter().map(|(k, v)| (k.into(), v.into())));
         // Lets `tron --startup` in this window talk to it.
@@ -550,6 +562,9 @@ impl App {
             }
             if self.config.startup_animations == Some(false) {
                 options.env.push((tron_startup::ANIMATIONS_ENV.into(), "0".into()));
+            }
+            if let Some(tab) = self.cli.startup_tab() {
+                options.env.push((tron_startup::TAB_ENV.into(), tab.into()));
             }
         }
         options
@@ -685,11 +700,13 @@ impl ApplicationHandler for App {
             }
             WindowEvent::SurfaceResized(size) => {
                 session.renderer.resize(size.width, size.height);
+                session.update_top_inset();
                 session.resize_grid();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 session.scale_factor = scale_factor;
                 session.frame_interval = frame_interval(session.window.as_ref());
+                session.update_top_inset();
                 session.set_font_size(session.font_size);
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -1261,7 +1278,7 @@ impl Session {
             let layout = accessibility::Layout {
                 cell_width: f64::from(metrics.width),
                 cell_height: f64::from(metrics.height),
-                padding: [f64::from(pad_x), f64::from(pad_y)],
+                padding: [f64::from(pad_x), f64::from(pad_y + self.top_inset)],
             };
             if let Some(due) = accessibility.update(&self.snapshot, layout) {
                 wake_at(due);
@@ -1295,6 +1312,15 @@ impl Session {
         );
         if let Err(error) = self.window.request_ime_update(ImeRequest::Update(data)) {
             log::trace!("IME update failed: {error}");
+        }
+    }
+
+    /// Follows the height of a title bar drawn over the content, which changes in full screen.
+    fn update_top_inset(&mut self) {
+        let inset = top_inset(self.window.as_ref());
+        if inset != self.top_inset {
+            self.top_inset = inset;
+            self.renderer.set_padding(padding(self.settings.padding, self.scale_factor), inset);
         }
     }
 
@@ -1571,6 +1597,7 @@ impl Session {
         let padding = padding(self.settings.padding, self.scale_factor);
         self.renderer =
             pollster::block_on(Renderer::new(self.window.clone(), size.width, size.height, metrics, padding, theme))?;
+        self.renderer.set_padding(padding, self.top_inset);
         let proxy = proxy.clone();
         self.renderer.set_shader_notify(move || proxy.wake_up());
         // The new renderer has no pipelines: request the shaders again.
@@ -1698,6 +1725,7 @@ impl Session {
     /// Pointer position in pixels from the top left of the cell grid, clamped to the grid.
     fn grid_pixel(&self, x: f64, y: f64) -> (u32, u32) {
         let [pad_x, pad_y] = padding(self.settings.padding, self.scale_factor);
+        let pad_y = pad_y + self.top_inset;
         let metrics = self.fonts.metrics();
         let (cols, rows) = self.renderer.grid_size();
         let width = (cols as u32 * metrics.width).max(1) - 1;
@@ -2066,6 +2094,13 @@ fn percent_decode(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Physical pixels at the top of the surface covered by window decorations: the
+/// transparent macOS title bar (see `macos::window_attributes`), zero elsewhere
+/// and in full screen.
+fn top_inset(window: &dyn Window) -> f32 {
+    window.safe_area().top as f32
 }
 
 fn padding(padding: (u16, u16), scale_factor: f64) -> [f32; 2] {

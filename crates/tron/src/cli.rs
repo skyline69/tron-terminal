@@ -56,6 +56,22 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Open the startup screen's overview
+    Overview,
+    /// Change settings with a live preview
+    Settings,
+    /// Preview and pick a color theme
+    Themes,
+    /// Preview and pick post-processing shaders
+    Shaders,
+    /// Show the key bindings
+    Keys,
+    /// Take the tour of tron's features
+    Tour,
+    /// Show who made the themes, shaders and libraries
+    Credits,
+    /// Show the version and links
+    About,
     /// Run the startup screen, then the given shell (used inside the terminal)
     #[command(hide = true)]
     StartupScreen {
@@ -64,11 +80,35 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// Title of the startup screen tab this command opens.
+    pub fn startup_tab(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Overview => "Overview",
+            Self::Settings => "Settings",
+            Self::Themes => "Themes",
+            Self::Shaders => "Shaders",
+            Self::Keys => "Keys",
+            Self::Tour => "Tour",
+            Self::Credits => "Credits",
+            Self::About => "About",
+            Self::Completions { .. } | Self::StartupScreen { .. } => return None,
+        })
+    }
+}
+
 impl Cli {
+    /// Startup screen tab requested with a command such as `tron settings`.
+    pub fn startup_tab(&self) -> Option<&'static str> {
+        self.subcommand.as_ref().and_then(Command::startup_tab)
+    }
+
     /// Whether the startup screen runs before the shell: always with
-    /// `--startup`, otherwise as configured, and by default only the first time.
+    /// `--startup` or a tab command, otherwise as configured, and by default
+    /// only the first time.
     pub fn show_startup(&self, config: &Config, marker_exists: bool, screenshot: bool) -> bool {
         self.startup
+            || self.startup_tab().is_some()
             || (!self.no_startup && self.command.is_none() && !screenshot && config.startup.unwrap_or(!marker_exists))
     }
 }
@@ -96,7 +136,8 @@ fn examples() -> String {
     let dim = Style::new().effects(Effects::DIMMED);
     format!(
         "{header}Examples:{header:#}\n  {command}tron -e nvim notes.md{command:#}\n  {command}tron -d ~/projects{command:#}\n  \
-         {command}tron --startup{command:#}\n  {command}tron completions fish > ~/.config/fish/completions/tron.fish{command:#}\n\n\
+         {command}tron settings{command:#}      {dim}opens in this window when run inside tron{dim:#}\n  \
+         {command}tron completions fish > ~/.config/fish/completions/tron.fish{command:#}\n\n\
          {dim}Configuration: ~/.config/tron/config.toml{dim:#}"
     )
 }
@@ -128,6 +169,29 @@ mod tests {
             panic!("not parsed as startup-screen");
         };
         assert_eq!(shell, ["fish", "-l"]);
+    }
+
+    #[test]
+    fn tab_commands_open_their_tab() {
+        let titles: Vec<&str> = tron_startup::tab_titles().collect();
+        for (name, title) in [
+            ("overview", "Overview"),
+            ("settings", "Settings"),
+            ("themes", "Themes"),
+            ("shaders", "Shaders"),
+            ("keys", "Keys"),
+            ("tour", "Tour"),
+            ("credits", "Credits"),
+            ("about", "About"),
+        ] {
+            let cli = parse(&[name]);
+            assert_eq!(cli.startup_tab(), Some(title));
+            assert!(titles.contains(&title), "the startup screen has no {title} tab");
+            let never = Config { startup: Some(false), ..Config::default() };
+            assert!(cli.show_startup(&never, true, false), "{name} opens the startup screen");
+        }
+        assert_eq!(titles.len(), 8, "every tab has a command");
+        assert_eq!(parse(&[]).startup_tab(), None);
     }
 
     #[test]

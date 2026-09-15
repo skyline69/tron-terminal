@@ -245,6 +245,9 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     srgb_output: bool,
     cells: CellPipeline,
+    /// Space above the top padding covered by window decorations, such as a
+    /// transparent macOS title bar. The cells' padding includes it at the top only.
+    top_inset: f32,
     images: ImagePipeline,
     post: PostChain,
     /// The startup screen's own chain, after the user's shaders.
@@ -404,6 +407,7 @@ impl Renderer {
         }
 
         Ok(Self {
+            top_inset: 0.0,
             srgb_output: format.is_srgb(),
             _instance: instance,
             surface,
@@ -509,8 +513,16 @@ impl Renderer {
         let m = self.cells.metrics();
         let padding = self.cells.padding();
         let usable_w = (self.config.width as f32 - 2.0 * padding[0]).max(0.0);
-        let usable_h = (self.config.height as f32 - 2.0 * padding[1]).max(0.0);
+        // The top padding includes the inset; the bottom padding does not.
+        let usable_h = (self.config.height as f32 - 2.0 * padding[1] + self.top_inset).max(0.0);
         (((usable_w / m.width as f32) as usize).max(1), ((usable_h / m.height as f32) as usize).max(1))
+    }
+
+    /// Sets the padding around the grid, and the extra space at the top covered by
+    /// window decorations. Both in physical pixels.
+    pub fn set_padding(&mut self, padding: [f32; 2], top_inset: f32) {
+        self.top_inset = top_inset;
+        self.cells.set_padding([padding[0], padding[1] + top_inset]);
     }
 
     /// Viewport cell under a pixel position, clamped to the grid.
@@ -525,7 +537,7 @@ impl Renderer {
 
     /// Call after the font size, font or scale factor changed.
     pub fn set_metrics(&mut self, metrics: CellMetrics, padding: [f32; 2]) {
-        self.cells.set_metrics(&self.device, metrics, padding);
+        self.cells.set_metrics(&self.device, metrics, [padding[0], padding[1] + self.top_inset]);
         self.resized_at = self.started.elapsed().as_secs_f32();
     }
 

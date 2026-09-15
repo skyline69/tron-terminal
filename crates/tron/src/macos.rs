@@ -18,7 +18,13 @@ fn option_as_alt(setting: Setting) -> OptionAsAlt {
 }
 
 pub fn window_attributes(attributes: WindowAttributes, setting: Setting) -> WindowAttributes {
-    let platform = WindowAttributesMacOS::default().with_option_as_alt(option_as_alt(setting));
+    // The terminal background, with its opacity and shaders, extends under a
+    // transparent title bar. A translucent window otherwise leaves the title bar
+    // without any background. Text starts below it, see `top_inset` in main.rs.
+    let platform = WindowAttributesMacOS::default()
+        .with_option_as_alt(option_as_alt(setting))
+        .with_titlebar_transparent(true)
+        .with_fullsize_content_view(true);
     attributes.with_platform_attributes(Box::new(platform))
 }
 

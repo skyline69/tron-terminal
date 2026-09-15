@@ -8,7 +8,6 @@
 //! the hosts that have it. Hosts that cannot take it get `TERM=xterm-256color`.
 
 use std::ffi::OsString;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -18,25 +17,7 @@ const SSH_WRAPPER: &str = include_str!("../terminfo/ssh");
 /// Writes the `ssh` wrapper and returns its directory.
 pub fn install_ssh_wrapper(data_dir: &Path) -> Option<PathBuf> {
     let dir = data_dir.join("bin");
-    let path = dir.join("ssh");
-    if std::fs::read_to_string(&path).ok().as_deref() == Some(SSH_WRAPPER) {
-        return Some(dir);
-    }
-    if let Err(error) = std::fs::create_dir_all(&dir) {
-        log::warn!("cannot create {}: {error}", dir.display());
-        return None;
-    }
-    // Written beside the target and renamed, so a running ssh never sees a partial file.
-    let temp = dir.join(format!(".ssh.{}", std::process::id()));
-    let written = std::fs::write(&temp, SSH_WRAPPER)
-        .and_then(|()| std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755)))
-        .and_then(|()| std::fs::rename(&temp, &path));
-    if let Err(error) = written {
-        log::warn!("cannot write {}: {error}", path.display());
-        let _ = std::fs::remove_file(&temp);
-        return None;
-    }
-    Some(dir)
+    crate::launcher::write_executable(&dir.join("ssh"), SSH_WRAPPER).then_some(dir)
 }
 
 /// `PATH` value with `dir` first, unless it is already in the path.
@@ -116,6 +97,7 @@ fn fingerprint(text: &str) -> String {
 mod tests {
     use super::*;
 
+    use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
     use tron_pty::{Pty, SpawnOptions, WindowSize};
 

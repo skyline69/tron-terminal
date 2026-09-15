@@ -476,6 +476,14 @@ impl CellPipeline {
         self.padding
     }
 
+    /// Moves the grid without touching the glyph caches.
+    pub fn set_padding(&mut self, padding: [f32; 2]) {
+        if padding != self.padding {
+            self.padding = padding;
+            self.full_rebuild = true;
+        }
+    }
+
     /// Cursor rectangle of the last frame in pixels: x, y, width, height.
     pub fn cursor_rect(&self) -> [f32; 4] {
         self.cursor_rect

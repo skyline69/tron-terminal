@@ -120,8 +120,16 @@ tron [OPTIONS] [COMMAND]
   -d, --working-directory <DIR>  Start in this directory
       --config-dir <DIR>         Use this configuration directory
       --startup                  Show the startup screen: welcome, setup and tour
+  tron settings                  Change settings with a live preview
+  tron themes | shaders | keys   Preview themes or shaders, show the key bindings
+  tron tour | credits | about    Take the tour, show credits or the version
   tron completions <SHELL>       Print shell completions (bash, zsh, fish, ...)
 ```
+
+Run inside a tron window, `tron settings` and the other tab commands open that
+tab of the startup screen right in the window; elsewhere they open a new
+window. Every tron window has the `tron` command on its `PATH`, whether tron
+came from the disk image, an AppImage, a Flatpak or the install script.
 
 The startup screen opens by itself the first time tron starts. Set
 `startup = false` to never show it, or `startup = true` to show it every time.
