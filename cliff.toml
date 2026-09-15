@@ -1,0 +1,45 @@
+# git-cliff configuration, used by the release workflow: https://git-cliff.org/docs/configuration
+#
+# Commit subjects in this repository are plain sentences ("Fix the crash when
+# tron exits"), not Conventional Commits, so groups come from their first words.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to tron are listed here.\n
+"""
+body = """
+{% if version %}\
+    ## [{{ version | trim_start_matches(pat="v") }}](https://github.com/skyline69/tron-terminal/releases/tag/{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+    ## Unreleased
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim }}
+    {% for commit in commits %}
+        - {{ commit.message | split(pat="\n") | first | trim }} \
+          ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/skyline69/tron-terminal/commit/{{ commit.id }}))\
+    {% endfor %}
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = false
+filter_unconventional = false
+split_commits = false
+filter_commits = false
+tag_pattern = "v[0-9].*"
+sort_commits = "newest"
+# The first matching parser picks the group. The comments keep groups in this order.
+commit_parsers = [
+    { message = "^[Mm]erge ", skip = true },
+    { message = "^(Release|Bump) ", skip = true },
+    { message = "^(Fix|Repair|Correct|Prevent|Avoid|Stop) ", group = "<!-- 1 -->Fixes" },
+    { message = "(?i)^(Speed up|Faster|Optimi[sz]e|Cache|Reduce|Hash|Reuse|Batch|Parse .* faster)", group = "<!-- 2 -->Performance" },
+    { message = "^(Document|Describe|Explain|Polish the README)", group = "<!-- 4 -->Documentation" },
+    { message = "^(Add|Support|Implement|Introduce|Show|Draw|Render|Run|Install|Open|Allow|Let|Make|Use|Set) ", group = "<!-- 0 -->Features" },
+    { message = ".*", group = "<!-- 3 -->Changes" },
+]
