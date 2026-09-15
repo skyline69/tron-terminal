@@ -139,12 +139,14 @@ mode = "unfocused"
 # reset_font_size, scroll_line_up, scroll_line_down, scroll_page_up,
 # scroll_page_down, scroll_to_top, scroll_to_bottom, clear_scrollback,
 # scroll_to_previous_prompt, scroll_to_next_prompt, select_command_output,
-# copy_command_output, search, new_window, reload_config, text:<text to send>, none.
+# copy_command_output, search, command_palette, new_window, reload_config,
+# text:<text to send>, none.
 # The defaults on macOS use Command ("super+c", "super+v", ...) instead.
 [keybindings]
 # "ctrl+shift+c" = "copy"
 # "ctrl+shift+v" = "paste"
 # "ctrl+shift+f" = "search"
+# "ctrl+shift+p" = "command_palette"
 # "ctrl+shift+z" = "scroll_to_previous_prompt"
 # "ctrl+shift+x" = "scroll_to_next_prompt"
 # "ctrl+shift+g" = "select_command_output"

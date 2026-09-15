@@ -10,9 +10,10 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Imp, NSObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSPoint, NSString};
 use tron_config::{Binding, KeyCombo};
 use winit::event_loop::EventLoopProxy;
+use winit::window::Window;
 
 use super::{Item, MenuCommand};
 
@@ -28,7 +29,7 @@ thread_local! {
 
 struct MenuBar {
     /// Menu items do not retain their target, so the target lives here.
-    _target: Retained<MenuTarget>,
+    target: Retained<MenuTarget>,
     /// tron's own items, whose shortcuts follow the key bindings.
     items: Vec<(Item, Retained<NSMenuItem>)>,
     /// Shown when the Dock icon is right-clicked; AppKit adds the window list and Options itself.
@@ -61,6 +62,32 @@ impl MenuTarget {
         // SAFETY: `init` is NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
     }
+}
+
+/// Opens the context menu at `position`, in physical pixels from the top left of
+/// the window's content, until an item is chosen or the menu is dismissed.
+///
+/// AppKit tracks the menu in a nested run loop. winit queues the events that
+/// arrive meanwhile and delivers them afterwards, so the window does not redraw
+/// while the menu is open.
+pub fn show_context_menu(window: &dyn Window, position: (f64, f64), has_selection: bool) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(target) = MENU_BAR.with_borrow(|menu_bar| menu_bar.as_ref().map(|bar| bar.target.clone())) else {
+        return;
+    };
+    let Some(view) = crate::macos::content_view(window) else { return };
+    let mut builder = Builder { mtm, target, items: Vec::new() };
+    let menu = NSMenu::new(mtm);
+    for item in super::context_items(has_selection) {
+        match item {
+            Some(item) => builder.item(&menu, item),
+            None => menu.addItem(&NSMenuItem::separatorItem(mtm)),
+        }
+    }
+    // winit's view is flipped, with its origin at the top left, and measured in points.
+    let scale = window.scale_factor();
+    let location = NSPoint::new(position.0 / scale, position.1 / scale);
+    menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(view));
 }
 
 /// Commands chosen from the menu since the last call.
@@ -113,6 +140,8 @@ pub fn install(proxy: EventLoopProxy, bindings: &[Binding]) {
     builder.items(&menu, &[Item::SelectCommandOutput, Item::CopyCommandOutput, Item::ClearScrollback]);
 
     let menu = builder.submenu(&bar, "View");
+    builder.item(&menu, Item::CommandPalette);
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
     builder.items(&menu, &[Item::IncreaseFontSize, Item::DecreaseFontSize, Item::ResetFontSize]);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     builder.items(&menu, &[Item::PreviousPrompt, Item::NextPrompt, Item::ScrollToTop, Item::ScrollToBottom]);
@@ -136,7 +165,7 @@ pub fn install(proxy: EventLoopProxy, bindings: &[Binding]) {
 
     let dock = NSMenu::new(mtm);
     builder.item(&dock, Item::NewWindow);
-    MENU_BAR.set(Some(MenuBar { _target: builder.target, items: builder.items, dock }));
+    MENU_BAR.set(Some(MenuBar { target: builder.target, items: builder.items, dock }));
     add_dock_menu(&app);
     update(bindings);
 }

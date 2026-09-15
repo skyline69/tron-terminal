@@ -20,7 +20,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes};
 
 /// The window's content view.
-fn content_view(window: &dyn Window) -> Option<&NSView> {
+pub(crate) fn content_view(window: &dyn Window) -> Option<&NSView> {
     let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else { return None };
     // SAFETY: winit's handle is the window's content view, used on the main thread
     // while the window is alive.

@@ -7,9 +7,9 @@ mod input;
 mod launcher;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(any(target_os = "macos", test))]
 mod menu;
 mod mouse;
+mod panel;
 mod terminfo;
 
 use std::collections::HashMap;
@@ -178,8 +178,13 @@ struct Launch {
     tab: Option<&'static str>,
 }
 
+/// Something a window asks the `App` to do, from its command palette.
+enum AppRequest {
+    ReloadConfig,
+    OpenSettings,
+}
+
 /// A window's shell, set aside while another program such as Settings… runs in its place.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct Suspended {
     pty: Pty,
     shared: Arc<Shared>,
@@ -424,6 +429,9 @@ struct Session {
     app_pointer: Option<CursorIcon>,
     bindings: Vec<Binding>,
     search: Option<SearchState>,
+    palette: Option<panel::PaletteState>,
+    /// Something only the `App` can do, asked for from the command palette.
+    app_request: Option<AppRequest>,
     /// Uncommitted IME text.
     preedit: Option<String>,
     hovered_link: Option<LinkMatch>,
@@ -599,6 +607,8 @@ impl App {
             app_pointer: None,
             bindings: Vec::new(),
             search: None,
+            palette: None,
+            app_request: None,
             preedit: None,
             hovered_link: None,
             blink_epoch: Instant::now(),
@@ -809,7 +819,9 @@ impl App {
             }
         }
     }
+}
 
+impl App {
     /// Runs the startup screen's Settings tab in the active window, in place of its
     /// shell until it closes, as `tron settings` typed there does.
     fn open_settings(&mut self) {
@@ -942,12 +954,24 @@ impl App {
         }
     }
 
-    /// Opens the windows that windows asked for, such as with New Window.
+    /// Carries out what windows asked the `App` for: windows opened with New
+    /// Window, and commands from their command palettes.
     fn open_requested_windows(&mut self, event_loop: &dyn ActiveEventLoop) {
         let requests: Vec<Launch> =
             self.sessions.values_mut().filter_map(|session| session.window_request.take()).collect();
+        let app_requests: Vec<(WindowId, AppRequest)> =
+            self.sessions.iter_mut().filter_map(|(&id, session)| Some((id, session.app_request.take()?))).collect();
         for launch in requests {
             self.open_window(event_loop, launch);
+        }
+        for (id, request) in app_requests {
+            match request {
+                AppRequest::ReloadConfig => self.reload_config(),
+                AppRequest::OpenSettings => {
+                    self.active = Some(id);
+                    self.open_settings();
+                }
+            }
         }
     }
 
@@ -1030,6 +1054,13 @@ impl App {
                         self.reload_config();
                         return;
                     }
+                    if session.palette.is_some() {
+                        match action {
+                            Some(Action::CommandPalette) => session.close_palette(),
+                            _ => session.palette_key(&event),
+                        }
+                        return;
+                    }
                     if session.search.is_some() {
                         match action {
                             Some(Action::Search) => session.search_step(true, false),
@@ -1041,7 +1072,7 @@ impl App {
                         session.run_action(action);
                         return;
                     }
-                } else if session.search.is_some() {
+                } else if session.search.is_some() || session.palette.is_some() {
                     return;
                 }
                 let key_modes = {
@@ -1068,7 +1099,9 @@ impl App {
             WindowEvent::Ime(Ime::Commit(text)) => {
                 session.preedit = None;
                 session.update_overlays();
-                if session.search.is_some() {
+                if session.palette.is_some() {
+                    session.palette_text(&text);
+                } else if session.search.is_some() {
                     session.search_text(&text);
                 } else {
                     session.prepare_input();
@@ -1715,7 +1748,14 @@ impl Session {
                 self.window.request_redraw();
             }
             Action::Search => {
+                self.palette = None;
                 self.search = Some(SearchState::default());
+                self.update_overlays();
+                self.window.request_redraw();
+            }
+            Action::CommandPalette => {
+                self.search = None;
+                self.palette = Some(panel::PaletteState::default());
                 self.update_overlays();
                 self.window.request_redraw();
             }
@@ -1776,6 +1816,50 @@ impl Session {
         }
     }
 
+    fn palette_key(&mut self, event: &KeyEvent) {
+        let Some(palette) = &mut self.palette else { return };
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => return self.close_palette(),
+            Key::Named(NamedKey::Enter) => return self.run_palette_item(),
+            Key::Named(NamedKey::ArrowUp) => palette.move_selection(-1),
+            Key::Named(NamedKey::ArrowDown | NamedKey::Tab) => palette.move_selection(1),
+            Key::Named(NamedKey::Backspace) => palette.pop_char(),
+            _ => match event.text.clone() {
+                Some(text) if !self.modifiers.control_key() && !self.modifiers.meta_key() => palette.push_text(&text),
+                _ => return,
+            },
+        }
+        self.update_overlays();
+        self.window.request_redraw();
+    }
+
+    fn palette_text(&mut self, text: &str) {
+        if let Some(palette) = &mut self.palette {
+            palette.push_text(text);
+            self.update_overlays();
+            self.window.request_redraw();
+        }
+    }
+
+    fn close_palette(&mut self) {
+        self.palette = None;
+        self.update_overlays();
+        self.window.request_redraw();
+    }
+
+    /// Closes the command palette and runs the highlighted command.
+    fn run_palette_item(&mut self) {
+        let item = self.palette.as_ref().and_then(panel::PaletteState::selected_item);
+        self.close_palette();
+        let Some(item) = item else { return };
+        match item.command() {
+            menu::MenuCommand::Action(Action::ReloadConfig) => self.app_request = Some(AppRequest::ReloadConfig),
+            menu::MenuCommand::Action(action) => self.run_action(action),
+            menu::MenuCommand::OpenSettings => self.app_request = Some(AppRequest::OpenSettings),
+            menu::MenuCommand::OpenUrl(url) => self.open_link(url),
+        }
+    }
+
     fn search_text(&mut self, text: &str) {
         if let Some(search) = &mut self.search {
             search.query.extend(text.chars().filter(|c| !c.is_control()));
@@ -1806,27 +1890,23 @@ impl Session {
         self.window.request_redraw();
     }
 
-    /// Rebuilds the search bar and IME preedit overlays.
+    /// Rebuilds the search box, command palette, config error and IME preedit overlays.
     fn update_overlays(&mut self) {
         let mut overlays = Vec::new();
-        let (rows, palette, cursor) = {
+        let (rows, cols, palette, cursor) = {
             let term = self.shared.term.lock();
-            (term.rows(), *term.palette(), term.cursor())
+            (term.rows(), term.cols(), *term.palette(), term.cursor())
         };
         if let Some(search) = &self.search {
             let status = match (&search.current, search.query.is_empty()) {
-                (_, true) => String::new(),
-                (Some(_), false) => "  Enter: older, Shift+Enter: newer, Esc: close".into(),
-                (None, false) => "  no matches".into(),
+                (_, true) => " esc close ",
+                (Some(_), false) => " ⏎ older  ⇧⏎ newer  esc close ",
+                (None, false) => " no matches ",
             };
-            overlays.push(Overlay {
-                row: rows.saturating_sub(1),
-                col: 0,
-                text: format!(" Search: {}▏{status} ", search.query),
-                fg: palette.background,
-                bg: palette.cursor,
-                underline: false,
-            });
+            overlays.extend(panel::search_overlays(&search.query, status, cols, rows, &palette));
+        }
+        if let Some(state) = &self.palette {
+            overlays.extend(panel::palette_overlays(state, &self.bindings, cols, rows, &palette));
         }
         const SHOWN_ERRORS: usize = 4;
         for (row, error) in self.config_errors.iter().take(SHOWN_ERRORS).enumerate() {
@@ -1871,7 +1951,6 @@ impl Session {
 
     /// Runs `options` in this window in place of its shell, which keeps running
     /// out of sight and comes back when the program exits.
-    #[cfg(target_os = "macos")]
     fn run_in_place(&mut self, options: &SpawnOptions, proxy: &EventLoopProxy) -> anyhow::Result<()> {
         if self.suspended.is_some() || self.exited {
             return Ok(());
@@ -2208,6 +2287,15 @@ impl Session {
                 self.send(bytes);
             }
             self.mouse.last_cell = Some((row, col));
+            return;
+        }
+
+        // A right click or Control-click opens the context menu, for this window.
+        #[cfg(target_os = "macos")]
+        if pressed && (button == MouseButton::Right || (button == MouseButton::Left && self.modifiers.control_key())) {
+            self.window.focus_window();
+            let has_selection = self.shared.term.lock().selection_text().is_some();
+            menu::show_context_menu(self.window.as_ref(), self.mouse.position, has_selection);
             return;
         }
 

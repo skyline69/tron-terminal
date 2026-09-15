@@ -419,6 +419,7 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("shift+home", "scroll_to_top"),
     ("shift+end", "scroll_to_bottom"),
     ("ctrl+shift+f", "search"),
+    ("ctrl+shift+p", "command_palette"),
     ("ctrl+shift+z", "scroll_to_previous_prompt"),
     ("ctrl+shift+x", "scroll_to_next_prompt"),
     ("ctrl+shift+g", "select_command_output"),
@@ -444,6 +445,7 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("super+end", "scroll_to_bottom"),
     ("super+k", "clear_scrollback"),
     ("super+f", "search"),
+    ("super+shift+p", "command_palette"),
     ("super+up", "scroll_to_previous_prompt"),
     ("super+down", "scroll_to_next_prompt"),
     ("super+shift+up", "select_command_output"),
@@ -580,6 +582,8 @@ pub enum Action {
     /// Copies that output to the clipboard.
     CopyCommandOutput,
     Search,
+    /// Opens the command palette, which lists every command to type and run.
+    CommandPalette,
     NewWindow,
     ReloadConfig,
     /// Sends text to the application, written as `text:...`.
@@ -612,6 +616,7 @@ impl Action {
             "select_command_output" => Self::SelectCommandOutput,
             "copy_command_output" => Self::CopyCommandOutput,
             "search" => Self::Search,
+            "command_palette" => Self::CommandPalette,
             "new_window" => Self::NewWindow,
             "reload_config" => Self::ReloadConfig,
             "none" => Self::None,

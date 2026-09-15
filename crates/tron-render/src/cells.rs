@@ -1067,7 +1067,13 @@ impl CellPipeline {
         let x = layout.left(col);
         let y = self.padding[1] + cursor.row as f32 * cell_h;
         self.cursor_rect = [x, y, width, cell_h];
-        if self.cursor_hidden {
+        // An overlay such as the command palette covers the cursor's cell: the cursor
+        // would paint over it and recolor its text.
+        let covered = self.overlays.iter().any(|overlay| {
+            let span: usize = overlay.text.chars().map(|c| c.width().unwrap_or(0)).sum();
+            overlay.row == cursor.row && (overlay.col..overlay.col + span).contains(&col)
+        });
+        if self.cursor_hidden || covered {
             return NONE;
         }
         let color = colors.rgba(colors.palette.cursor);

@@ -1,13 +1,14 @@
 //! The macOS menu bar: the items tron handles, what they do and the shortcuts they show.
 //!
 //! This part does not touch AppKit, so it is tested on every platform. `macos`
-//! builds the menus from it.
+//! builds the menus from it. The command palette lists the same items on every platform.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 #[cfg(target_os = "macos")]
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::{install, take_commands, update};
+pub use macos::{install, show_context_menu, take_commands, update};
 
 use tron_config::{Action, BindKey, Binding, KeyCombo};
 
@@ -21,7 +22,7 @@ const ISSUES_URL: &str = "https://github.com/skyline69/tron-terminal/issues";
 pub enum MenuCommand {
     /// Runs a key binding action in the session.
     Action(Action),
-    /// Opens the startup screen's Settings tab in a new window.
+    /// Opens the startup screen's Settings tab in the active window.
     OpenSettings,
     /// Opens a web page.
     OpenUrl(&'static str),
@@ -37,6 +38,7 @@ pub enum Item {
     Paste,
     PasteSelection,
     Find,
+    CommandPalette,
     SelectCommandOutput,
     CopyCommandOutput,
     ClearScrollback,
@@ -54,13 +56,14 @@ pub enum Item {
 
 impl Item {
     /// Every item, in declaration order, so that `ALL[i]` has the tag `i + 1`.
-    pub const ALL: [Item; 19] = [
+    pub const ALL: [Item; 20] = [
         Item::Settings,
         Item::NewWindow,
         Item::Copy,
         Item::Paste,
         Item::PasteSelection,
         Item::Find,
+        Item::CommandPalette,
         Item::SelectCommandOutput,
         Item::CopyCommandOutput,
         Item::ClearScrollback,
@@ -95,6 +98,7 @@ impl Item {
             Item::Paste => "Paste",
             Item::PasteSelection => "Paste Selection",
             Item::Find => "Find…",
+            Item::CommandPalette => "Command Palette…",
             Item::SelectCommandOutput => "Select Command Output",
             Item::CopyCommandOutput => "Copy Command Output",
             Item::ClearScrollback => "Clear Scrollback",
@@ -121,6 +125,7 @@ impl Item {
             Item::Paste => Action::Paste,
             Item::PasteSelection => Action::PasteSelection,
             Item::Find => Action::Search,
+            Item::CommandPalette => Action::CommandPalette,
             Item::SelectCommandOutput => Action::SelectCommandOutput,
             Item::CopyCommandOutput => Action::CopyCommandOutput,
             Item::ClearScrollback => Action::ClearScrollback,
@@ -143,6 +148,26 @@ impl Item {
             MenuCommand::OpenSettings | MenuCommand::OpenUrl(_) => None,
         }
     }
+}
+
+/// The items of the menu a right click or Control-click opens, with `None` for
+/// separators. Copy is only there while text is selected. Everything else is in
+/// the command palette, which is typed into.
+pub fn context_items(has_selection: bool) -> Vec<Option<Item>> {
+    let mut items = Vec::new();
+    if has_selection {
+        items.push(Some(Item::Copy));
+    }
+    items.extend([
+        Some(Item::Paste),
+        None,
+        Some(Item::Find),
+        Some(Item::CommandPalette),
+        None,
+        Some(Item::NewWindow),
+        Some(Item::Settings),
+    ]);
+    items
 }
 
 /// The binding shown for `action` with its key equivalent. Several bindings can
@@ -227,6 +252,17 @@ mod tests {
             MenuCommand::OpenUrl("https://github.com/skyline69/tron-terminal/issues")
         );
         assert!(Item::ALL.iter().all(|item| !item.title().is_empty()));
+    }
+
+    #[test]
+    fn context_menu_offers_copy_only_over_a_selection() {
+        let without = context_items(false);
+        let with = context_items(true);
+        assert_eq!(with.first(), Some(&Some(Item::Copy)));
+        assert!(!without.contains(&Some(Item::Copy)));
+        assert_eq!(with[1..], without[..]);
+        assert_eq!(without.first(), Some(&Some(Item::Paste)));
+        assert_eq!(without.last(), Some(&Some(Item::Settings)));
     }
 
     #[test]

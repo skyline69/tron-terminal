@@ -3874,6 +3874,7 @@ dependencies = [
  "parking_lot",
  "png",
  "pollster",
+ "ratatui",
  "smithay-clipboard",
  "tron-config",
  "tron-core",
