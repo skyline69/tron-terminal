@@ -139,8 +139,8 @@ impl Pty {
         for (key, value) in &options.env {
             command.env(key, value);
         }
-        if let Some(cwd) = &options.cwd {
-            command.current_dir(cwd);
+        if let Some(dir) = start_directory(options) {
+            command.current_dir(dir);
         }
         #[cfg(target_os = "macos")]
         macos_session(&mut command, options, &program);
@@ -541,8 +541,7 @@ fn open_master() -> io::Result<OwnedFd> {
 }
 
 /// Starts the default shell the way macOS terminals do: as a login shell, which
-/// sets up `PATH` through `path_helper`, and in the home directory when tron was
-/// launched from Finder or the Dock with `/` as its directory.
+/// sets up `PATH` through `path_helper`.
 #[cfg(target_os = "macos")]
 fn macos_session(command: &mut Command, options: &SpawnOptions, program: &str) {
     if options.program.is_none()
@@ -553,12 +552,36 @@ fn macos_session(command: &mut Command, options: &SpawnOptions, program: &str) {
         arg0.push(name);
         command.arg0(arg0);
     }
-    if options.cwd.is_none()
-        && std::env::current_dir().is_ok_and(|dir| dir == std::path::Path::new("/"))
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        command.current_dir(home);
+}
+
+/// The directory the child starts in: `options.cwd` while it exists, else tron's
+/// own directory (by returning `None`), except where a terminal should not start.
+/// Then it is the home directory.
+fn start_directory(options: &SpawnOptions) -> Option<PathBuf> {
+    if let Some(dir) = options.cwd.as_ref().filter(|dir| dir.is_dir()) {
+        return Some(dir.clone());
     }
+    let current = std::env::current_dir().ok().filter(|dir| dir.is_dir());
+    let bundle = std::env::current_exe().ok().and_then(|exe| app_bundle(&exe));
+    if !starts_at_home(current.as_deref(), bundle.as_deref()) {
+        return None;
+    }
+    std::env::var_os("HOME").map(PathBuf::from).filter(|home| home.is_dir())
+}
+
+/// Whether a terminal started from tron's directory `current` belongs in the home
+/// directory instead: when that directory is gone, when it is `/` because Finder
+/// or the Dock launched tron on macOS, or when it is inside tron's own app bundle,
+/// which disappears with the disk image it was opened from.
+fn starts_at_home(current: Option<&std::path::Path>, bundle: Option<&std::path::Path>) -> bool {
+    let Some(current) = current else { return true };
+    (cfg!(target_os = "macos") && current == std::path::Path::new("/"))
+        || bundle.is_some_and(|bundle| current.starts_with(bundle))
+}
+
+/// The `.app` bundle containing the executable `exe`, if any.
+fn app_bundle(exe: &std::path::Path) -> Option<PathBuf> {
+    exe.ancestors().find(|dir| dir.extension().is_some_and(|extension| extension == "app")).map(PathBuf::from)
 }
 
 /// Linux reports `EIO` on the master once the child side is gone; macOS reports
@@ -643,6 +666,23 @@ mod tests {
         assert_eq!(env, ["HOME=/Users/me", "TMUX_TMPDIR=/tmp/a=b"]);
         assert_eq!(env_var(env.into_iter(), "TMUX_TMPDIR").as_deref(), Some("/tmp/a=b"));
         assert_eq!(parse_procargs2(&data[..3]), None);
+    }
+
+    #[test]
+    fn terminals_start_at_home_outside_usable_directories() {
+        use std::path::Path;
+        let bundle = app_bundle(Path::new("/Volumes/tron/tron.app/Contents/MacOS/tron")).unwrap();
+        assert_eq!(bundle, Path::new("/Volumes/tron/tron.app"));
+        assert_eq!(app_bundle(Path::new("/usr/local/bin/tron")), None);
+        assert!(starts_at_home(Some(Path::new("/Volumes/tron/tron.app/Contents/MacOS")), Some(&bundle)));
+        assert!(starts_at_home(None, None), "tron's own directory is gone");
+        assert!(!starts_at_home(Some(Path::new("/home/me/project")), Some(&bundle)));
+        assert!(!starts_at_home(Some(Path::new("/home/me/project")), None));
+        assert_eq!(starts_at_home(Some(Path::new("/")), None), cfg!(target_os = "macos"));
+
+        let gone = SpawnOptions { cwd: Some("/nonexistent/tron/test".into()), ..Default::default() };
+        let start = start_directory(&gone);
+        assert!(start.as_deref().is_none_or(Path::is_dir), "never a missing directory: {start:?}");
     }
 
     #[test]
