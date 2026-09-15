@@ -95,6 +95,7 @@ title = "CineShader Lava"
 kind = "Shader"
 source_url = "https://www.shadertoy.com/view/3sySRK"
 port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/cineShader-Lava.glsl"
+license = "CC BY-NC-SA 3.0 (Shadertoy's default, as the original creator stated no license)"
 note = "Built in as cineshader-lava.wgsl."
 
 [[credit]]
@@ -147,6 +148,7 @@ title = "Fireworks Rockets"
 kind = "Shader"
 source_url = "https://www.shadertoy.com/view/4dBGRw"
 port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/fireworks-rockets.glsl"
+license = "CC BY-NC-SA 3.0 (Shadertoy's default, as the original creator stated no license)"
 note = "Built in as fireworks-rockets.wgsl."
 
 [[credit]]
@@ -160,6 +162,7 @@ title = "Gears and Belts"
 kind = "Shader"
 source_url = "https://www.shadertoy.com/view/DsVSDV"
 port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/gears-and-belts.glsl"
+license = "CC BY-NC-SA 3.0 (Shadertoy's default, as the original creator stated no license)"
 note = "Built in as gears-and-belts.wgsl."
 
 [[credit]]
@@ -167,6 +170,7 @@ title = "Glitchy"
 kind = "Shader"
 source_url = "https://www.shadertoy.com/view/wld3WN"
 port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/glitchy.glsl"
+license = "CC BY-NC-SA 3.0 (Shadertoy's default, as the original creator stated no license)"
 note = "Built in as glitchy.wgsl."
 
 [[credit]]
@@ -240,6 +244,7 @@ title = "Sine Interference"
 kind = "Shader"
 source_url = "https://www.shadertoy.com/view/ms3cWn"
 port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/sin-interference.glsl"
+license = "CC BY-NC-SA 3.0 (Shadertoy's default, as the original creator stated no license)"
 note = "Built in as sin-interference.wgsl."
 
 [[credit]]
@@ -288,6 +293,7 @@ kind = "Shader"
 author = "Alex Sherwin (Ghostty adaptation)"
 source_url = "https://www.shadertoy.com/view/lljGDt"
 port_url = "https://github.com/hackr-sh/ghostty-shaders/blob/main/underwater.glsl"
+license = "CC BY-NC-SA 3.0 (Shadertoy's default, as the original creator stated no license)"
 note = "Built in as underwater.wgsl."
 
 [[credit]]

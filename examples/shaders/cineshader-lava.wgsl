@@ -1,4 +1,5 @@
 // Raymarched lava-lamp blobs drifting behind dark terminal areas.
+// License: CC BY-NC-SA 3.0 (https://creativecommons.org/licenses/by-nc-sa/3.0/), Shadertoy's default, as the original creator stated no license.
 // INFO: This shader is a port of https://www.shadertoy.com/view/3sySRK
 // Ported to WGSL for tron from https://github.com/hackr-sh/ghostty-shaders/blob/main/cineShader-Lava.glsl
 //

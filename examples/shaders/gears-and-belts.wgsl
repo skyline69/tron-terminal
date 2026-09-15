@@ -1,4 +1,5 @@
 // Dim scrolling tiles of turning gears and conveyor belts.
+// License: CC BY-NC-SA 3.0 (https://creativecommons.org/licenses/by-nc-sa/3.0/), Shadertoy's default, as the original creator stated no license.
 // sligltly modified version of https://www.shadertoy.com/view/DsVSDV
 // The only changes are done in the mainImage function
 // Ive added comments on what to modify

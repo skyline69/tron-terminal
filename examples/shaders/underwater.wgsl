@@ -1,4 +1,5 @@
 // Underwater sun rays shimmering behind dark parts of the terminal.
+// License: CC BY-NC-SA 3.0 (https://creativecommons.org/licenses/by-nc-sa/3.0/), Shadertoy's default, as the original creator stated no license.
 // adapted by Alex Sherwin for Ghostty from https://www.shadertoy.com/view/lljGDt
 // Ported to WGSL for tron from https://github.com/hackr-sh/ghostty-shaders/blob/main/underwater.glsl
 

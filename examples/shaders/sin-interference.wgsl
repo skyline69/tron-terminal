@@ -1,4 +1,5 @@
 // Colorful interference rings from two wandering sine sources.
+// License: CC BY-NC-SA 3.0 (https://creativecommons.org/licenses/by-nc-sa/3.0/), Shadertoy's default, as the original creator stated no license.
 // Based on https://www.shadertoy.com/view/ms3cWn
 // Ported to WGSL for tron from https://github.com/hackr-sh/ghostty-shaders/blob/main/sin-interference.glsl
 

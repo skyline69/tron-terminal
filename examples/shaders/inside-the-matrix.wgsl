@@ -1,4 +1,5 @@
 // Walk through a 3D hallway of matrix rain behind dark terminal parts.
+// License: "Feel free to do anything you want with this code.", as stated with the original runes shader.
 /*
   Feel free to do anything you want with this code.
   This shader uses "runes" code by FabriceNeyret2 (https://www.shadertoy.com/view/4ltyDM)

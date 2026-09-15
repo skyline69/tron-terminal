@@ -1,4 +1,5 @@
 // Analog glitch: noisy jitter, RGB split and scanlines every 10 s.
+// License: CC BY-NC-SA 3.0 (https://creativecommons.org/licenses/by-nc-sa/3.0/), Shadertoy's default, as the original creator stated no license.
 // modified version of https://www.shadertoy.com/view/wld3WN
 // Ported to WGSL for tron from https://github.com/hackr-sh/ghostty-shaders/blob/main/glitchy.glsl
 //

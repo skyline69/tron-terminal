@@ -1,4 +1,5 @@
 // Striped rockets rise and burst into sparks behind dark areas.
+// License: CC BY-NC-SA 3.0 (https://creativecommons.org/licenses/by-nc-sa/3.0/), Shadertoy's default, as the original creator stated no license.
 // This Ghostty shader is a lightly modified port of https://www.shadertoy.com/view/4dBGRw
 // Ported to WGSL for tron from https://github.com/hackr-sh/ghostty-shaders/blob/main/fireworks-rockets.glsl
 //
