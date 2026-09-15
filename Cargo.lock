@@ -3868,6 +3868,9 @@ dependencies = [
  "clap_complete",
  "env_logger",
  "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "parking_lot",
  "png",
  "pollster",
@@ -3918,6 +3921,8 @@ dependencies = [
  "fontique",
  "harfrust",
  "log",
+ "objc2-core-foundation",
+ "objc2-core-text",
  "swash",
  "thiserror 2.0.20",
 ]

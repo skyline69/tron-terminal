@@ -185,9 +185,11 @@ jobs:
       - name: Package the archive
         run: |
           dir="tron-$VERSION-$ARCH-macos"
-          mkdir -p "$dir/dist" bin
+          mkdir -p "$dir/dist/macos" bin
           cp "target/$TARGET/release/tron" install.sh README.md LICENSE-MIT LICENSE-APACHE "$dir/"
           cp dist/dev.tron.Terminal.desktop dist/dev.tron.Terminal.metainfo.xml dist/dev.tron.Terminal.svg dist/dev.tron.Terminal.png "$dir/dist/"
+          # install.sh builds tron.app with these icons.
+          cp -R dist/macos/Icon.icon dist/macos/icon-1024.png "$dir/dist/macos/"
           tar -czf "$dir.tar.gz" "$dir"
           shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
           cp "target/$TARGET/release/tron" "bin/tron-$ARCH"
@@ -221,14 +223,37 @@ jobs:
           lipo -create bin/tron-aarch64 bin/tron-x86_64 -output "$app/Contents/MacOS/tron"
           chmod +x "$app/Contents/MacOS/tron"
           sed "s/@VERSION@/$VERSION/g" dist/macos/Info.plist > "$app/Contents/Info.plist"
-          iconset=tron.iconset
-          mkdir -p "$iconset"
-          for size in 16 32 128 256 512; do
-            sips -z "$size" "$size" dist/macos/icon-1024.png --out "$iconset/icon_${size}x$size.png" > /dev/null
-            sips -z $((size * 2)) $((size * 2)) dist/macos/icon-1024.png --out "$iconset/icon_${size}x$size@2x.png" > /dev/null
+          # Icon.icon becomes Assets.car (Liquid Glass on macOS 26+) and Icon.icns for older
+          # releases. actool crashes on CI now and then, so it gets a few attempts; without
+          # it, the classic icon on Apple's grid is used.
+          mkdir -p icon-build
+          compiled=false
+          for attempt in 1 2 3 4 5; do
+            if xcrun actool dist/macos/Icon.icon --compile icon-build \
+              --output-format human-readable-text --notices --warnings --errors \
+              --output-partial-info-plist icon-build/partial.plist \
+              --app-icon Icon --include-all-app-icons --enable-on-demand-resources NO \
+              --development-region en --target-device mac --platform macosx \
+              --minimum-deployment-target 11.0 && [ -f icon-build/Assets.car ]; then
+              compiled=true
+              break
+            fi
+            echo "::warning::actool attempt $attempt failed"
+            sleep 5
           done
-          iconutil -c icns "$iconset" -o "$app/Contents/Resources/tron.icns"
-          cp "$app/Contents/Resources/tron.icns" tron.icns
+          if [ "$compiled" = true ]; then
+            cp icon-build/Assets.car icon-build/Icon.icns "$app/Contents/Resources/"
+          else
+            echo "::warning::actool failed; using the classic icon"
+            iconset=Icon.iconset
+            mkdir -p "$iconset"
+            for size in 16 32 128 256 512; do
+              sips -z "$size" "$size" dist/macos/icon-1024.png --out "$iconset/icon_${size}x$size.png" > /dev/null
+              sips -z $((size * 2)) $((size * 2)) dist/macos/icon-1024.png --out "$iconset/icon_${size}x$size@2x.png" > /dev/null
+            done
+            iconutil -c icns "$iconset" -o "$app/Contents/Resources/Icon.icns"
+          fi
+          cp "$app/Contents/Resources/Icon.icns" tron.icns
           # Ad-hoc signature: not notarized, so the first launch needs Open from the context menu.
           codesign --force --sign - "$app"
       - name: Build the disk image

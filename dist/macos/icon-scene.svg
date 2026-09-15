@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Background layer of the macOS icon (Icon.icon): the screen of dev.tron.Terminal.svg
+       filling the whole square. macOS masks the corners and adds the glass edge. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d0221"/>
+      <stop offset="0.55" stop-color="#3a0c5c"/>
+      <stop offset="1" stop-color="#ff3d8b"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe45c"/>
+      <stop offset="1" stop-color="#ff3d8b"/>
+    </linearGradient>
+    <pattern id="scanlines" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="2" fill="#000"/>
+    </pattern>
+    <mask id="sun-stripes" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
+      <rect x="0" y="0" width="256" height="256" fill="#fff"/>
+      <rect x="60" y="116" width="136" height="4" fill="#000"/>
+      <rect x="60" y="128" width="136" height="5" fill="#000"/>
+      <rect x="60" y="140" width="136" height="6" fill="#000"/>
+    </mask>
+  </defs>
+
+  <!-- The 200 unit screen of the 256 unit icon, scaled to the 1024 px canvas. -->
+  <g transform="scale(5.12) translate(-28 -28)">
+    <rect x="28" y="28" width="200" height="124" fill="url(#sky)"/>
+    <circle cx="128" cy="152" r="62" fill="url(#sun)" mask="url(#sun-stripes)"/>
+    <rect x="28" y="152" width="200" height="76" fill="#0d0221"/>
+    <g stroke="#ff4fd8" stroke-width="2" fill="none">
+      <path d="M28 152 H228" stroke-width="3"/>
+      <path d="M28 160 H228 M28 172 H228 M28 190 H228 M28 216 H228"/>
+      <path d="M128 152 V228 M104 152 L56 228 M80 152 L-16 228 M152 152 L200 228 M176 152 L272 228"/>
+    </g>
+    <rect x="28" y="28" width="200" height="200" fill="url(#scanlines)" opacity="0.15"/>
+  </g>
+</svg>

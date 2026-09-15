@@ -14,7 +14,7 @@ use tron_font::{CellMetrics, FontSystem, GlyphFormat, GlyphKey, ShapedGlyph, Sty
 use unicode_width::UnicodeWidthChar;
 
 use crate::atlas::Atlas;
-use crate::{LinkHighlight, Overlay, Theme};
+use crate::{LinkHighlight, Overlay, Scrollbar, Theme};
 
 const INITIAL_ATLAS_SIZE: u32 = 1024;
 const SHAPE_CACHE_LIMIT: usize = 16_384;
@@ -23,6 +23,7 @@ const KIND_SOLID: u32 = 0;
 const KIND_MASK: u32 = 1;
 const KIND_COLOR: u32 = 2;
 const KIND_CURLY: u32 = 3;
+const KIND_ROUNDED: u32 = 4;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, PartialEq)]
@@ -342,6 +343,7 @@ pub struct CellPipeline {
     row_cache: HashMap<u64, RowInstances>,
     clear_row_cache: bool,
     overlays: Vec<Overlay>,
+    scrollbar: Option<Scrollbar>,
     overlay_instances: RowInstances,
     bidi: bool,
     flash: f32,
@@ -464,6 +466,7 @@ impl CellPipeline {
             row_cache: HashMap::default(),
             clear_row_cache: false,
             overlays: Vec::new(),
+            scrollbar: None,
             overlay_instances: RowInstances::default(),
             bidi: true,
             flash: 0.0,
@@ -538,6 +541,10 @@ impl CellPipeline {
 
     pub fn set_flash(&mut self, strength: f32) {
         self.flash = strength.clamp(0.0, 1.0);
+    }
+
+    pub fn set_scrollbar(&mut self, scrollbar: Option<Scrollbar>) {
+        self.scrollbar = scrollbar;
     }
 
     fn rebind(&mut self, device: &wgpu::Device) {
@@ -706,6 +713,17 @@ impl CellPipeline {
             }
             self.overlay_instances = instances;
             self.overlays = overlays;
+        }
+        if let Some(bar) = self.scrollbar {
+            let [r, g, b, _] = colors.rgba(bar.color);
+            self.frame.push(Instance {
+                pos: [bar.x, bar.y],
+                size: [bar.width, bar.height],
+                // Corner radius, then the size the shader measures the rounded box in.
+                uv: [bar.width / 2.0, 0.0, bar.width, bar.height],
+                color: [r, g, b, bar.alpha],
+                kind: KIND_ROUNDED,
+            });
         }
         if self.flash > 0.0 {
             self.frame.push(solid(0.0, 0.0, viewport[0], viewport[1], [1.0, 1.0, 1.0, self.flash * 0.18]));

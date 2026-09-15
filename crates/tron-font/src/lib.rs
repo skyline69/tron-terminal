@@ -3,8 +3,11 @@
 //! Discovery and fallback use `fontique` (reads the system fontconfig setup on
 //! Linux). Shaping uses `harfrust`, which gives ligatures and combining marks.
 //! Rasterization uses `swash`. Box drawing and block characters are drawn by
-//! [`sprite`] so they join seamlessly.
+//! [`sprite`] so they join seamlessly. On macOS, characters no configured or
+//! generic family covers fall back to the font Core Text picks.
 
+#[cfg(target_os = "macos")]
+mod core_text;
 pub mod sprite;
 
 use foldhash::HashMap;
@@ -163,6 +166,27 @@ pub struct FontSystem {
     size_px: f32,
     hint: bool,
     metrics: CellMetrics,
+    #[cfg(target_os = "macos")]
+    system_fallback: SystemFallback,
+}
+
+/// Faces found through Core Text, cached so it is not asked on every frame.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct SystemFallback {
+    /// Face per character, `None` when Core Text has nothing either.
+    faces: HashMap<char, Option<u32>>,
+    /// Font files registered with the collection, `None` when unreadable.
+    files: HashMap<std::path::PathBuf, Option<FontFile>>,
+}
+
+/// A font file registered with the collection.
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct FontFile {
+    blob: Blob<u8>,
+    /// Indices of the faces in the file.
+    indices: Vec<u32>,
 }
 
 impl FontSystem {
@@ -196,6 +220,8 @@ impl FontSystem {
                 underline_thickness: 1,
                 strikeout_position: 1,
             },
+            #[cfg(target_os = "macos")]
+            system_fallback: SystemFallback::default(),
         };
         system.reload_faces()?;
         system.set_size(size_pt, scale_factor);
@@ -259,6 +285,8 @@ impl FontSystem {
         }
         self.glyphs.clear();
         self.emoji_faces.clear();
+        #[cfg(target_os = "macos")]
+        self.system_fallback.faces.clear();
         Ok(())
     }
 
@@ -364,7 +392,7 @@ impl FontSystem {
                 QueryFamily::Generic(GenericFamily::Emoji),
                 QueryFamily::Generic(GenericFamily::Serif),
             ]);
-            let face = self.query(&families, style, Some(ch))?;
+            let face = self.query(&families, style, Some(ch)).or_else(|| self.system_fallback_face(ch))?;
             self.map(face, ch)
         });
         self.glyphs.insert((ch, style), found);
@@ -378,6 +406,7 @@ impl FontSystem {
 
     /// Face for a grapheme cluster. An emoji variation selector (U+FE0F)
     /// selects a color emoji font even when the text font has the character.
+    /// Without an emoji glyph the cluster takes the regular fallback.
     pub fn face_for_cluster(&mut self, base: char, combining: Option<&str>, style: Style) -> u32 {
         if combining.is_some_and(|c| c.contains('\u{FE0F}'))
             && let Some(face) = self.emoji_face(base)
@@ -481,6 +510,67 @@ impl FontSystem {
         drop(query);
         let (blob, index, synthesis) = found?;
         self.intern_face(blob, index, synthesis)
+    }
+
+    /// Other systems have no fallback beyond fontique's.
+    #[cfg(not(target_os = "macos"))]
+    fn system_fallback_face(&mut self, _ch: char) -> Option<u32> {
+        None
+    }
+
+    /// Face of the font Core Text falls back to for `ch`. fontique's script
+    /// fallback misses symbols, whose script is Common.
+    #[cfg(target_os = "macos")]
+    fn system_fallback_face(&mut self, ch: char) -> Option<u32> {
+        if let Some(&face) = self.system_fallback.faces.get(&ch) {
+            return face;
+        }
+        let face = self.find_system_fallback_face(ch);
+        self.system_fallback.faces.insert(ch, face);
+        face
+    }
+
+    #[cfg(target_os = "macos")]
+    fn find_system_fallback_face(&mut self, ch: char) -> Option<u32> {
+        let base = if self.collection.family_id(&self.family).is_some() { self.family.clone() } else { "Menlo".into() };
+        let font = core_text::font_for(&base, ch)?;
+        if let Some(id) = self.collection.family_id(&font.family)
+            && let Some(face) = self.query(&[QueryFamily::Id(id)], Style::Regular, Some(ch))
+        {
+            return Some(face);
+        }
+        // Private families such as ".SF NS Symbols" are often missing from the
+        // collection, so load the file Core Text uses.
+        let path = font.path?;
+        let registered = match self.system_fallback.files.get(&path) {
+            Some(registered) => registered.clone(),
+            None => {
+                let registered = self.register_font_file(&path);
+                self.system_fallback.files.insert(path, registered.clone());
+                registered
+            }
+        };
+        let FontFile { blob, indices } = registered?;
+        let index = indices.into_iter().find(|&index| {
+            FontRef::from_index(blob.data(), index as usize).is_some_and(|f| f.charmap().map(ch) != 0)
+        })?;
+        self.intern_face(blob, index, Synthesis::default())
+    }
+
+    /// Reads a font file and adds its faces to the collection.
+    #[cfg(target_os = "macos")]
+    fn register_font_file(&mut self, path: &std::path::Path) -> Option<FontFile> {
+        let data = match std::fs::read(path) {
+            Ok(data) => data,
+            Err(error) => {
+                log::warn!("cannot read fallback font `{}`: {error}", path.display());
+                return None;
+            }
+        };
+        let blob = Blob::from(data);
+        let fonts = self.collection.register_fonts(blob.clone(), None);
+        let indices = fonts.into_iter().flat_map(|(_, fonts)| fonts).map(|font| font.index()).collect();
+        Some(FontFile { blob, indices })
     }
 
     fn intern_face(&mut self, blob: Blob<u8>, index: u32, synthesis: Synthesis) -> Option<u32> {

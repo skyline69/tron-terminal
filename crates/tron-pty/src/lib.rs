@@ -183,6 +183,15 @@ impl Pty {
         self.child.id()
     }
 
+    /// The child's working directory, read from the process. In a Flatpak the
+    /// child is flatpak-spawn, whose directory says nothing about the host shell.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        if in_flatpak() {
+            return None;
+        }
+        process_cwd(self.child.id())
+    }
+
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.child.try_wait()
     }
@@ -206,6 +215,37 @@ fn terminal_env(options: &SpawnOptions) -> [(&'static str, String); 5] {
         // like Codex pets and image viewers, find it. tron speaks the protocol.
         ("KITTY_WINDOW_ID", "1".to_owned()),
     ]
+}
+
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    use std::ffi::{CStr, c_int, c_void};
+    use std::os::unix::ffi::OsStrExt;
+
+    unsafe extern "C" {
+        /// libproc, part of libSystem.
+        fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *mut c_void, size: c_int) -> c_int;
+    }
+    const PROC_PIDVNODEPATHINFO: c_int = 9;
+    // `struct proc_vnodepathinfo`: the current and root directories, each a
+    // 152 byte `vnode_info` followed by a MAXPATHLEN (1024) path.
+    const SIZE: usize = 2 * (152 + 1024);
+    const CDIR_PATH: std::ops::Range<usize> = 152..152 + 1024;
+
+    let mut info = [0u8; SIZE];
+    // SAFETY: the buffer is writable and as large as the size passed.
+    let written =
+        unsafe { proc_pidinfo(pid as c_int, PROC_PIDVNODEPATHINFO, 0, info.as_mut_ptr().cast(), SIZE as c_int) };
+    if written != SIZE as c_int {
+        return None;
+    }
+    let path = CStr::from_bytes_until_nul(&info[CDIR_PATH]).ok()?.to_bytes();
+    (!path.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(path)))
 }
 
 /// Whether tron runs inside a Flatpak sandbox.
@@ -337,6 +377,19 @@ mod tests {
 
         let shell = host_command(&SpawnOptions::default()).1;
         assert_eq!(shell.last().map(String::as_str), Some("sh"), "no program: the script finds the login shell");
+    }
+
+    #[test]
+    fn reads_the_child_working_directory() {
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let options = SpawnOptions {
+            program: Some("sleep".into()),
+            args: vec!["5".into()],
+            cwd: Some(dir.clone()),
+            ..Default::default()
+        };
+        let pty = Pty::spawn(&options, WindowSize { cols: 80, rows: 24, ..Default::default() }).unwrap();
+        assert_eq!(pty.cwd(), Some(dir));
     }
 
     #[test]

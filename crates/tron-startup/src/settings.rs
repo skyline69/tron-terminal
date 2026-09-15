@@ -37,13 +37,29 @@ pub struct Setting {
 const FIRST_LAUNCH: &str = "first launch";
 const EVERY_LAUNCH: &str = "every launch";
 const NEVER: &str = "never";
+/// Stands for `shader.fps = 0`: animations follow the display's refresh rate.
+const DISPLAY_RATE: &str = "display rate";
 
 fn choice(values: &[&str]) -> Kind {
     Kind::Choice(values.iter().map(|v| (*v).to_owned()).collect())
 }
 
-/// All settings. `fonts` are the families offered for `font.family`.
-pub fn list(fonts: &[String]) -> Vec<Setting> {
+/// Frame rates offered for `shader.fps`: the display's rate, then common rates up to
+/// `max_fps`, the fastest connected monitor's refresh rate, which is offered too.
+fn fps_choices(max_fps: Option<u32>) -> Kind {
+    const RATES: [u32; 10] = [360, 240, 165, 144, 120, 90, 75, 60, 30, 15];
+    let max = max_fps.unwrap_or(120);
+    let mut choices = vec![DISPLAY_RATE.to_owned()];
+    if !RATES.contains(&max) {
+        choices.push(max.to_string());
+    }
+    choices.extend(RATES.iter().filter(|&&rate| rate <= max).map(u32::to_string));
+    Kind::Choice(choices)
+}
+
+/// All settings. `fonts` are the families offered for `font.family`, `max_fps` the
+/// highest refresh rate of the connected monitors.
+pub fn list(fonts: &[String], max_fps: Option<u32>) -> Vec<Setting> {
     let setting = |key, label, help, kind| Setting { key, label, help, kind };
     vec![
         setting(
@@ -89,6 +105,19 @@ pub fn list(fonts: &[String]) -> Vec<Setting> {
             "Padding top and bottom",
             "Space between the window edge and the text, in pixels.",
             Kind::Integer { min: 0, max: 80, step: 2 },
+        ),
+        setting(
+            "shader.animation",
+            "Shader animation",
+            "Auto animates shaders that read the time. Always and never override it.",
+            choice(&["auto", "always", "never"]),
+        ),
+        setting(
+            "shader.fps",
+            "Animation frame rate",
+            "Cap background animations to save power; capped, they also slow down without focus. \
+             Output and cursor effects always use the display's rate.",
+            fps_choices(max_fps),
         ),
         setting(
             "cursor.shape",
@@ -164,6 +193,11 @@ pub fn read(config: &Config) -> BTreeMap<&'static str, toml::Value> {
         ("window.blur", Boolean(config.window.blur)),
         ("window.padding_x", Integer(i64::from(config.window.padding_x))),
         ("window.padding_y", Integer(i64::from(config.window.padding_y))),
+        ("shader.animation", name(config.shader.animation)),
+        (
+            "shader.fps",
+            String(if config.shader.fps == 0 { DISPLAY_RATE.to_owned() } else { config.shader.fps.to_string() }),
+        ),
         ("cursor.shape", name(config.cursor.shape)),
         ("cursor.blinking", name(config.cursor.blinking)),
         ("scrollback.lines", Integer(config.scrollback.lines as i64)),
@@ -306,6 +340,8 @@ fn config_value(key: &str, value: &toml::Value) -> Option<toml::Value> {
             NEVER => Some(toml::Value::Boolean(false)),
             _ => None,
         },
+        // The display rate is the default: no key.
+        ("shader.fps", toml::Value::String(text)) => text.parse::<i64>().ok().map(toml::Value::Integer),
         _ => Some(value.clone()),
     }
 }
@@ -398,7 +434,7 @@ mod tests {
 
     #[test]
     fn values_step_within_their_kind() {
-        let settings = list(&["monospace".into(), "Iosevka".into()]);
+        let settings = list(&["monospace".into(), "Iosevka".into()], Some(60));
         let find = |key| settings.iter().find(|s| s.key == key).unwrap();
         let size = find("font.size");
         assert_eq!(step(size, &toml::Value::Float(12.0), 1), toml::Value::Float(12.5));
@@ -413,6 +449,10 @@ mod tests {
             toml::Value::String("monospace".into())
         );
         assert_eq!(step(find("scrollback.lines"), &toml::Value::Integer(10_000), -1), toml::Value::Integer(9_000));
+        let fps = find("shader.fps");
+        assert_eq!(fps.kind, choice(&[DISPLAY_RATE, "60", "30", "15"]), "up to the fastest monitor");
+        assert_eq!(step(fps, &toml::Value::String(DISPLAY_RATE.into()), 2), toml::Value::String("30".into()));
+        assert_eq!(fps_choices(Some(100)), choice(&[DISPLAY_RATE, "100", "90", "75", "60", "30", "15"]));
         assert_eq!(display(&toml::Value::Float(0.85)), "0.85");
         assert_eq!(display(&toml::Value::Float(12.0)), "12");
     }
@@ -422,10 +462,17 @@ mod tests {
         let mut choices = Choices::from_config(&Config::default());
         choices.settings.insert("font.size", toml::Value::Float(16.5));
         choices.settings.insert("startup", toml::Value::String(NEVER.into()));
+        choices.settings.insert("shader.fps", toml::Value::String("30".into()));
+        choices.settings.insert("shader.animation", toml::Value::String("always".into()));
         let text = choices.overlay("nord", &["crt.wgsl".into()]);
         let config: Config = toml::from_str(&text).unwrap();
         assert_eq!((config.theme.as_deref(), config.font.size), (Some("nord"), 16.5));
         assert_eq!(config.shader.files, ["crt.wgsl"]);
+        assert_eq!(config.shader.fps, 30);
+        assert_eq!(config.shader.animation, tron_config::Animation::Always);
+        choices.settings.insert("shader.fps", toml::Value::String(DISPLAY_RATE.into()));
+        let config: Config = toml::from_str(&choices.overlay("nord", &[])).unwrap();
+        assert_eq!(config.shader.fps, 0, "the display rate writes no key");
         assert_eq!(config.startup, None, "startup is not previewed");
     }
 
@@ -463,7 +510,7 @@ mod tests {
         choices.settings.insert("font.size", toml::Value::Float(14.0));
         choices.settings.insert("window.opacity", toml::Value::Float(0.9));
         choices.settings.insert("startup", toml::Value::String(NEVER.into()));
-        let changes = choices.changes(&saved, &list(&[]));
+        let changes = choices.changes(&saved, &list(&[], None));
         assert!(changes.contains(&("Font size".into(), "12".into(), "14".into())), "{changes:?}");
         assert_eq!(changes.len(), 5, "{changes:?}");
 

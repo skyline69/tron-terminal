@@ -18,6 +18,7 @@ const KIND_SOLID: u32 = 0u;
 const KIND_MASK: u32 = 1u;
 const KIND_COLOR: u32 = 2u;
 const KIND_CURLY: u32 = 3u;
+const KIND_ROUNDED: u32 = 4u;
 
 struct Instance {
     @location(0) pos: vec2<f32>,
@@ -76,6 +77,15 @@ fn fs_main(v: VertexOut) -> @location(0) vec4<f32> {
             let slope = v.params.y * 6.2831853 / period * cos(angle);
             let distance = abs(v.local.y - wave) / sqrt(1.0 + slope * slope);
             let a = clamp(v.params.z * 0.5 + 0.5 - distance, 0.0, 1.0) * v.color.a;
+            return vec4<f32>(v.color.rgb * a, a);
+        }
+        case KIND_ROUNDED: {
+            // params: corner radius, unused, box width and height. Signed distance to a
+            // rounded box, anti-aliased over one pixel.
+            let half = v.params.zw * 0.5;
+            let q = abs(v.local - half) - half + vec2<f32>(v.params.x);
+            let distance = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - v.params.x;
+            let a = clamp(0.5 - distance, 0.0, 1.0) * v.color.a;
             return vec4<f32>(v.color.rgb * a, a);
         }
         case KIND_COLOR: {

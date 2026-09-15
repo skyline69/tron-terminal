@@ -29,6 +29,14 @@ pub const TOKEN_ENV: &str = "TRON_WINDOW_TOKEN";
 pub const CONFIG_DIR_ENV: &str = "TRON_CONFIG_DIR";
 /// Environment variable naming the tab (by title) to open directly, skipping the splash.
 pub const TAB_ENV: &str = "TRON_STARTUP_TAB";
+/// Environment variable with the highest refresh rate of the connected monitors, in hertz.
+/// The terminal UI cannot see monitors, so tron passes it along.
+pub const MAX_FPS_ENV: &str = "TRON_MAX_FPS";
+
+/// Highest refresh rate of the connected monitors, as tron reported it.
+pub(crate) fn max_fps() -> Option<u32> {
+    std::env::var(MAX_FPS_ENV).ok()?.parse().ok()
+}
 /// Debug aid: open this tour page, by number from 1.
 pub(crate) const DEBUG_PAGE_ENV: &str = "TRON_STARTUP_DEBUG_PAGE";
 /// Variables for the startup screen only, removed before the shell starts.

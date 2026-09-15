@@ -7,12 +7,14 @@ mod input;
 mod launcher;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(target_os = "macos", test))]
+mod menu;
 mod mouse;
 mod terminfo;
 
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -43,7 +45,7 @@ use tron_core::{
 };
 use tron_font::{CellMetrics, FontSystem};
 use tron_pty::{Pty, SpawnOptions, WindowSize};
-use tron_render::{Gpu, LinkHighlight, Overlay, PostShader, Renderer, Theme};
+use tron_render::{Gpu, LinkHighlight, Overlay, PostShader, Renderer, Scrollbar, Theme};
 
 use clipboard::Clipboard;
 
@@ -64,6 +66,12 @@ const CONFIG_ERROR_TIME: Duration = Duration::from_secs(15);
 const FLASH: Duration = Duration::from_millis(150);
 /// Frame rate of continuous shader animations while the window has no focus.
 const UNFOCUSED_FPS: u32 = 10;
+/// How long the overlay scrollbar stays after scrolling stops, and how long it fades.
+const SCROLLBAR_VISIBLE: Duration = Duration::from_millis(900);
+const SCROLLBAR_FADE: Duration = Duration::from_millis(250);
+/// How often the shell's directory is read for the folder icon beside the title.
+#[cfg(target_os = "macos")]
+const REPRESENTED_DIRECTORY_POLL: Duration = Duration::from_millis(500);
 /// Link schemes opened on Ctrl+click.
 const LINK_SCHEMES: [&str; 9] =
     ["http://", "https://", "file://", "mailto:", "ftp://", "sftp://", "ssh://", "git://", "gemini://"];
@@ -144,6 +152,7 @@ fn main() -> anyhow::Result<()> {
         _watcher: watcher,
         gpu,
         session: None,
+        max_fps: None,
     })?;
     Ok(())
 }
@@ -174,6 +183,8 @@ struct App {
     /// GPU initialization started at launch, joined when the window exists.
     gpu: Option<thread::JoinHandle<Result<Gpu, tron_render::RenderError>>>,
     session: Option<Session>,
+    /// Highest refresh rate of the connected monitors, for the startup screen's frame rate choices.
+    max_fps: Option<u32>,
 }
 
 /// Config values the event handlers need.
@@ -262,6 +273,40 @@ struct DropState {
 /// A requested shader chain: (name, source) per shader and the animation mode.
 type AppliedShaders = (Vec<(String, String)>, Option<bool>);
 
+/// An overlay scrollbar in the macOS style: shown while scrolling, faded out after,
+/// wider while the pointer is over it, and draggable.
+struct ScrollbarState {
+    /// Drawn on macOS, and elsewhere with `TRON_SCROLLBAR=1`.
+    enabled: bool,
+    /// When scrolling last showed it.
+    shown_at: Option<Instant>,
+    hovered: bool,
+    /// While the thumb is dragged: where the pointer holds it, from the thumb's top.
+    grab: Option<f32>,
+    /// Thumb top and height, and track top and bottom, of the last frame.
+    thumb: Option<(f32, f32)>,
+    track: (f32, f32),
+    scrollback: usize,
+    offset: usize,
+    visible: bool,
+}
+
+impl ScrollbarState {
+    fn new() -> Self {
+        Self {
+            enabled: cfg!(target_os = "macos") || std::env::var_os("TRON_SCROLLBAR").is_some_and(|value| value == "1"),
+            shown_at: None,
+            hovered: false,
+            grab: None,
+            thumb: None,
+            track: (0.0, 0.0),
+            scrollback: 0,
+            offset: 0,
+            visible: false,
+        }
+    }
+}
+
 struct Session {
     // Declared before `window`: it must be dropped before the Wayland display.
     clipboard: Clipboard,
@@ -324,10 +369,16 @@ struct Session {
     ime_area: Option<[f32; 4]>,
     /// Physical pixels at the top covered by window decorations, see [`top_inset`].
     top_inset: f32,
-    /// `[shader] fps`: frame rate of continuous animations, 0 for the display's.
+    /// `[shader] fps`: frame rate cap of continuous animations, 0 for none.
     animation_fps: u32,
     /// The window is hidden, minimized or covered: animations stop.
     occluded: bool,
+    scrollbar: ScrollbarState,
+    /// The folder shown beside the title, and when the shell's directory was last read.
+    #[cfg(target_os = "macos")]
+    represented_directory: (Option<PathBuf>, Instant),
+    /// The title a program set, none when it was never set or set empty.
+    program_title: Option<String>,
     /// `TRON_TRACE_LATENCY`: log the time from a key press to the frame showing its effect.
     trace_latency: bool,
     pending_key: Option<Instant>,
@@ -344,6 +395,7 @@ struct Session {
 
 impl App {
     fn create_session(&mut self, event_loop: &dyn ActiveEventLoop) -> anyhow::Result<Session> {
+        self.max_fps = max_refresh_rate(event_loop);
         let config = &self.config;
         let started = Instant::now();
         let mut fonts = FontSystem::new(&config.font.family, config.font.size, 1.0)?;
@@ -473,6 +525,10 @@ impl App {
             top_inset: inset,
             animation_fps: config.shader.fps,
             occluded: false,
+            scrollbar: ScrollbarState::new(),
+            #[cfg(target_os = "macos")]
+            represented_directory: (None, Instant::now() - REPRESENTED_DIRECTORY_POLL),
+            program_title: None,
             trace_latency: std::env::var_os("TRON_TRACE_LATENCY").is_some(),
             pending_key: None,
             focused: true,
@@ -540,6 +596,9 @@ impl App {
             options.env.push(("PATH".into(), terminfo::path_with(&bin)));
         }
         options.env.extend(shell.env.iter().map(|(k, v)| (k.into(), v.into())));
+        if let Some(fps) = self.max_fps {
+            options.env.push((tron_startup::MAX_FPS_ENV.into(), fps.to_string().into()));
+        }
         // Lets `tron --startup` in this window talk to it.
         options.env.push((tron_startup::TOKEN_ENV.into(), self.startup_token.clone().into()));
         if let Some(paths) = &self.paths {
@@ -632,6 +691,38 @@ impl App {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl App {
+    /// Carries out a command chosen from the menu bar, as its key binding would.
+    fn run_menu_command(&mut self, command: menu::MenuCommand) {
+        match command {
+            menu::MenuCommand::Action(Action::ReloadConfig) => self.reload_config(),
+            menu::MenuCommand::Action(action) => {
+                let Some(session) = self.session.as_mut() else { return };
+                // While searching, Find moves to the next match like its key binding does.
+                if action == Action::Search && session.search.is_some() {
+                    session.search_step(true, false);
+                } else {
+                    session.run_action(action);
+                }
+            }
+            menu::MenuCommand::OpenSettings => {
+                let Ok(exe) = std::env::current_exe() else { return };
+                let mut command = Command::new(exe);
+                // Without TERM_PROGRAM a tron started from a tron shell opens a window
+                // instead of taking over a terminal it does not have.
+                command.arg("settings").env_remove("TERM_PROGRAM");
+                spawn_detached(command);
+            }
+            menu::MenuCommand::OpenUrl(url) => {
+                if let Some(session) = &self.session {
+                    session.open_link(url);
+                }
+            }
+        }
+    }
+}
+
 impl ApplicationHandler for App {
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         if self.session.is_some() {
@@ -642,6 +733,8 @@ impl ApplicationHandler for App {
                 // Output may have arrived while the session was being created.
                 session.shared.wake_pending.store(false, Ordering::Release);
                 session.window.request_redraw();
+                #[cfg(target_os = "macos")]
+                menu::install(self.proxy.clone(), &session.bindings);
                 self.session = Some(session);
             }
             Err(error) => {
@@ -662,6 +755,10 @@ impl ApplicationHandler for App {
     fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
         if self.config_dirty.swap(false, Ordering::AcqRel) {
             self.reload_config();
+        }
+        #[cfg(target_os = "macos")]
+        for command in menu::take_commands() {
+            self.run_menu_command(command);
         }
         let Some(session) = self.session.as_mut() else { return };
         session.shared.wake_pending.store(false, Ordering::Release);
@@ -882,6 +979,8 @@ impl Session {
             problems.push(format!("keybindings: {error}"));
         }
         self.bindings = bindings;
+        #[cfg(target_os = "macos")]
+        menu::update(&self.bindings);
 
         // Font changes rebuild the glyph atlases, which is slow. Previews that only
         // change colors or shaders, like browsing themes, keep them.
@@ -1194,6 +1293,8 @@ impl Session {
     }
 
     fn redraw(&mut self, event_loop: &dyn ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        self.update_represented_directory();
         {
             let mut term = self.shared.term.lock();
             if term.sync_blocked() {
@@ -1201,9 +1302,25 @@ impl Session {
                 return;
             }
             if let Some(title) = term.take_title() {
-                self.window.set_title(if title.is_empty() { &self.settings.title } else { &title });
+                self.program_title = (!title.is_empty()).then_some(title);
+                self.window.set_title(&window_title(
+                    self.program_title.as_deref(),
+                    self.title_directory(),
+                    std::env::home_dir().as_deref(),
+                    &self.settings.title,
+                ));
             }
             term.snapshot(&mut self.snapshot);
+            let grid = term.grid();
+            let (scrollback, offset) = (grid.scrollback_len(), grid.display_offset());
+            // Scrolling through history shows the scrollbar; output growing the history
+            // under a scrolled view moves the offset too, but by as much as the history.
+            let bar = &mut self.scrollbar;
+            if bar.enabled && offset != bar.offset && offset.abs_diff(bar.offset) != scrollback.abs_diff(bar.scrollback)
+            {
+                bar.shown_at = Some(Instant::now());
+            }
+            (bar.scrollback, bar.offset) = (scrollback, offset);
             // The startup screen's shader ends when the shell shows its first prompt,
             // or when the screen stopped sending commands without turning it off.
             if let Some((since, marks)) = self.startup_shader
@@ -1259,6 +1376,10 @@ impl Session {
         // Animated images.
         if let Some(due) = self.snapshot.next_frame_due {
             wake_at(due.max(now + Duration::from_millis(1)));
+        }
+
+        if let Some(due) = self.update_scrollbar(now, self.snapshot.rows()) {
+            wake_at(due);
         }
 
         // Built without the lock, so the reader keeps parsing meanwhile.
@@ -1564,8 +1685,47 @@ impl Session {
         self.renderer.set_overlays(overlays);
     }
 
+    /// The shell's working directory: reported through OSC 7, else read from the
+    /// shell process, since shells without integration do not report it.
+    fn working_directory(&self) -> Option<PathBuf> {
+        let reported = self.shared.term.lock().cwd().map(percent_decode).map(PathBuf::from);
+        reported.or_else(|| self.pty.cwd()).filter(|path| path.is_dir())
+    }
+
+    /// Follows the shell's directory with the folder icon beside the title.
+    #[cfg(target_os = "macos")]
+    fn update_represented_directory(&mut self) {
+        if self.represented_directory.1.elapsed() < REPRESENTED_DIRECTORY_POLL {
+            return;
+        }
+        self.represented_directory.1 = Instant::now();
+        let directory = self.working_directory();
+        if directory != self.represented_directory.0 {
+            macos::set_represented_directory(self.window.as_ref(), directory.as_deref());
+            self.represented_directory.0 = directory;
+            if self.program_title.is_none() {
+                let home = std::env::home_dir();
+                self.window.set_title(&window_title(
+                    None,
+                    self.title_directory(),
+                    home.as_deref(),
+                    &self.settings.title,
+                ));
+            }
+        }
+    }
+
+    /// The folder a window without a program title is named after: the shell's
+    /// directory on macOS, beside its folder icon, and none elsewhere.
+    fn title_directory(&self) -> Option<&Path> {
+        #[cfg(target_os = "macos")]
+        return self.represented_directory.0.as_deref();
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
+
     fn new_window(&self) {
-        let cwd = self.shared.term.lock().cwd().map(percent_decode).map(PathBuf::from).filter(|p| p.is_dir());
+        let cwd = self.working_directory();
         let Ok(exe) = std::env::current_exe() else { return };
         let mut command = Command::new(exe);
         command.arg("--no-startup");
@@ -1722,7 +1882,7 @@ impl Session {
         if !modes.intersects(Modes::MOUSE_TRACKING) {
             self.app_pointer = None;
         }
-        let icon = if self.in_title_bar(self.mouse.position.1) {
+        let icon = if self.in_title_bar(self.mouse.position.1) || self.scrollbar.hovered {
             CursorIcon::Default
         } else if self.hovered_link.is_some() {
             CursorIcon::Pointer
@@ -1771,6 +1931,21 @@ impl Session {
     }
 
     fn pointer_button(&mut self, pressed: bool, button: MouseButton) {
+        if button == MouseButton::Left {
+            if !pressed && self.scrollbar.grab.take().is_some() {
+                self.scrollbar.shown_at = Some(Instant::now());
+                return;
+            }
+            if pressed && self.over_scrollbar(self.mouse.position.0) {
+                if let Some((top, height)) = self.scrollbar.thumb {
+                    // Grabbing the thumb keeps where it was held; clicking beside it centers it there.
+                    let y = self.mouse.position.1 as f32;
+                    self.scrollbar.grab = Some(if (top..top + height).contains(&y) { y - top } else { height / 2.0 });
+                    self.drag_scrollbar(self.mouse.position.1);
+                }
+                return;
+            }
+        }
         // Clicks on the title bar move the window; they select nothing.
         if pressed && self.in_title_bar(self.mouse.position.1) {
             return;
@@ -1852,6 +2027,24 @@ impl Session {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.mouse.position = (x, y);
+        if self.scrollbar.grab.is_some() {
+            self.drag_scrollbar(y);
+            return;
+        }
+        let hovered = self.over_scrollbar(x);
+        if hovered != self.scrollbar.hovered {
+            self.scrollbar.hovered = hovered;
+            if !hovered {
+                // Fades out after the pointer leaves, as after scrolling.
+                self.scrollbar.shown_at = Some(Instant::now());
+            }
+            self.window.request_redraw();
+        }
+        if hovered {
+            let modes = self.shared.term.lock().modes();
+            self.update_pointer_icon(modes);
+            return;
+        }
         if self.link_modifier() || self.hovered_link.is_some() {
             self.update_hover();
         }
@@ -1933,8 +2126,86 @@ impl Session {
                 self.send(key.repeat(count));
             }
         } else {
+            self.show_scrollbar();
             self.scroll_history(whole);
         }
+    }
+
+    /// Shows the overlay scrollbar, which fades out again after a moment.
+    fn show_scrollbar(&mut self) {
+        if self.scrollbar.enabled {
+            self.scrollbar.shown_at = Some(Instant::now());
+            self.window.request_redraw();
+        }
+    }
+
+    /// Whether the pointer at `x` is over a visible overlay scrollbar.
+    fn over_scrollbar(&self, x: f64) -> bool {
+        let zone = 16.0 * self.scale_factor as f32;
+        self.scrollbar.visible && x as f32 >= self.renderer.size().0 as f32 - zone
+    }
+
+    /// Lays out the overlay scrollbar for the frame and fades it. Returns when it
+    /// needs the next frame.
+    fn update_scrollbar(&mut self, now: Instant, rows: usize) -> Option<Instant> {
+        if !self.scrollbar.enabled {
+            return None;
+        }
+        let scale = self.scale_factor as f32;
+        let (width, height) = self.renderer.size();
+        let margin = 3.0 * scale;
+        let track = (self.top_inset + margin, height as f32 - margin);
+        let thumb = scrollbar_thumb(track, rows, self.scrollbar.scrollback, self.scrollbar.offset, 24.0 * scale);
+        let active = self.scrollbar.hovered || self.scrollbar.grab.is_some();
+        let (alpha, wake) = match self.scrollbar.shown_at {
+            _ if active => (1.0, None),
+            Some(at) => match now.duration_since(at) {
+                elapsed if elapsed < SCROLLBAR_VISIBLE => (1.0, Some(at + SCROLLBAR_VISIBLE)),
+                elapsed if elapsed < SCROLLBAR_VISIBLE + SCROLLBAR_FADE => {
+                    let faded = (elapsed - SCROLLBAR_VISIBLE).as_secs_f32() / SCROLLBAR_FADE.as_secs_f32();
+                    (1.0 - faded, Some(now + self.frame_interval))
+                }
+                _ => {
+                    self.scrollbar.shown_at = None;
+                    (0.0, None)
+                }
+            },
+            None => (0.0, None),
+        };
+        self.scrollbar.track = track;
+        self.scrollbar.thumb = thumb;
+        self.scrollbar.visible = alpha > 0.0 && thumb.is_some();
+        let bar = thumb.filter(|_| alpha > 0.0).map(|(top, thumb_height)| {
+            let bar_width = if active { 11.0 } else { 7.0 } * scale;
+            let color = match window_theme(self.snapshot.palette.background) {
+                WindowTheme::Dark => [255, 255, 255],
+                WindowTheme::Light => [0, 0, 0],
+            };
+            Scrollbar {
+                x: width as f32 - bar_width - margin,
+                y: top,
+                width: bar_width,
+                height: thumb_height,
+                color,
+                alpha: alpha * 0.55,
+            }
+        });
+        self.renderer.set_scrollbar(bar);
+        wake
+    }
+
+    /// Scrolls so the dragged scrollbar thumb follows the pointer.
+    fn drag_scrollbar(&mut self, y: f64) {
+        let (Some(grab), Some((_, height))) = (self.scrollbar.grab, self.scrollbar.thumb) else { return };
+        let (top, bottom) = self.scrollbar.track;
+        let range = (bottom - top - height).max(1.0);
+        let position = ((y as f32 - grab - top) / range).clamp(0.0, 1.0);
+        let target = ((1.0 - position) * self.scrollbar.scrollback as f32).round() as isize;
+        let mut term = self.shared.term.lock();
+        let current = term.grid().display_offset() as isize;
+        term.scroll_display(target - current);
+        drop(term);
+        self.window.request_redraw();
     }
 
     fn scroll_history(&mut self, lines: f32) {
@@ -2158,17 +2429,59 @@ fn padding(padding: (u16, u16), scale_factor: f64) -> [f32; 2] {
     [f32::from(padding.0) * scale, f32::from(padding.1) * scale]
 }
 
-/// Time between frames of continuous shader animations: `fps` frames per second
-/// (0 for the display's rate), at most [`UNFOCUSED_FPS`] without focus, and never
-/// faster than the display.
+/// Time between frames of continuous shader animations: the display's rate for
+/// `fps` 0, otherwise `fps` frames per second, at most [`UNFOCUSED_FPS`] without
+/// focus, and never faster than the display.
 fn animation_interval(fps: u32, focused: bool, frame_interval: Duration) -> Duration {
     let fps = match (fps, focused) {
-        (0, true) => return frame_interval,
-        (0, false) => UNFOCUSED_FPS,
+        (0, _) => return frame_interval,
         (fps, true) => fps,
         (fps, false) => fps.min(UNFOCUSED_FPS),
     };
     Duration::from_secs_f64(1.0 / f64::from(fps)).max(frame_interval)
+}
+
+/// The overlay scrollbar thumb's top and height for a track from `track.0` to
+/// `track.1`: as tall as the visible share of the history, at least `min_height`,
+/// and at the bottom when the view shows the newest lines. `None` without history.
+/// The window title: the one a program set, else `directory` with the home
+/// directory written as `~`, else `default`, the `title` setting.
+fn window_title(program: Option<&str>, directory: Option<&Path>, home: Option<&Path>, default: &str) -> String {
+    if let Some(title) = program {
+        return title.to_owned();
+    }
+    let Some(directory) = directory else { return default.to_owned() };
+    match home.and_then(|home| directory.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => directory.display().to_string(),
+    }
+}
+
+fn scrollbar_thumb(
+    track: (f32, f32),
+    rows: usize,
+    scrollback: usize,
+    offset: usize,
+    min_height: f32,
+) -> Option<(f32, f32)> {
+    if scrollback == 0 {
+        return None;
+    }
+    let length = (track.1 - track.0).max(0.0);
+    let height = (length * rows as f32 / (rows + scrollback) as f32).max(min_height).min(length);
+    let position = 1.0 - offset.min(scrollback) as f32 / scrollback as f32;
+    Some((track.0 + (length - height) * position, height))
+}
+
+/// Highest refresh rate any connected monitor supports, in hertz.
+fn max_refresh_rate(event_loop: &dyn ActiveEventLoop) -> Option<u32> {
+    event_loop
+        .available_monitors()
+        .flat_map(|monitor| monitor.video_modes().chain(monitor.current_video_mode()))
+        .filter_map(|mode| mode.refresh_rate_millihertz())
+        .map(|millihertz| millihertz.get().div_ceil(1000))
+        .max()
 }
 
 fn frame_interval(window: &dyn Window) -> Duration {
@@ -2213,13 +2526,33 @@ mod tests {
     }
 
     #[test]
+    fn window_title_prefers_the_program_then_the_folder() {
+        let home = Some(Path::new("/Users/efe"));
+        let projects = Some(Path::new("/Users/efe/Programming"));
+        assert_eq!(window_title(Some("vim"), projects, home, "tron"), "vim");
+        assert_eq!(window_title(None, projects, home, "tron"), "~/Programming");
+        assert_eq!(window_title(None, home, home, "tron"), "~");
+        assert_eq!(window_title(None, Some(Path::new("/tmp")), home, "tron"), "/tmp");
+        assert_eq!(window_title(None, None, home, "tron"), "tron");
+    }
+
+    #[test]
+    fn scrollbar_thumb_follows_the_view() {
+        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 0, 0, 5.0), None, "no history, no scrollbar");
+        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 90, 0, 5.0), Some((90.0, 10.0)), "newest lines at the bottom");
+        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 90, 90, 5.0), Some((0.0, 10.0)), "oldest lines at the top");
+        assert_eq!(scrollbar_thumb((20.0, 120.0), 10, 90, 45, 5.0), Some((65.0, 10.0)));
+        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 100_000, 0, 20.0).map(|(_, height)| height), Some(20.0));
+    }
+
+    #[test]
     fn animations_slow_down_without_focus() {
         let display = Duration::from_micros(16_667);
         assert_eq!(animation_interval(30, true, display), Duration::from_secs_f64(1.0 / 30.0));
         assert_eq!(animation_interval(0, true, display), display, "0 follows the display");
         assert_eq!(animation_interval(240, true, display), display, "never faster than the display");
         assert_eq!(animation_interval(30, false, display), Duration::from_millis(100));
-        assert_eq!(animation_interval(0, false, display), Duration::from_millis(100));
+        assert_eq!(animation_interval(0, false, display), display, "no cap: no slowdown either");
         assert_eq!(animation_interval(5, false, display), Duration::from_millis(200));
     }
 

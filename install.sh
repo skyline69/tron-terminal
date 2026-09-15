@@ -640,14 +640,30 @@ install_linux() {
 	refresh_linux_caches
 }
 
-make_icns() {
-	local set=$work/tron.iconset size
+# Writes the app icon into a Resources directory: Icon.icon compiled by actool
+# (Liquid Glass on macOS 26 and later) when Xcode is installed, otherwise the
+# classic icon drawn on Apple's grid.
+make_icons() {
+	local resources=$1 set=$work/Icon.iconset size png=$src/dist/macos/icon-1024.png
+	if [ -d "$src/dist/macos/Icon.icon" ] && xcrun --find actool >/dev/null 2>&1; then
+		mkdir -p "$work/icon"
+		if xcrun actool "$src/dist/macos/Icon.icon" --compile "$work/icon" \
+			--output-partial-info-plist "$work/icon/partial.plist" \
+			--app-icon Icon --include-all-app-icons --enable-on-demand-resources NO \
+			--development-region en --target-device mac --platform macosx \
+			--minimum-deployment-target 11.0 >/dev/null 2>&1 && [ -f "$work/icon/Assets.car" ]; then
+			cp "$work/icon/Assets.car" "$work/icon/Icon.icns" "$resources/"
+			return
+		fi
+	fi
+	# Release archives carry only the Linux icons: fall back to those.
+	[ -f "$png" ] || png=$src/dist/$APP_ID.png
 	mkdir -p "$set"
 	for size in 16 32 128 256 512; do
-		sips -z "$size" "$size" "$src/dist/$APP_ID.png" --out "$set/icon_${size}x$size.png" >/dev/null
-		sips -z $((size * 2)) $((size * 2)) "$src/dist/$APP_ID.png" --out "$set/icon_${size}x$size@2x.png" >/dev/null
+		sips -z "$size" "$size" "$png" --out "$set/icon_${size}x$size.png" >/dev/null
+		sips -z $((size * 2)) $((size * 2)) "$png" --out "$set/icon_${size}x$size@2x.png" >/dev/null
 	done
-	iconutil -c icns "$set" -o "$1"
+	iconutil -c icns "$set" -o "$resources/Icon.icns"
 }
 
 install_macos() {
@@ -657,7 +673,7 @@ install_macos() {
 	cp "$binary" "$staging/Contents/MacOS/tron"
 	# A browser download marks the files as quarantined, and Gatekeeper then refuses the app.
 	if has xattr; then xattr -cr "$staging" 2>/dev/null || true; fi
-	make_icns "$staging/Contents/Resources/tron.icns"
+	make_icons "$staging/Contents/Resources"
 	cat >"$staging/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -666,7 +682,8 @@ install_macos() {
 	<key>CFBundleDevelopmentRegion</key><string>en</string>
 	<key>CFBundleDisplayName</key><string>tron</string>
 	<key>CFBundleExecutable</key><string>tron</string>
-	<key>CFBundleIconFile</key><string>tron</string>
+	<key>CFBundleIconFile</key><string>Icon</string>
+	<key>CFBundleIconName</key><string>Icon</string>
 	<key>CFBundleIdentifier</key><string>$APP_ID</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>CFBundleName</key><string>tron</string>

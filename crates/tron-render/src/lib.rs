@@ -91,6 +91,18 @@ pub struct Overlay {
     pub underline: bool,
 }
 
+/// The thumb of an overlay scrollbar (macOS style), in physical pixels.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Scrollbar {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub color: [u8; 3],
+    /// Opacity from 0 to 1, lowered while it fades out.
+    pub alpha: f32,
+}
+
 /// Cells to underline because the pointer hovers a link.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkHighlight {
@@ -490,6 +502,11 @@ impl Renderer {
     /// Visual bell flash strength for the next frame, 0 to 1.
     pub fn set_flash(&mut self, strength: f32) {
         self.cells.set_flash(strength);
+    }
+
+    /// Overlay scrollbar thumb drawn above the terminal, `None` to hide it.
+    pub fn set_scrollbar(&mut self, scrollbar: Option<Scrollbar>) {
+        self.cells.set_scrollbar(scrollbar);
     }
 
     /// Allows reading presented frames back. Returns false when the surface does not support it.

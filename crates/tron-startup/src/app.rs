@@ -267,7 +267,7 @@ impl App {
             let _ = sender.send(crate::catalog::monospace_families());
         });
         Self {
-            settings: settings::list(std::slice::from_ref(&catalog.config.font.family)),
+            settings: settings::list(std::slice::from_ref(&catalog.config.font.family), crate::max_fps()),
             settings_picker: Picker::new(0),
             fonts: Some(receiver),
             dialog: None,
@@ -754,7 +754,7 @@ impl App {
                 families.insert(1.min(families.len()), family.clone());
             }
         }
-        self.settings = settings::list(&families);
+        self.settings = settings::list(&families, crate::max_fps());
         self.fonts = None;
     }
 

@@ -7,7 +7,10 @@
 	<key>CFBundleDevelopmentRegion</key><string>en</string>
 	<key>CFBundleDisplayName</key><string>tron</string>
 	<key>CFBundleExecutable</key><string>tron</string>
-	<key>CFBundleIconFile</key><string>tron</string>
+	<!-- Icon.icon compiled by actool: Assets.car for macOS 26 and later (Liquid Glass),
+	     Icon.icns for earlier releases. -->
+	<key>CFBundleIconFile</key><string>Icon</string>
+	<key>CFBundleIconName</key><string>Icon</string>
 	<key>CFBundleIdentifier</key><string>dev.tron.Terminal</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>CFBundleName</key><string>tron</string>
