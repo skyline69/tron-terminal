@@ -525,6 +525,13 @@ impl App {
         if let Some(paths) = &self.paths {
             options.env.push((tron_startup::CONFIG_DIR_ENV.into(), paths.config_dir.clone().into()));
         }
+        // In a Flatpak, shells and commands run on the host, where the user's tools are.
+        // The startup screen below stays in the sandbox, where tron is.
+        if tron_pty::in_flatpak() {
+            let (program, args) = tron_pty::host_command(&options);
+            options.program = Some(program);
+            options.args = args;
+        }
         if self.show_startup
             && let Ok(exe) = std::env::current_exe()
         {

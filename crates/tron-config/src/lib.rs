@@ -53,6 +53,18 @@ pub struct Paths {
     pub data_dir: PathBuf,
 }
 
+/// In a Flatpak, `XDG_CONFIG_HOME` points into the sandbox. tron keeps using the
+/// host's `~/.config/tron`, so the configuration is the same outside the Flatpak.
+fn flatpak_config_dir() -> Option<PathBuf> {
+    if !Path::new("/.flatpak-info").exists() {
+        return None;
+    }
+    let host = std::env::var_os("HOST_XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(host.join("tron"))
+}
+
 impl Paths {
     pub fn discover() -> Option<Self> {
         let args = AppStrategyArgs { top_level_domain: "dev".into(), author: "tron".into(), app_name: "tron".into() };
@@ -61,8 +73,10 @@ impl Paths {
         // Not ~/Library: terminal configuration on macOS lives with the other dotfiles.
         #[cfg(target_os = "macos")]
         let strategy = etcetera::app_strategy::Xdg::new(args).ok()?;
-        let config_dir =
-            std::env::var_os("TRON_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| strategy.config_dir());
+        let config_dir = std::env::var_os("TRON_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(flatpak_config_dir)
+            .unwrap_or_else(|| strategy.config_dir());
         Some(Self::with_dirs(config_dir, strategy.data_dir()))
     }
 

@@ -123,10 +123,6 @@ impl Pty {
             .stdin(stdio(&slave)?)
             .stdout(stdio(&slave)?)
             .stderr(Stdio::from(slave))
-            .env("TERM", if options.term.is_empty() { "xterm-256color" } else { &options.term })
-            .env("COLORTERM", "truecolor")
-            .env("TERM_PROGRAM", "tron")
-            .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
             .env_remove("DESKTOP_STARTUP_ID")
             .env_remove("XDG_ACTIVATION_TOKEN");
         // tron runs outside whatever tron itself was started from: programs must
@@ -134,9 +130,9 @@ impl Pty {
         for key in INHERITED_TERMINAL_ENV {
             command.env_remove(key);
         }
-        // Programs that look for kitty before using the kitty graphics protocol,
-        // like Codex pets and image viewers, find it. tron speaks the protocol.
-        command.env("KITTY_WINDOW_ID", "1");
+        for (key, value) in terminal_env(options) {
+            command.env(key, value);
+        }
         for key in &options.remove_env {
             command.env_remove(key);
         }
@@ -149,12 +145,17 @@ impl Pty {
         #[cfg(target_os = "macos")]
         macos_session(&mut command, options, &program);
 
+        // In a Flatpak the child is flatpak-spawn (see `host_command`), and the shell on
+        // the host takes the pty as its controlling terminal instead.
+        let controlling_terminal = !in_flatpak();
         // SAFETY: the closure only performs async-signal-safe syscalls.
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 rustix::process::setsid()?;
-                // stdin is the pty slave at this point.
-                rustix::process::ioctl_tiocsctty(BorrowedFd::borrow_raw(0))?;
+                if controlling_terminal {
+                    // stdin is the pty slave at this point.
+                    rustix::process::ioctl_tiocsctty(BorrowedFd::borrow_raw(0))?;
+                }
                 Ok(())
             });
         }
@@ -192,6 +193,68 @@ impl Drop for Pty {
         // Closing the master sends SIGHUP to the session. Reap if it already exited.
         let _ = self.child.try_wait();
     }
+}
+
+/// Variables every program in tron sees, before [`SpawnOptions::env`].
+fn terminal_env(options: &SpawnOptions) -> [(&'static str, String); 5] {
+    [
+        ("TERM", if options.term.is_empty() { "xterm-256color".to_owned() } else { options.term.clone() }),
+        ("COLORTERM", "truecolor".to_owned()),
+        ("TERM_PROGRAM", "tron".to_owned()),
+        ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION").to_owned()),
+        // Programs that look for kitty before using the kitty graphics protocol,
+        // like Codex pets and image viewers, find it. tron speaks the protocol.
+        ("KITTY_WINDOW_ID", "1".to_owned()),
+    ]
+}
+
+/// Whether tron runs inside a Flatpak sandbox.
+pub fn in_flatpak() -> bool {
+    static IN_FLATPAK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IN_FLATPAK.get_or_init(|| cfg!(target_os = "linux") && std::path::Path::new("/.flatpak-info").exists())
+}
+
+/// Runs on the host for [`host_command`]: puts the directories tron added to PATH in
+/// front of the host's PATH and finds the login shell when no program is given.
+/// flatpak-spawn makes the pty the controlling terminal, which job control needs;
+/// `setsid --ctty` does it where that did not happen. Forcing it when a controlling
+/// terminal exists fails, so the script checks for one with `/dev/tty` first.
+const HOST_SCRIPT: &str = r#"if [ -n "$TRON_PATH_PREFIX" ]; then PATH="$TRON_PATH_PREFIX:$PATH"; export PATH; fi
+unset TRON_PATH_PREFIX
+if [ "$#" -eq 0 ]; then
+    shell=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)
+    set -- "${shell:-/bin/sh}"
+fi
+if ! (: </dev/tty) 2>/dev/null && setsid --help 2>&1 | grep -q -- --ctty; then
+    exec setsid --ctty --wait "$@"
+fi
+exec "$@""#;
+
+/// The program and arguments that run `options` on the host from inside a Flatpak,
+/// where the user's shell and tools are, through `flatpak-spawn --host`. tron's
+/// environment is passed along; without a program, the user's login shell runs.
+pub fn host_command(options: &SpawnOptions) -> (String, Vec<String>) {
+    let mut args = vec!["--host".to_owned(), "--watch-bus".to_owned()];
+    if let Some(cwd) = &options.cwd {
+        args.push(format!("--directory={}", cwd.display()));
+    }
+    let base = terminal_env(options).map(|(key, value)| (OsString::from(key), OsString::from(value)));
+    for (key, value) in base.iter().chain(&options.env) {
+        if key == "PATH" {
+            // The sandbox PATH is not the host's; pass only the directory tron put in front.
+            if let Some(first) = std::env::split_paths(value).next() {
+                args.push(format!("--env=TRON_PATH_PREFIX={}", first.display()));
+            }
+            continue;
+        }
+        args.push(format!("--env={}={}", key.to_string_lossy(), value.to_string_lossy()));
+    }
+    args.extend(["sh", "-c", HOST_SCRIPT, "sh"].map(str::to_owned));
+    if let Some(program) = &options.program {
+        args.push(program.clone());
+        args.extend(options.args.iter().cloned());
+    }
+    ("flatpak-spawn".to_owned(), args)
 }
 
 fn open_pair(size: WindowSize) -> io::Result<(OwnedFd, OwnedFd)> {
@@ -252,6 +315,29 @@ pub fn is_closed_error(error: &io::Error) -> bool {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn host_command_passes_environment_and_program() {
+        let options = SpawnOptions {
+            program: Some("htop".into()),
+            args: vec!["-d".into(), "5".into()],
+            cwd: Some("/home/user/project".into()),
+            term: "xterm-tron".into(),
+            env: vec![("PATH".into(), "/data/tron/bin:/app/bin:/usr/bin".into()), ("EDITOR".into(), "nvim".into())],
+            ..Default::default()
+        };
+        let (program, args) = host_command(&options);
+        assert_eq!(program, "flatpak-spawn");
+        assert_eq!(args[..3], ["--host", "--watch-bus", "--directory=/home/user/project"]);
+        assert!(args.contains(&"--env=TERM=xterm-tron".to_owned()));
+        assert!(args.contains(&"--env=EDITOR=nvim".to_owned()));
+        assert!(args.contains(&"--env=TRON_PATH_PREFIX=/data/tron/bin".to_owned()));
+        assert!(!args.iter().any(|arg| arg.starts_with("--env=PATH=")));
+        assert_eq!(args[args.len() - 3..], ["htop", "-d", "5"]);
+
+        let shell = host_command(&SpawnOptions::default()).1;
+        assert_eq!(shell.last().map(String::as_str), Some("sh"), "no program: the script finds the login shell");
+    }
 
     #[test]
     fn runs_command_and_reads_output() {
