@@ -14,6 +14,14 @@
   <img src="https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-ff4fd8" alt="License: MIT or Apache-2.0">
 </p>
 
+<p align="center">
+  <a href="https://github.com/skyline69/tron-terminal/wiki"><b>Documentation</b></a> ·
+  <a href="https://github.com/skyline69/tron-terminal/wiki/Installation">Installation</a> ·
+  <a href="https://github.com/skyline69/tron-terminal/wiki/Configuration">Configuration</a> ·
+  <a href="https://github.com/skyline69/tron-terminal/wiki/Shaders">Shaders</a> ·
+  <a href="https://github.com/skyline69/tron-terminal/wiki/Troubleshooting">Troubleshooting</a>
+</p>
+
 <img width="1022" height="675" alt="image" src="https://github.com/user-attachments/assets/0d25a6ea-165a-461f-81bd-2afd85ac7cf4" />
 
 - **Fast.** Custom parser and screen model with SIMD friendly fast paths,
