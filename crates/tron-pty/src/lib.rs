@@ -212,8 +212,8 @@ impl Drop for Pty {
 }
 
 /// Variables every program in tron sees, before [`SpawnOptions::env`].
-fn terminal_env(options: &SpawnOptions) -> [(&'static str, String); 5] {
-    [
+fn terminal_env(options: &SpawnOptions) -> Vec<(&'static str, String)> {
+    let mut env = vec![
         ("TERM", if options.term.is_empty() { "xterm-256color".to_owned() } else { options.term.clone() }),
         ("COLORTERM", "truecolor".to_owned()),
         ("TERM_PROGRAM", "tron".to_owned()),
@@ -221,7 +221,57 @@ fn terminal_env(options: &SpawnOptions) -> [(&'static str, String); 5] {
         // Programs that look for kitty before using the kitty graphics protocol,
         // like Codex pets and image viewers, find it. tron speaks the protocol.
         ("KITTY_WINDOW_ID", "1".to_owned()),
-    ]
+    ];
+    if let Some(locale) = default_locale() {
+        env.push(("LANG", locale));
+    }
+    env
+}
+
+/// `LANG` for programs in tron when tron itself has no locale, as other terminals
+/// do. macOS apps opened from Finder or the Dock get none, and without a UTF-8
+/// locale programs such as tmux replace every character outside ASCII with `_`.
+fn default_locale() -> Option<String> {
+    static LOCALE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LOCALE
+        .get_or_init(|| {
+            let set = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+            if set("LC_ALL") || set("LC_CTYPE") || set("LANG") {
+                return None;
+            }
+            #[cfg(target_os = "macos")]
+            let locale = utf8_locale(apple_locale().as_deref(), |name| {
+                std::path::Path::new("/usr/share/locale").join(name).exists()
+            });
+            #[cfg(not(target_os = "macos"))]
+            let locale = "C.UTF-8".to_owned();
+            Some(locale)
+        })
+        .clone()
+}
+
+/// The UTF-8 locale for the macOS locale `system`, such as `de_DE.UTF-8` for
+/// `de_DE@rg=atzzzz`, when `exists` finds it installed; `en_US.UTF-8` otherwise.
+#[cfg(any(target_os = "macos", test))]
+fn utf8_locale(system: Option<&str>, exists: impl Fn(&str) -> bool) -> String {
+    system
+        .map(|id| id.split('@').next().unwrap_or(id).trim())
+        .filter(|id| !id.is_empty())
+        .map(|id| format!("{id}.UTF-8"))
+        .filter(|name| exists(name))
+        .unwrap_or_else(|| "en_US.UTF-8".to_owned())
+}
+
+/// The locale chosen in System Settings, such as `en_US` or `de_DE@rg=atzzzz`.
+#[cfg(target_os = "macos")]
+fn apple_locale() -> Option<String> {
+    let output = Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleLocale"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// The foreground process group of the controlling terminal of process `pid`,
@@ -443,7 +493,8 @@ pub fn host_command(options: &SpawnOptions) -> (String, Vec<String>) {
     if let Some(cwd) = &options.cwd {
         args.push(format!("--directory={}", cwd.display()));
     }
-    let base = terminal_env(options).map(|(key, value)| (OsString::from(key), OsString::from(value)));
+    let base: Vec<(OsString, OsString)> =
+        terminal_env(options).into_iter().map(|(key, value)| (OsString::from(key), OsString::from(value))).collect();
     for (key, value) in base.iter().chain(&options.env) {
         if key == "PATH" {
             // The sandbox PATH is not the host's; pass only the directory tron put in front.
@@ -569,6 +620,16 @@ mod tests {
         let stat = "4242 (my (odd) prog) S 4200 4242 4242 34817 4300 4194560 120 0 0 0";
         assert_eq!(stat_terminal_foreground(stat), Some(4300));
         assert_eq!(stat_terminal_foreground("1 (init) S 0 1 1 0 -1 4194560"), None, "no terminal");
+    }
+
+    #[test]
+    fn picks_a_utf8_locale_for_the_system_locale() {
+        let installed = |name: &str| ["de_DE.UTF-8", "en_US.UTF-8"].contains(&name);
+        assert_eq!(utf8_locale(Some("de_DE@rg=atzzzz"), installed), "de_DE.UTF-8");
+        assert_eq!(utf8_locale(Some("de_DE\n"), installed), "de_DE.UTF-8");
+        assert_eq!(utf8_locale(Some("xx_YY"), installed), "en_US.UTF-8", "not installed");
+        assert_eq!(utf8_locale(Some(""), installed), "en_US.UTF-8");
+        assert_eq!(utf8_locale(None, installed), "en_US.UTF-8");
     }
 
     #[test]
