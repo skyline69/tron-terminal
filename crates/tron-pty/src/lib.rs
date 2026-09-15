@@ -192,6 +192,13 @@ impl Pty {
         process_cwd(self.child.id())
     }
 
+    /// The terminal device the child uses, such as `/dev/pts/3`.
+    pub fn tty_path(&self) -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStringExt;
+        let name = rustix::pty::ptsname(&self.master, Vec::new()).ok()?;
+        Some(PathBuf::from(OsString::from_vec(name.into_bytes())))
+    }
+
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.child.try_wait()
     }
@@ -215,6 +222,164 @@ fn terminal_env(options: &SpawnOptions) -> [(&'static str, String); 5] {
         // like Codex pets and image viewers, find it. tron speaks the protocol.
         ("KITTY_WINDOW_ID", "1".to_owned()),
     ]
+}
+
+/// The foreground process group of the controlling terminal of process `pid`,
+/// such as a shell: the job it runs, or the shell itself. Asking the terminal
+/// device instead only works from its own controlling process.
+#[cfg(target_os = "linux")]
+pub fn terminal_foreground(pid: u32) -> Option<u32> {
+    stat_terminal_foreground(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// `tpgid` from `/proc/<pid>/stat`: the sixth field after the command name, which
+/// is in parentheses and may itself contain spaces and parentheses.
+#[cfg(any(target_os = "linux", test))]
+fn stat_terminal_foreground(stat: &str) -> Option<u32> {
+    let fields = &stat[stat.rfind(')')? + 1..];
+    fields
+        .split_whitespace()
+        .nth(5)?
+        .parse::<i64>()
+        .ok()
+        .and_then(|group| u32::try_from(group).ok())
+        .filter(|&group| group > 0)
+}
+
+/// The foreground process group of the controlling terminal of process `pid`,
+/// from `proc_bsdinfo.e_tpgid`.
+#[cfg(target_os = "macos")]
+pub fn terminal_foreground(pid: u32) -> Option<u32> {
+    use std::ffi::{c_int, c_void};
+
+    unsafe extern "C" {
+        /// libproc, part of libSystem.
+        fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *mut c_void, size: c_int) -> c_int;
+    }
+    const PROC_PIDTBSDINFO: c_int = 3;
+    /// `struct proc_bsdinfo`: twelve 32-bit fields, 16 and 32 byte names, five more
+    /// 32-bit fields ending with `e_tpgid`, then the nice value and two 64-bit times.
+    const SIZE: usize = 136;
+    const E_TPGID: usize = 112;
+    let mut info = [0u8; SIZE];
+    // SAFETY: the buffer is writable and as large as the size passed.
+    let written = unsafe {
+        proc_pidinfo(c_int::try_from(pid).ok()?, PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), SIZE as c_int)
+    };
+    if written != SIZE as c_int {
+        return None;
+    }
+    let group = u32::from_ne_bytes(info[E_TPGID..E_TPGID + 4].try_into().ok()?);
+    (group > 0).then_some(group)
+}
+
+/// A process's command line.
+#[cfg(target_os = "linux")]
+pub fn process_args(pid: u32) -> Option<Vec<String>> {
+    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(
+        bytes
+            .split(|&b| b == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+    )
+}
+
+/// A variable from a process's environment.
+#[cfg(target_os = "linux")]
+pub fn process_env_var(pid: u32, name: &str) -> Option<String> {
+    let bytes = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    env_var(bytes.split(|&b| b == 0).map(|entry| String::from_utf8_lossy(entry).into_owned()), name)
+}
+
+/// A process's command line, from `KERN_PROCARGS2`.
+#[cfg(target_os = "macos")]
+pub fn process_args(pid: u32) -> Option<Vec<String>> {
+    procargs2(pid).and_then(|buffer| parse_procargs2(&buffer)).map(|(args, _)| args)
+}
+
+/// A variable from a process's environment, from `KERN_PROCARGS2`.
+#[cfg(target_os = "macos")]
+pub fn process_env_var(pid: u32, name: &str) -> Option<String> {
+    let (_, env) = parse_procargs2(&procargs2(pid)?)?;
+    env_var(env.into_iter(), name)
+}
+
+/// The value of `name` among `NAME=value` entries.
+fn env_var(entries: impl Iterator<Item = String>, name: &str) -> Option<String> {
+    entries.into_iter().find_map(|entry| entry.strip_prefix(name)?.strip_prefix('=').map(str::to_owned))
+}
+
+/// The raw `KERN_PROCARGS2` data of a process.
+#[cfg(target_os = "macos")]
+fn procargs2(pid: u32) -> Option<Vec<u8>> {
+    use std::ffi::{c_int, c_uint, c_void};
+
+    unsafe extern "C" {
+        fn sysctl(
+            name: *const c_int,
+            namelen: c_uint,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *const c_void,
+            newlen: usize,
+        ) -> c_int;
+    }
+    const CTL_KERN: c_int = 1;
+    const KERN_PROCARGS2: c_int = 49;
+    let mib = [CTL_KERN, KERN_PROCARGS2, c_int::try_from(pid).ok()?];
+    let mut size = 0usize;
+    // SAFETY: a null buffer asks for the size the arguments need.
+    if unsafe { sysctl(mib.as_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null(), 0) } != 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; size];
+    // SAFETY: the buffer is writable and `size` bytes long.
+    if unsafe { sysctl(mib.as_ptr(), 3, buffer.as_mut_ptr().cast(), &mut size, std::ptr::null(), 0) } != 0 {
+        return None;
+    }
+    buffer.truncate(size);
+    Some(buffer)
+}
+
+/// `KERN_PROCARGS2` data: the argument count, the executable path, padding, the
+/// arguments, then the environment up to an empty string.
+#[cfg(any(target_os = "macos", test))]
+fn parse_procargs2(buffer: &[u8]) -> Option<(Vec<String>, Vec<String>)> {
+    let argc = usize::try_from(i32::from_ne_bytes(buffer.get(..4)?.try_into().ok()?)).ok()?;
+    let rest = &buffer[4..];
+    let rest = &rest[rest.iter().position(|&b| b == 0)?..];
+    let rest = &rest[rest.iter().position(|&b| b != 0)?..];
+    let mut strings = rest.split(|&b| b == 0).map(|string| String::from_utf8_lossy(string).into_owned());
+    let args = strings.by_ref().take(argc).collect();
+    let env = strings.take_while(|entry| !entry.is_empty()).collect();
+    Some((args, env))
+}
+
+/// The executable a process runs.
+#[cfg(target_os = "linux")]
+pub fn process_path(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// The executable a process runs, from `proc_pidpath`.
+#[cfg(target_os = "macos")]
+pub fn process_path(pid: u32) -> Option<PathBuf> {
+    use std::ffi::{c_int, c_void};
+    use std::os::unix::ffi::OsStrExt;
+
+    unsafe extern "C" {
+        /// libproc, part of libSystem.
+        fn proc_pidpath(pid: c_int, buffer: *mut c_void, size: u32) -> c_int;
+    }
+    /// `PROC_PIDPATHINFO_MAXSIZE`, four times MAXPATHLEN.
+    const SIZE: usize = 4 * 1024;
+    let mut buffer = [0u8; SIZE];
+    // SAFETY: the buffer is writable and as large as the size passed.
+    let length = unsafe { proc_pidpath(c_int::try_from(pid).ok()?, buffer.as_mut_ptr().cast(), SIZE as u32) };
+    let length = usize::try_from(length).ok().filter(|&length| length > 0)?;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buffer[..length])))
 }
 
 #[cfg(target_os = "linux")]
@@ -377,6 +542,46 @@ mod tests {
 
         let shell = host_command(&SpawnOptions::default()).1;
         assert_eq!(shell.last().map(String::as_str), Some("sh"), "no program: the script finds the login shell");
+    }
+
+    #[test]
+    fn finds_the_foreground_process_and_its_arguments() {
+        let options = SpawnOptions { program: Some("sleep".into()), args: vec!["5".into()], ..Default::default() };
+        let pty = Pty::spawn(&options, WindowSize { cols: 80, rows: 24, ..Default::default() }).unwrap();
+        assert!(pty.tty_path().unwrap().to_string_lossy().starts_with("/dev/"));
+        // The child makes the terminal its controlling terminal after it starts.
+        let mut group = None;
+        for _ in 0..100 {
+            group = terminal_foreground(pty.child_id());
+            if group.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let group = group.unwrap();
+        assert_eq!(group, pty.child_id());
+        assert_eq!(process_args(group).unwrap(), ["sleep", "5"]);
+        assert!(process_path(group).unwrap().ends_with("sleep"));
+    }
+
+    #[test]
+    fn reads_the_terminal_foreground_group_from_proc_stat() {
+        let stat = "4242 (my (odd) prog) S 4200 4242 4242 34817 4300 4194560 120 0 0 0";
+        assert_eq!(stat_terminal_foreground(stat), Some(4300));
+        assert_eq!(stat_terminal_foreground("1 (init) S 0 1 1 0 -1 4194560"), None, "no terminal");
+    }
+
+    #[test]
+    fn parses_kern_procargs2() {
+        let mut data = 2i32.to_ne_bytes().to_vec();
+        data.extend_from_slice(
+            b"/usr/local/bin/node\0\0\0\0node\0/usr/local/bin/codex\0HOME=/Users/me\0TMUX_TMPDIR=/tmp/a=b\0\0junk\0",
+        );
+        let (args, env) = parse_procargs2(&data).unwrap();
+        assert_eq!(args, ["node", "/usr/local/bin/codex"]);
+        assert_eq!(env, ["HOME=/Users/me", "TMUX_TMPDIR=/tmp/a=b"]);
+        assert_eq!(env_var(env.into_iter(), "TMUX_TMPDIR").as_deref(), Some("/tmp/a=b"));
+        assert_eq!(parse_procargs2(&data[..3]), None);
     }
 
     #[test]

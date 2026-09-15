@@ -128,6 +128,7 @@ pub struct Config {
     pub bell: BellConfig,
     pub links: LinkConfig,
     pub notifications: NotificationConfig,
+    pub harness: HarnessConfig,
     /// Show the startup screen (welcome, setup, tour) before the shell.
     /// Unset: only on the first launch.
     pub startup: Option<bool>,
@@ -686,6 +687,23 @@ pub struct NotificationConfig {
 impl Default for NotificationConfig {
     fn default() -> Self {
         Self { mode: NotifyMode::Unfocused, command: NOTIFY_COMMAND.into() }
+    }
+}
+
+/// `[harness]`: the glowing line at the top of the window while a coding agent
+/// harness, such as Claude Code or Codex, runs in it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HarnessConfig {
+    /// Show the line.
+    pub line: bool,
+    /// Line colors by command name. Adds harnesses and overrides the brand colors.
+    pub colors: BTreeMap<String, Rgb>,
+}
+
+impl Default for HarnessConfig {
+    fn default() -> Self {
+        Self { line: true, colors: BTreeMap::new() }
     }
 }
 

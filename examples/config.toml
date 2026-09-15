@@ -134,6 +134,16 @@ mode = "unfocused"
 # osascript on macOS, which shows the notification itself.
 # command = "notify-send"
 
+[harness]
+# A glowing line grows from the center of the top edge while a coding agent
+# harness runs in the window, also inside tmux, in the color of its brand:
+# claude, codex, opencode, pi, gemini, amp, crush, qwen and cursor-agent.
+line = true
+# Colors by command name. Overrides the brand colors and adds other harnesses.
+# [harness.colors]
+# claude = "#d97757"
+# my-agent = "#44cc88"
+
 # Key combination = action. Entries override the defaults, "none" removes one.
 # Actions: copy, paste, paste_selection, increase_font_size, decrease_font_size,
 # reset_font_size, scroll_line_up, scroll_line_down, scroll_page_up,

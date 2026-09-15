@@ -14,7 +14,7 @@ use tron_font::{CellMetrics, FontSystem, GlyphFormat, GlyphKey, ShapedGlyph, Sty
 use unicode_width::UnicodeWidthChar;
 
 use crate::atlas::Atlas;
-use crate::{LinkHighlight, Overlay, Scrollbar, Theme};
+use crate::{GlowLine, LinkHighlight, Overlay, Scrollbar, Theme};
 
 const INITIAL_ATLAS_SIZE: u32 = 1024;
 const SHAPE_CACHE_LIMIT: usize = 16_384;
@@ -24,6 +24,7 @@ const KIND_MASK: u32 = 1;
 const KIND_COLOR: u32 = 2;
 const KIND_CURLY: u32 = 3;
 const KIND_ROUNDED: u32 = 4;
+const KIND_GLOW: u32 = 5;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, PartialEq)]
@@ -344,6 +345,7 @@ pub struct CellPipeline {
     clear_row_cache: bool,
     overlays: Vec<Overlay>,
     scrollbar: Option<Scrollbar>,
+    glow_line: Option<GlowLine>,
     overlay_instances: RowInstances,
     bidi: bool,
     flash: f32,
@@ -467,6 +469,7 @@ impl CellPipeline {
             clear_row_cache: false,
             overlays: Vec::new(),
             scrollbar: None,
+            glow_line: None,
             overlay_instances: RowInstances::default(),
             bidi: true,
             flash: 0.0,
@@ -545,6 +548,10 @@ impl CellPipeline {
 
     pub fn set_scrollbar(&mut self, scrollbar: Option<Scrollbar>) {
         self.scrollbar = scrollbar;
+    }
+
+    pub fn set_glow_line(&mut self, line: Option<GlowLine>) {
+        self.glow_line = line;
     }
 
     fn rebind(&mut self, device: &wgpu::Device) {
@@ -724,6 +731,40 @@ impl CellPipeline {
                 color: [r, g, b, bar.alpha],
                 kind: KIND_ROUNDED,
             });
+        }
+        if let Some(line) = self.glow_line {
+            let [r, g, b, _] = colors.rgba(line.color);
+            let tail = line.tail.max(1.0);
+            // Brightness at a distance from the center: 0 where the tail ends, 1 at the head.
+            let brightness = |distance: f32| (distance - (line.head - tail)) / tail;
+            let height = line.thickness + line.glow;
+            let streak = |left: f32, right: f32, left_brightness: f32, right_brightness: f32| Instance {
+                pos: [left, line.top],
+                size: [right - left, height],
+                // The shader runs from one brightness to the other across the streak.
+                uv: [left_brightness, line.thickness, right_brightness, line.glow],
+                color: [r, g, b, 1.0],
+                kind: KIND_GLOW,
+            };
+            let near = (line.head - tail).max(0.0);
+            let right_far = line.head.min(viewport[0] - line.center);
+            if right_far > near {
+                self.frame.push(streak(
+                    line.center + near,
+                    line.center + right_far,
+                    brightness(near),
+                    brightness(right_far),
+                ));
+            }
+            let left_far = line.head.min(line.center);
+            if left_far > near {
+                self.frame.push(streak(
+                    line.center - left_far,
+                    line.center - near,
+                    brightness(left_far),
+                    brightness(near),
+                ));
+            }
         }
         if self.flash > 0.0 {
             self.frame.push(solid(0.0, 0.0, viewport[0], viewport[1], [1.0, 1.0, 1.0, self.flash * 0.18]));

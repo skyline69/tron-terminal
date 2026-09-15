@@ -159,6 +159,9 @@ pub struct PostChain {
     uses_cursor_motion: bool,
     /// Counts requests, so results of superseded ones are dropped.
     generation: u64,
+    /// Counts replacements of the render targets. New targets start empty, so a
+    /// terminal drawn into the old input texture cannot be reused.
+    targets_revision: u64,
     animation: Option<bool>,
 }
 
@@ -194,6 +197,7 @@ impl PostChain {
             uses_previous: false,
             uses_cursor_motion: false,
             generation: 0,
+            targets_revision: 0,
             animation: None,
         }
     }
@@ -202,9 +206,10 @@ impl PostChain {
         !self.passes.is_empty()
     }
 
-    /// Changes whenever the chain is replaced.
-    pub fn generation(&self) -> u64 {
-        self.generation
+    /// Changes whenever the render targets are replaced: when a compiled chain is
+    /// installed, removed, or resized. The input texture is empty after that.
+    pub fn targets_revision(&self) -> u64 {
+        self.targets_revision
     }
 
     /// Whether the input texture still holds the rendered terminal after [`Self::run`].
@@ -270,6 +275,9 @@ impl PostChain {
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let size = (width.max(1), height.max(1));
         if !self.is_active() {
+            if !self.targets.is_empty() {
+                self.targets_revision += 1;
+            }
             self.targets.clear();
             self.history.clear();
             self.bind_groups.clear();
@@ -281,6 +289,7 @@ impl PostChain {
             return;
         }
         self.size = size;
+        self.targets_revision += 1;
         let texture = |label| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),

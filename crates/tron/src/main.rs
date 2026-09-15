@@ -3,6 +3,7 @@
 mod accessibility;
 mod cli;
 mod clipboard;
+mod harness;
 mod input;
 mod launcher;
 #[cfg(target_os = "macos")]
@@ -46,7 +47,7 @@ use tron_core::{
 };
 use tron_font::{CellMetrics, FontSystem};
 use tron_pty::{Pty, SpawnOptions, WindowSize};
-use tron_render::{Gpu, LinkHighlight, Overlay, PostShader, Renderer, Scrollbar, Theme};
+use tron_render::{GlowLine, Gpu, LinkHighlight, Overlay, PostShader, Renderer, Scrollbar, Theme};
 
 use clipboard::Clipboard;
 
@@ -377,6 +378,33 @@ impl ScrollbarState {
     }
 }
 
+/// How long the harness line takes to sweep from the center out past both sides.
+const HARNESS_SWEEP: Duration = Duration::from_millis(1100);
+
+/// The glowing line that sweeps from the center of the top edge to both sides
+/// when a coding agent harness starts.
+struct HarnessLine {
+    /// The running harness, by command name.
+    name: Option<String>,
+    color: [u8; 3],
+    /// When the sweep started, while it runs.
+    started_at: Option<Instant>,
+}
+
+impl HarnessLine {
+    fn new() -> Self {
+        Self { name: None, color: [0; 3], started_at: None }
+    }
+}
+
+/// Where the heads of a sweep are after `elapsed`, as a distance from the center:
+/// they start at the center and ease out until the tails, `tail` long, have left
+/// a window whose sides are `half` from the center. `None` once the sweep is over.
+fn sweep_head(elapsed: Duration, half: f32, tail: f32) -> Option<f32> {
+    let t = elapsed.as_secs_f32() / HARNESS_SWEEP.as_secs_f32();
+    (t < 1.0).then(|| (1.0 - (1.0 - t).powi(2)) * (half + tail))
+}
+
 struct Session {
     // Declared before `window`: it must be dropped before the Wayland display.
     clipboard: Clipboard,
@@ -447,6 +475,10 @@ struct Session {
     /// The window is hidden, minimized or covered: animations stop.
     occluded: bool,
     scrollbar: ScrollbarState,
+    /// Which coding agent harness the shell runs, found on a thread.
+    harness_watch: Arc<harness::Watch>,
+    harness_line: HarnessLine,
+    harness_config: tron_config::HarnessConfig,
     /// The folder shown beside the title, and when the shell's directory was last read.
     #[cfg(target_os = "macos")]
     represented_directory: (Option<PathBuf>, Instant),
@@ -527,6 +559,14 @@ impl App {
         });
         let input = spawn_writer(pty.writer()?)?;
         spawn_reader(pty.reader()?, shared.clone(), self.proxy.clone(), input.clone())?;
+        // In a Flatpak the shell's processes are on the host, out of sight.
+        let harness_watch = Arc::new(harness::Watch::default());
+        harness_watch.set_names(harness::names(&config.harness));
+        if !tron_pty::in_flatpak()
+            && let Some(tty) = pty.tty_path()
+        {
+            harness::spawn(tty, pty.child_id(), &harness_watch, self.proxy.clone());
+        }
         log::debug!("startup: shell spawned after {:?}", started.elapsed());
 
         let theme = Theme { opacity: config.window.opacity.clamp(0.0, 1.0), ..Theme::default() };
@@ -624,6 +664,9 @@ impl App {
             animation_fps: config.shader.fps,
             occluded: false,
             scrollbar: ScrollbarState::new(),
+            harness_watch,
+            harness_line: HarnessLine::new(),
+            harness_config: config.harness.clone(),
             #[cfg(target_os = "macos")]
             represented_directory: (None, Instant::now() - REPRESENTED_DIRECTORY_POLL),
             #[cfg(target_os = "macos")]
@@ -891,6 +934,7 @@ impl ApplicationHandler for App {
             }
             session.shared.wake_pending.store(false, Ordering::Release);
             session.poll_shaders();
+            session.update_harness();
             if session.shared.exited.load(Ordering::Acquire) && !session.exited {
                 if session.settings.close_on_exit {
                     closed.push(id);
@@ -1181,6 +1225,11 @@ impl Session {
     fn apply_config(&mut self, config: &Config, paths: Option<&Paths>) {
         self.settings = Settings::new(config);
         self.animation_fps = config.shader.fps;
+        self.harness_watch.set_names(harness::names(&config.harness));
+        self.harness_config = config.harness.clone();
+        if let Some(name) = &self.harness_line.name {
+            self.harness_line.color = harness::color(name, &config.harness).unwrap_or(self.harness_line.color);
+        }
         let mut problems = Vec::new();
         let (bindings, errors) = config.bindings();
         for error in errors {
@@ -1590,6 +1639,9 @@ impl Session {
         }
 
         if let Some(due) = self.update_scrollbar(now, self.snapshot.rows()) {
+            wake_at(due);
+        }
+        if let Some(due) = self.update_harness_line(now) {
             wake_at(due);
         }
 
@@ -2586,6 +2638,45 @@ impl Session {
         wake
     }
 
+    /// Starts the harness line's sweep when a coding agent harness starts.
+    fn update_harness(&mut self) {
+        let found = self.harness_watch.found();
+        if found == self.harness_line.name {
+            return;
+        }
+        if let Some(color) = found.as_deref().and_then(|name| harness::color(name, &self.harness_config)) {
+            self.harness_line.color = color;
+            self.harness_line.started_at = Some(Instant::now());
+            self.window.request_redraw();
+        }
+        self.harness_line.name = found;
+    }
+
+    /// Draws the harness line's sweep. Returns when the next frame is due while it runs.
+    fn update_harness_line(&mut self, now: Instant) -> Option<Instant> {
+        let width = self.renderer.size().0 as f32;
+        let scale = self.scale_factor as f32;
+        let tail = (width * 0.3).max(48.0 * scale);
+        let head = self
+            .harness_line
+            .started_at
+            .filter(|_| self.harness_config.line)
+            .and_then(|started| sweep_head(now.saturating_duration_since(started), width / 2.0, tail));
+        if head.is_none() {
+            self.harness_line.started_at = None;
+        }
+        self.renderer.set_glow_line(head.map(|head| GlowLine {
+            center: width / 2.0,
+            head,
+            tail,
+            top: 0.0,
+            thickness: (1.5 * scale).max(1.0),
+            glow: 12.0 * scale,
+            color: self.harness_line.color,
+        }));
+        head.map(|_| now + self.frame_interval)
+    }
+
     /// Scrolls so the dragged scrollbar thumb follows the pointer.
     fn drag_scrollbar(&mut self, y: f64) {
         let (Some(grab), Some((_, height))) = (self.scrollbar.grab, self.scrollbar.thumb) else { return };
@@ -2915,6 +3006,17 @@ mod tests {
     #[test]
     fn window_icon_decodes() {
         assert!(window_icon().is_some());
+    }
+
+    #[test]
+    fn harness_sweep_runs_from_the_center_past_the_sides() {
+        let (half, tail) = (500.0, 150.0);
+        assert_eq!(sweep_head(Duration::ZERO, half, tail), Some(0.0));
+        let middle = sweep_head(HARNESS_SWEEP / 2, half, tail).unwrap();
+        assert!(middle > half / 2.0 && middle < half + tail, "eases out: {middle}");
+        let late = sweep_head(HARNESS_SWEEP.mul_f32(0.99), half, tail).unwrap();
+        assert!(late - tail > half * 0.95, "the tail has nearly left the window: {late}");
+        assert_eq!(sweep_head(HARNESS_SWEEP, half, tail), None);
     }
 
     #[test]

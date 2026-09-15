@@ -19,6 +19,7 @@ const KIND_MASK: u32 = 1u;
 const KIND_COLOR: u32 = 2u;
 const KIND_CURLY: u32 = 3u;
 const KIND_ROUNDED: u32 = 4u;
+const KIND_GLOW: u32 = 5u;
 
 struct Instance {
     @location(0) pos: vec2<f32>,
@@ -87,6 +88,20 @@ fn fs_main(v: VertexOut) -> @location(0) vec4<f32> {
             let distance = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - v.params.x;
             let a = clamp(0.5 - distance, 0.0, 1.0) * v.color.a;
             return vec4<f32>(v.color.rgb * a, a);
+        }
+        case KIND_GLOW: {
+            // params: brightness at the left end, line thickness, brightness at the right
+            // end, glow height. uv.x runs from one brightness to the other across the
+            // quad: a bright line at the top with a soft glow under it, whose head is
+            // brightest and whose tail fades out.
+            let thickness = max(v.params.y, 1.0);
+            let line = clamp(thickness + 0.5 - v.local.y, 0.0, 1.0);
+            let below = clamp((v.local.y - thickness) / max(v.params.w, 1.0), 0.0, 1.0);
+            let glow = exp(-4.0 * below) * (1.0 - below) * 0.5;
+            let ramp = clamp(v.uv.x, 0.0, 1.0);
+            let a = clamp(line + glow, 0.0, 1.0) * ramp * ramp * v.color.a;
+            let rgb = mix(v.color.rgb, vec3<f32>(1.0), line * ramp * 0.4);
+            return vec4<f32>(rgb * a, a);
         }
         case KIND_COLOR: {
             let texel = textureLoad(color_atlas, vec2<i32>(v.uv), 0);

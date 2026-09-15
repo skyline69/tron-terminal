@@ -91,6 +91,21 @@ pub struct Overlay {
     pub underline: bool,
 }
 
+/// A thin glowing line sweeping from `center` to both sides of the window, in
+/// physical pixels: two mirrored streaks whose heads are `head` from the center,
+/// each with a tail `tail` long that fades out. Parts beyond the window are cut off.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct GlowLine {
+    pub center: f32,
+    pub head: f32,
+    pub tail: f32,
+    pub top: f32,
+    /// Height of the bright line, and of the glow under it.
+    pub thickness: f32,
+    pub glow: f32,
+    pub color: [u8; 3],
+}
+
 /// The thumb of an overlay scrollbar (macOS style), in physical pixels.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Scrollbar {
@@ -313,7 +328,8 @@ fn metal_layer(surface: &wgpu::Surface<'_>, f: impl FnOnce(&objc2_quartz_core::C
 #[derive(Copy, Clone, PartialEq, Eq)]
 struct TerminalKey {
     size: (u32, u32),
-    /// Generations of the user and startup chains, whose textures are replaced with them.
+    /// Target revisions of the user and startup chains: installing a compiled chain
+    /// or resizing replaces the input texture with an empty one.
     chains: (u64, u64),
     clear: [u64; 4],
 }
@@ -529,6 +545,11 @@ impl Renderer {
     /// Overlay scrollbar thumb drawn above the terminal, `None` to hide it.
     pub fn set_scrollbar(&mut self, scrollbar: Option<Scrollbar>) {
         self.cells.set_scrollbar(scrollbar);
+    }
+
+    /// Glowing line drawn above the terminal, `None` to hide it.
+    pub fn set_glow_line(&mut self, line: Option<GlowLine>) {
+        self.cells.set_glow_line(line);
     }
 
     /// Allows reading presented frames back. Returns false when the surface does not support it.
@@ -762,7 +783,7 @@ impl Renderer {
         let chain = [&self.post, &self.startup].into_iter().find(|chain| chain.is_active());
         let key = chain.filter(|chain| chain.keeps_input()).map(|_| TerminalKey {
             size: (self.config.width, self.config.height),
-            chains: (self.post.generation(), self.startup.generation()),
+            chains: (self.post.targets_revision(), self.startup.targets_revision()),
             clear: [clear.r, clear.g, clear.b, clear.a].map(f64::to_bits),
         });
         let reuse = key.is_some() && key == self.drawn_terminal && !cells_changed && self.images.is_empty();
