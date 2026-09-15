@@ -1324,9 +1324,10 @@ fn read_file(path: &str, control: &Control) -> Result<Vec<u8>, String> {
     let data = read_limited(file, control)?;
     if control.medium == b't' {
         // Temporary files must be deleted after reading, but only obvious ones.
-        let temp = std::env::temp_dir();
-        let in_temp =
-            canonical.starts_with(&temp) || canonical.starts_with("/tmp") || canonical.starts_with("/dev/shm");
+        // Directories are canonicalized too: on macOS they are links into /private.
+        let in_temp = [std::env::temp_dir(), "/tmp".into(), "/dev/shm".into()]
+            .into_iter()
+            .any(|dir| canonical.starts_with(std::fs::canonicalize(&dir).unwrap_or(dir)));
         if in_temp && path.contains("tty-graphics-protocol") {
             let _ = std::fs::remove_file(&canonical);
         }
@@ -1340,11 +1341,36 @@ fn read_shared_memory(name: &str, control: &Control) -> Result<Vec<u8>, String> 
     if name.is_empty() || name.contains('/') || name.contains("..") {
         return Err("EINVAL:invalid shared memory name".into());
     }
-    let path = std::path::Path::new("/dev/shm").join(name);
-    let file = std::fs::File::open(&path).map_err(|e| format!("EBADF:{e}"))?;
-    let data = read_limited(file, control);
-    let _ = std::fs::remove_file(&path);
+    let name = format!("/{name}");
+    let data = map_shared_memory(&name, control);
+    let _ = rustix::shm::unlink(name.as_str());
     data
+}
+
+/// Copies the requested range of a shared memory object. It is mapped rather
+/// than read, because macOS cannot `read` shared memory.
+fn map_shared_memory(name: &str, control: &Control) -> Result<Vec<u8>, String> {
+    use rustix::mm::{MapFlags, ProtFlags};
+    let fd = rustix::shm::open(name, rustix::shm::OFlags::RDONLY, rustix::fs::Mode::empty())
+        .map_err(|e| format!("EBADF:{e}"))?;
+    // macOS rounds the object up to whole pages; the `S` key gives the exact size.
+    let len = usize::try_from(rustix::fs::fstat(&fd).map_err(|e| format!("EBADF:{e}"))?.st_size).unwrap_or(0);
+    let start = control.offset.min(len);
+    let limit = if control.size > 0 { control.size } else { MAX_TRANSFER };
+    let count = (len - start).min(limit);
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    // SAFETY: a read-only mapping of the whole object, unmapped before returning.
+    // Shared, because macOS refuses private mappings of shared memory.
+    let data = unsafe {
+        let ptr = rustix::mm::mmap(std::ptr::null_mut(), len, ProtFlags::READ, MapFlags::SHARED, &fd, 0)
+            .map_err(|e| format!("EBADF:{e}"))?;
+        let data = std::slice::from_raw_parts(ptr.cast::<u8>().add(start), count).to_vec();
+        let _ = rustix::mm::munmap(ptr, len);
+        data
+    };
+    Ok(data)
 }
 
 fn decode_png(data: &[u8]) -> Result<Decoded, String> {
@@ -1436,24 +1462,46 @@ mod tests {
         assert_eq!(&g.images()[&3].rgba[..4], &[7, 7, 7, 7]);
     }
 
+    /// Creates a POSIX shared memory object holding `data`, as clients do.
+    fn create_shared_memory(name: &str, data: &[u8]) {
+        use rustix::mm::{MapFlags, ProtFlags};
+        use rustix::shm::OFlags;
+        let fd = rustix::shm::open(
+            format!("/{name}").as_str(),
+            OFlags::CREATE | OFlags::EXCL | OFlags::RDWR,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .unwrap();
+        rustix::fs::ftruncate(&fd, data.len() as u64).unwrap();
+        // SAFETY: a fresh shared mapping of exactly `data.len()` bytes.
+        unsafe {
+            let ptr =
+                rustix::mm::mmap(std::ptr::null_mut(), data.len(), ProtFlags::WRITE, MapFlags::SHARED, &fd, 0).unwrap();
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.cast::<u8>(), data.len());
+            rustix::mm::munmap(ptr, data.len()).unwrap();
+        }
+    }
+
+    fn shared_memory_exists(name: &str) -> bool {
+        rustix::shm::open(format!("/{name}").as_str(), rustix::shm::OFlags::RDONLY, rustix::fs::Mode::empty()).is_ok()
+    }
+
     #[test]
     fn shared_memory_transfer_is_read_and_unlinked() {
         let name = format!("tron-test-{}", std::process::id());
-        let path = std::path::Path::new("/dev/shm").join(&name);
-        std::fs::write(&path, [9u8; 3]).unwrap();
+        create_shared_memory(&name, &[9u8; 3]);
         let mut g = Graphics::new();
         let encoded = BASE64.encode(&name);
         let out = g.handle(format!("a=t,t=s,f=24,s=1,v=1,i=4;{encoded}").as_bytes(), &ctx());
         assert_eq!(out.response.as_deref(), Some(&b"\x1b_Gi=4;OK\x1b\\"[..]));
         assert_eq!(&g.images()[&4].rgba[..], &[9, 9, 9, 255]);
-        assert!(!path.exists());
+        assert!(!shared_memory_exists(&name));
     }
 
     #[test]
     fn shared_memory_with_more_flag_is_not_chunked() {
         let name = format!("tron-test-more-{}", std::process::id());
-        let path = std::path::Path::new("/dev/shm").join(&name);
-        std::fs::write(&path, [5u8; 3]).unwrap();
+        create_shared_memory(&name, &[5u8; 3]);
         let mut g = Graphics::new();
         let encoded = BASE64.encode(&name);
         g.handle(format!("a=T,t=s,f=24,s=1,v=1,C=1,q=2,m=1;{encoded}").as_bytes(), &ctx());

@@ -4,6 +4,8 @@ mod accessibility;
 mod cli;
 mod clipboard;
 mod input;
+#[cfg(target_os = "macos")]
+mod macos;
 mod mouse;
 mod terminfo;
 
@@ -46,6 +48,8 @@ use clipboard::Clipboard;
 
 /// Delay before re-checking a frame held back by synchronized output.
 const SYNC_POLL: Duration = Duration::from_millis(8);
+/// Delay before retrying a frame skipped because the GPU was still busy.
+const GPU_BUSY_POLL: Duration = Duration::from_millis(2);
 /// Maximum time between clicks of a double or triple click.
 const MULTI_CLICK: Duration = Duration::from_millis(400);
 /// Debug aid: a token accepted for startup screen commands in any session.
@@ -184,6 +188,8 @@ struct Settings {
     open_command: String,
     notify_mode: NotifyMode,
     notify_command: String,
+    #[cfg(target_os = "macos")]
+    option_as_alt: tron_config::OptionAsAlt,
 }
 
 impl Settings {
@@ -202,6 +208,8 @@ impl Settings {
             open_command: config.links.open_command.clone(),
             notify_mode: config.notifications.mode,
             notify_command: config.notifications.command.clone(),
+            #[cfg(target_os = "macos")]
+            option_as_alt: config.window.option_as_alt,
         }
     }
 }
@@ -247,8 +255,8 @@ struct DropState {
     dropped: bool,
 }
 
-/// A compiled shader chain: (name, source) per shader, the animation mode, and compile errors.
-type AppliedShaders = (Vec<(String, String)>, Option<bool>, Vec<String>);
+/// A requested shader chain: (name, source) per shader and the animation mode.
+type AppliedShaders = (Vec<(String, String)>, Option<bool>);
 
 struct Session {
     // Declared before `window`: it must be dropped before the Wayland display.
@@ -274,6 +282,16 @@ struct Session {
     applied_font: String,
     /// Shader chain last compiled, with its animation mode and compile errors.
     applied_shaders: Option<AppliedShaders>,
+    /// Compile errors of the installed shader chain.
+    shader_errors: Vec<String>,
+    /// Configuration problems besides shader compile errors, from the last apply.
+    config_problems: Vec<String>,
+    /// Every available shader was sent to be compiled ahead of use.
+    shaders_warmed: bool,
+    /// A screenshot waits for the next presented frame, then tron exits.
+    capture_requested: bool,
+    /// When the next frame is due, kept on a fixed cadence while animating.
+    next_frame: Instant,
     /// Window transparency and blur last set.
     applied_translucency: Option<(bool, bool)>,
     /// Configuration problems shown at the top of the window, and until when.
@@ -282,6 +300,9 @@ struct Session {
     modifiers: ModifiersState,
     /// Hyper is held. winit's modifier state does not include it.
     hyper: bool,
+    /// Left and right Option keys held.
+    #[cfg(target_os = "macos")]
+    option_keys: (bool, bool),
     mouse: MouseState,
     /// Mouse pointer shape currently set on the window.
     pointer_icon: CursorIcon,
@@ -328,6 +349,8 @@ impl App {
             .with_transparent(config.window.opacity < 1.0)
             .with_decorations(config.window.decorations)
             .with_window_icon(window_icon());
+        #[cfg(target_os = "macos")]
+        let attributes = macos::window_attributes(attributes, config.window.option_as_alt);
         let window: Arc<dyn Window> = Arc::from(event_loop.create_window(attributes)?);
         window.set_cursor(CursorIcon::Text.into());
         log::debug!("startup: window created after {:?}", started.elapsed());
@@ -379,6 +402,8 @@ impl App {
             }
         };
         log::debug!("startup: renderer ready after {:?}", started.elapsed());
+        let proxy = self.proxy.clone();
+        renderer.set_shader_notify(move || proxy.wake_up());
 
         let ime = ImeEnableRequest::new(
             ImeCapabilities::new().with_cursor_area(),
@@ -393,7 +418,8 @@ impl App {
 
         // TRON_ACCESSIBILITY=0 turns screen reader support off.
         let accessibility = (std::env::var_os("TRON_ACCESSIBILITY").is_none_or(|v| v != "0"))
-            .then(|| accessibility::Accessibility::new(self.proxy.clone()));
+            .then(|| accessibility::Accessibility::new(self.proxy.clone(), window.as_ref()))
+            .flatten();
         let mut session = Session {
             clipboard: Clipboard::new(window.as_ref()),
             accessibility,
@@ -412,6 +438,8 @@ impl App {
             settings,
             modifiers: ModifiersState::empty(),
             hyper: false,
+            #[cfg(target_os = "macos")]
+            option_keys: (false, false),
             mouse: MouseState::default(),
             pointer_icon: CursorIcon::Text,
             app_pointer: None,
@@ -441,6 +469,11 @@ impl App {
             preview_request: None,
             applied_font: String::new(),
             applied_shaders: None,
+            shader_errors: Vec::new(),
+            config_problems: Vec::new(),
+            shaders_warmed: false,
+            capture_requested: false,
+            next_frame: Instant::now(),
             applied_translucency: None,
         };
         session.apply_config(config, self.paths.as_ref());
@@ -544,6 +577,7 @@ impl App {
                 Ok(config) => {
                     let started = Instant::now();
                     if let Some(session) = &mut self.session {
+                        session.warm_shaders(self.paths.as_ref());
                         session.apply_config(&config, self.paths.as_ref());
                     }
                     log::debug!("preview applied in {:?}", started.elapsed());
@@ -599,6 +633,7 @@ impl ApplicationHandler for App {
         }
         let Some(session) = self.session.as_mut() else { return };
         session.shared.wake_pending.store(false, Ordering::Release);
+        session.poll_shaders();
         if session.shared.exited.load(Ordering::Acquire) && !session.exited {
             if session.settings.close_on_exit {
                 event_loop.exit();
@@ -633,7 +668,7 @@ impl ApplicationHandler for App {
                 let Some(session) = self.session.as_mut() else { return };
                 if session.renderer.is_device_lost() {
                     let config = &self.config;
-                    if let Err(error) = session.recreate_renderer(config, self.paths.as_ref()) {
+                    if let Err(error) = session.recreate_renderer(config, self.paths.as_ref(), &self.proxy) {
                         log::error!("cannot recover from GPU device loss: {error:#}");
                         event_loop.exit();
                     }
@@ -650,6 +685,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 session.modifiers = modifiers.state();
+                #[cfg(target_os = "macos")]
+                {
+                    session.option_keys = macos::option_keys(&modifiers);
+                }
                 session.update_hover();
             }
             WindowEvent::Focused(focused) => {
@@ -706,7 +745,7 @@ impl ApplicationHandler for App {
                         kitty_flags: term.keyboard_flags(),
                     }
                 };
-                let mods = input::Mods::new(session.modifiers, session.hyper, false);
+                let mods = input::Mods::new(session.key_modifiers(), session.hyper, false);
                 if let Some(bytes) = input::encode(&event, mods, key_modes) {
                     if pressed {
                         session.prepare_input();
@@ -756,6 +795,31 @@ impl ApplicationHandler for App {
 impl Session {
     fn send(&self, bytes: Vec<u8>) {
         let _ = self.input.send(bytes);
+    }
+
+    /// Modifiers for encoding keys.
+    #[cfg(not(target_os = "macos"))]
+    fn key_modifiers(&self) -> ModifiersState {
+        self.modifiers
+    }
+
+    /// Modifiers for encoding keys. Option keys not configured as Alt compose
+    /// characters, which are sent as they are.
+    #[cfg(target_os = "macos")]
+    fn key_modifiers(&self) -> ModifiersState {
+        let mut modifiers = self.modifiers;
+        if !macos::option_is_alt(self.settings.option_as_alt, self.option_keys) {
+            modifiers.remove(ModifiersState::ALT);
+        }
+        modifiers
+    }
+
+    /// The modifier held to open links: Ctrl, or Command on macOS where Ctrl+click is a right click.
+    fn link_modifier(&self) -> bool {
+        #[cfg(not(target_os = "macos"))]
+        return self.modifiers.control_key();
+        #[cfg(target_os = "macos")]
+        return self.modifiers.meta_key();
     }
 
     /// Scrolls back to the prompt and clears the selection before sending typed input.
@@ -814,6 +878,8 @@ impl Session {
             self.window.set_transparent(translucent);
             self.window.set_blur(blur);
         }
+        #[cfg(target_os = "macos")]
+        macos::set_option_as_alt(self.window.as_ref(), config.window.option_as_alt);
 
         let shaders: Vec<PostShader> = config
             .shader_sources(paths)
@@ -831,18 +897,15 @@ impl Session {
             Animation::Always => Some(true),
             Animation::Never => Some(false),
         };
-        // Compiling pipelines takes long; an unchanged chain keeps its pipelines and errors.
+        // Pipelines compile in the background; an unchanged chain keeps its pipelines and errors.
         let chain: Vec<(String, String)> = shaders.iter().map(|s| (s.name.clone(), s.source.clone())).collect();
         if self
             .applied_shaders
             .as_ref()
-            .is_none_or(|(applied, applied_animation, _)| *applied != chain || *applied_animation != animation)
+            .is_none_or(|(applied, applied_animation)| *applied != chain || *applied_animation != animation)
         {
-            let errors = self.renderer.set_shaders(&shaders, animation);
-            self.applied_shaders = Some((chain, animation, errors));
-        }
-        if let Some((_, _, errors)) = &self.applied_shaders {
-            problems.extend(errors.iter().cloned());
+            self.renderer.set_shaders(&shaders, animation);
+            self.applied_shaders = Some((chain, animation));
         }
 
         {
@@ -858,8 +921,44 @@ impl Session {
             term.graphics_mut().set_limits(limit, config.images.file_transfer);
             term.grid_mut().damage_all();
         }
+        self.config_problems = problems.clone();
+        problems.extend(self.shader_errors.iter().cloned());
         self.show_config_errors(problems);
         self.window.request_redraw();
+    }
+
+    /// Installs shaders compiled in the background and shows their errors.
+    fn poll_shaders(&mut self) {
+        let installed = self.renderer.poll_shaders();
+        if !installed.any {
+            return;
+        }
+        if let Some(errors) = installed.user_errors {
+            self.shader_errors = errors;
+            let mut problems = self.config_problems.clone();
+            problems.extend(self.shader_errors.iter().cloned());
+            if problems != self.config_errors {
+                self.show_config_errors(problems);
+            }
+        }
+        self.window.request_redraw();
+    }
+
+    /// Compiles every available shader in the background once, so switching
+    /// between them on the startup screen does not wait for the GPU compiler.
+    fn warm_shaders(&mut self, paths: Option<&Paths>) {
+        if std::mem::replace(&mut self.shaders_warmed, true) {
+            return;
+        }
+        let files = tron_config::shader_names(paths);
+        let config = Config { shader: tron_config::ShaderConfig { files, ..Default::default() }, ..Config::default() };
+        let shaders = config
+            .shader_sources(paths)
+            .into_iter()
+            .flatten()
+            .map(|source| PostShader { name: source.name, source: source.source })
+            .collect();
+        self.renderer.warm_shaders(shaders);
     }
 
     /// Loads the fonts, features and size from `config`.
@@ -972,8 +1071,14 @@ impl Session {
         if self.focused && !focused_ok {
             return;
         }
-        let mut command = Command::new(&self.settings.notify_command);
-        command.args(["--app-name", "tron", "--", title, body]);
+        #[cfg(not(target_os = "macos"))]
+        let command = {
+            let mut command = Command::new(&self.settings.notify_command);
+            command.args(["--app-name", "tron", "--", title, body]);
+            command
+        };
+        #[cfg(target_os = "macos")]
+        let command = macos::notification(&self.settings.notify_command, title, body);
         spawn_detached(command);
     }
 
@@ -1037,11 +1142,10 @@ impl Session {
     /// Redraws at most once per display refresh. Output that arrives faster is
     /// batched into the next frame instead of rendering every chunk.
     fn schedule_redraw(&mut self, event_loop: &dyn ActiveEventLoop) {
-        let next = self.last_frame + self.frame_interval;
-        if Instant::now() >= next {
+        if Instant::now() >= self.next_frame {
             self.window.request_redraw();
         } else {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
         }
     }
 
@@ -1118,10 +1222,21 @@ impl Session {
         let capture_now = self.screenshot.as_ref().is_some_and(|(_, due)| now >= *due);
         if capture_now && let Some((path, _)) = self.screenshot.take() {
             self.renderer.capture_next_frame(path);
+            self.capture_requested = true;
         }
-        self.renderer.render();
+        let presented = self.renderer.render();
+        if !presented {
+            wake_at(now + GPU_BUSY_POLL);
+        }
         self.last_frame = Instant::now();
+        // The next frame is due one interval after this one was, so timer slop does
+        // not add up to a lower frame rate. Early or late frames restart the cadence.
+        self.next_frame = match now.checked_duration_since(self.next_frame) {
+            Some(late) if late < self.frame_interval => self.next_frame + self.frame_interval,
+            _ => now + self.frame_interval,
+        };
         if let Some(pressed) = self.pending_key
+            && presented
             && self.snapshot.damaged.iter().any(|&damaged| damaged)
         {
             log::info!(
@@ -1144,7 +1259,8 @@ impl Session {
             }
         }
 
-        if capture_now {
+        // The capture is saved with the next presented frame, which a busy GPU can delay.
+        if self.capture_requested && presented {
             event_loop.exit();
             return;
         }
@@ -1152,7 +1268,7 @@ impl Session {
             wake_at(*due);
         }
         if self.renderer.is_animated() {
-            wake_at(self.last_frame + self.frame_interval);
+            wake_at(self.next_frame);
         }
         event_loop.set_control_flow(next_wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -1414,7 +1530,7 @@ impl Session {
     /// Underlines the link under the pointer while Ctrl is held.
     fn update_hover(&mut self) {
         let modes = self.shared.term.lock().modes();
-        let link = if self.modifiers.control_key() && !self.mouse_reporting(modes) {
+        let link = if self.link_modifier() && !self.mouse_reporting(modes) {
             let (row, col) = self.renderer.cell_at(self.mouse.position.0, self.mouse.position.1);
             let term = self.shared.term.lock();
             term.link_at(term.viewport_point(row, col))
@@ -1434,13 +1550,23 @@ impl Session {
     }
 
     /// Creates a new renderer after the GPU device was lost.
-    fn recreate_renderer(&mut self, config: &Config, paths: Option<&Paths>) -> anyhow::Result<()> {
+    fn recreate_renderer(
+        &mut self,
+        config: &Config,
+        paths: Option<&Paths>,
+        proxy: &EventLoopProxy,
+    ) -> anyhow::Result<()> {
         let size = self.window.surface_size();
         let theme = Theme { opacity: config.window.opacity.clamp(0.0, 1.0), ..Theme::default() };
         let metrics = self.fonts.metrics();
         let padding = padding(self.settings.padding, self.scale_factor);
         self.renderer =
             pollster::block_on(Renderer::new(self.window.clone(), size.width, size.height, metrics, padding, theme))?;
+        let proxy = proxy.clone();
+        self.renderer.set_shader_notify(move || proxy.wake_up());
+        // The new renderer has no pipelines: request the shaders again.
+        self.applied_shaders = None;
+        self.shaders_warmed = false;
         self.apply_config(config, paths);
         log::warn!("renderer recreated after GPU device loss");
         Ok(())
@@ -1578,7 +1704,7 @@ impl Session {
     fn pointer_button(&mut self, pressed: bool, button: MouseButton) {
         if pressed
             && button == MouseButton::Left
-            && self.modifiers.control_key()
+            && self.link_modifier()
             && let Some(link) = self.hovered_link.clone()
         {
             self.open_link(&link.uri);
@@ -1653,7 +1779,7 @@ impl Session {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.mouse.position = (x, y);
-        if self.modifiers.control_key() || self.hovered_link.is_some() {
+        if self.link_modifier() || self.hovered_link.is_some() {
             self.update_hover();
         }
         let (row, col) = self.renderer.cell_at(x, y);

@@ -19,3 +19,4 @@ png.workspace = true
 miniz_oxide.workspace = true
 gif.workspace = true
 zune-jpeg.workspace = true
+rustix.workspace = true

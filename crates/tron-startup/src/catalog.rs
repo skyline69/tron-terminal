@@ -38,10 +38,20 @@ pub struct Catalog {
     pub shaders: Vec<Shader>,
 }
 
-/// Installed monospaced font families from fontconfig, `monospace` first.
+/// Installed monospaced font families, `monospace` first.
 pub fn monospace_families() -> Vec<String> {
+    let mut families = installed_monospace();
+    families.sort_by_key(|family| family.to_lowercase());
+    families.dedup();
+    families.insert(0, "monospace".to_owned());
+    families
+}
+
+/// Monospaced families from fontconfig.
+#[cfg(not(target_os = "macos"))]
+fn installed_monospace() -> Vec<String> {
     let output = std::process::Command::new("fc-list").args([":spacing=mono", "family"]).output();
-    let mut families: Vec<String> = match output {
+    match output {
         Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| line.split(',').next())
@@ -49,11 +59,13 @@ pub fn monospace_families() -> Vec<String> {
             .filter(|family| !family.is_empty())
             .collect(),
         _ => Vec::new(),
-    };
-    families.sort_by_key(|family| family.to_lowercase());
-    families.dedup();
-    families.insert(0, "monospace".to_owned());
-    families
+    }
+}
+
+/// Monospaced families from Core Text, which has no `fc-list`.
+#[cfg(target_os = "macos")]
+fn installed_monospace() -> Vec<String> {
+    tron_font::monospace_families()
 }
 
 impl Catalog {

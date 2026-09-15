@@ -4,14 +4,19 @@
 //! For those, the last pass renders into one of two history textures, which is
 //! then copied to the surface; the textures swap roles every frame. Without
 //! such a shader no history is kept.
+//!
+//! Pipelines are compiled by [`crate::compile::Compiler`] in the background. A
+//! chain keeps drawing its current shaders until the requested ones are ready.
 
 use std::mem::size_of;
 
 use bytemuck::{Pod, Zeroable};
 
-const PRELUDE: &str = include_str!("post_prelude.wgsl");
+use crate::compile::{Compiled, Compiler};
 
-const BLIT: &str = r"
+pub const PRELUDE: &str = include_str!("post_prelude.wgsl");
+
+pub const BLIT: &str = r"
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var source_sampler: sampler;
 
@@ -61,41 +66,18 @@ pub struct PostUniforms {
     pub params: [f32; 4],
 }
 
-struct Target {
-    _texture: wgpu::Texture,
-    view: wgpu::TextureView,
+/// Layouts shared by every chain and the compiler.
+#[derive(Clone)]
+pub struct Layouts {
+    pub format: wgpu::TextureFormat,
+    pub bind_group: wgpu::BindGroupLayout,
+    pub pipeline: wgpu::PipelineLayout,
+    pub blit_bind_group: wgpu::BindGroupLayout,
+    pub blit_pipeline: wgpu::PipelineLayout,
+    pub cache: Option<wgpu::PipelineCache>,
 }
 
-pub struct PostChain {
-    format: wgpu::TextureFormat,
-    layout: wgpu::BindGroupLayout,
-    pipeline_layout: wgpu::PipelineLayout,
-    sampler: wgpu::Sampler,
-    uniforms: wgpu::Buffer,
-    cache: Option<wgpu::PipelineCache>,
-    passes: Vec<wgpu::RenderPipeline>,
-    /// Intermediate render targets, the first one receives the terminal.
-    targets: Vec<Target>,
-    /// History textures, only when a shader reads the previous frame.
-    history: Vec<Target>,
-    /// History texture written by the last frame.
-    history_current: usize,
-    /// Bind groups indexed by `[target][history read index]`.
-    bind_groups: Vec<Vec<wgpu::BindGroup>>,
-    blit: Option<Blit>,
-    size: (u32, u32),
-    animated: bool,
-    uses_previous: bool,
-    uses_cursor_motion: bool,
-}
-
-struct Blit {
-    pipeline: wgpu::RenderPipeline,
-    layout: wgpu::BindGroupLayout,
-    bind_groups: Vec<wgpu::BindGroup>,
-}
-
-impl PostChain {
+impl Layouts {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, cache: Option<&wgpu::PipelineCache>) -> Self {
         let texture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -107,7 +89,13 @@ impl PostChain {
             },
             count: None,
         };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let sampler = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        let bind_group = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -121,20 +109,61 @@ impl PostChain {
                     count: None,
                 },
                 texture(1),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
+                sampler(2),
                 texture(3),
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("post"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&bind_group)],
             immediate_size: 0,
         });
+        let blit_bind_group = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("post blit"),
+            entries: &[texture(0), sampler(1)],
+        });
+        let blit_pipeline = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("post blit"),
+            bind_group_layouts: &[Some(&blit_bind_group)],
+            immediate_size: 0,
+        });
+        Self { format, bind_group, pipeline, blit_bind_group, blit_pipeline, cache: cache.cloned() }
+    }
+}
+
+struct Target {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+pub struct PostChain {
+    format: wgpu::TextureFormat,
+    layout: wgpu::BindGroupLayout,
+    blit_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    uniforms: wgpu::Buffer,
+    passes: Vec<wgpu::RenderPipeline>,
+    /// Intermediate render targets, the first one receives the terminal.
+    targets: Vec<Target>,
+    /// History textures, only when a shader reads the previous frame.
+    history: Vec<Target>,
+    /// History texture written by the last frame.
+    history_current: usize,
+    /// Bind groups indexed by `[target][history read index]`.
+    bind_groups: Vec<Vec<wgpu::BindGroup>>,
+    blit: Option<wgpu::RenderPipeline>,
+    blit_bind_groups: Vec<wgpu::BindGroup>,
+    size: (u32, u32),
+    animated: bool,
+    uses_previous: bool,
+    uses_cursor_motion: bool,
+    /// Counts requests, so results of superseded ones are dropped.
+    generation: u64,
+    animation: Option<bool>,
+}
+
+impl PostChain {
+    pub fn new(device: &wgpu::Device, layouts: &Layouts) -> Self {
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("post"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -148,22 +177,24 @@ impl PostChain {
             mapped_at_creation: false,
         });
         Self {
-            format,
-            layout,
-            pipeline_layout,
+            format: layouts.format,
+            layout: layouts.bind_group.clone(),
+            blit_layout: layouts.blit_bind_group.clone(),
             sampler,
             uniforms,
-            cache: cache.cloned(),
             passes: Vec::new(),
             targets: Vec::new(),
             history: Vec::new(),
             history_current: 0,
             bind_groups: Vec::new(),
             blit: None,
+            blit_bind_groups: Vec::new(),
             size: (0, 0),
             animated: false,
             uses_previous: false,
             uses_cursor_motion: false,
+            generation: 0,
+            animation: None,
         }
     }
 
@@ -182,130 +213,47 @@ impl PostChain {
         self.is_active() && self.uses_cursor_motion
     }
 
-    /// Compiles `shaders`, replacing the current chain. Shaders that fail to
-    /// compile are skipped. Returns one message per failure.
+    /// Asks for `shaders` to replace the chain once compiled. An empty list
+    /// takes effect at once.
     ///
     /// `animation` forces continuous redraws on or off. `None` animates when a
     /// shader reads `tron.time` or `tron.frame`. Shaders that read
     /// `tron.cursor_change_time` only animate after cursor moves.
-    pub fn set_shaders(
+    pub fn request(
         &mut self,
         device: &wgpu::Device,
+        compiler: &Compiler,
+        chain: usize,
         shaders: &[PostShader],
         animation: Option<bool>,
-    ) -> Vec<String> {
-        let mut errors = Vec::new();
-        let mut passes = Vec::new();
-        let mut uses_time = false;
-        let mut uses_previous = false;
-        let mut uses_cursor_motion = false;
-        let prelude_lines = PRELUDE.lines().count();
-        for shader in shaders {
-            let source = format!("{PRELUDE}{}", shader.source);
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(&shader.name),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            });
-            let pipeline = self.pipeline(device, &shader.name, &module, "tron_vs", "tron_fs", &self.pipeline_layout);
-            if let Some(error) = pollster::block_on(scope.pop()) {
-                errors.push(format!(
-                    "shader `{}` failed to compile (line numbers include {prelude_lines} prelude lines):\n{error}",
-                    shader.name
-                ));
-                continue;
-            }
-            let reads = |name: &str| shader.source.contains(name);
-            if reads("tron.cursor_change_time") || reads("tron.previous_cursor") {
-                uses_cursor_motion = true;
-            } else if reads("tron.time") || reads("tron.frame") {
-                uses_time = true;
-            }
-            uses_previous |= reads("previous(");
-            passes.push(pipeline);
+    ) {
+        self.generation += 1;
+        self.animation = animation;
+        if shaders.is_empty() {
+            let empty =
+                Compiled { chain, generation: self.generation, passes: Vec::new(), blit: None, errors: Vec::new() };
+            self.apply(device, empty);
+        } else {
+            compiler.compile(chain, self.generation, shaders.to_vec());
         }
-        self.passes = passes;
-        self.animated = animation.unwrap_or(uses_time);
-        self.uses_cursor_motion = animation.is_none() && uses_cursor_motion;
-        self.uses_previous = uses_previous;
-        if uses_previous && self.blit.is_none() {
-            self.blit = Some(self.create_blit(device));
+    }
+
+    /// Installs a compiled chain. Returns its compile errors, or `None` when a
+    /// newer request superseded it.
+    pub fn apply(&mut self, device: &wgpu::Device, compiled: Compiled) -> Option<Vec<String>> {
+        if compiled.generation != self.generation {
+            return None;
         }
+        let reads = compiled.passes.iter().map(|(_, reads)| *reads);
+        self.animated = self.animation.unwrap_or(reads.clone().any(|r| r.time));
+        self.uses_cursor_motion = self.animation.is_none() && reads.clone().any(|r| r.cursor_motion);
+        self.uses_previous = compiled.blit.is_some();
+        self.passes = compiled.passes.into_iter().map(|(pipeline, _)| pipeline).collect();
+        self.blit = compiled.blit;
         let size = self.size;
         self.size = (0, 0);
         self.resize(device, size.0, size.1);
-        errors
-    }
-
-    fn pipeline(
-        &self,
-        device: &wgpu::Device,
-        label: &str,
-        module: &wgpu::ShaderModule,
-        vertex: &str,
-        fragment: &str,
-        layout: &wgpu::PipelineLayout,
-    ) -> wgpu::RenderPipeline {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(layout),
-            vertex: wgpu::VertexState {
-                module,
-                entry_point: Some(vertex),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module,
-                entry_point: Some(fragment),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: self.cache.as_ref(),
-        })
-    }
-
-    fn create_blit(&self, device: &wgpu::Device) -> Blit {
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("post blit"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("post blit"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("post blit"),
-            source: wgpu::ShaderSource::Wgsl(BLIT.into()),
-        });
-        let pipeline = self.pipeline(device, "post blit", &module, "vs", "fs", &pipeline_layout);
-        Blit { pipeline, layout, bind_groups: Vec::new() }
+        Some(compiled.errors)
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -314,6 +262,7 @@ impl PostChain {
             self.targets.clear();
             self.history.clear();
             self.bind_groups.clear();
+            self.blit_bind_groups.clear();
             self.size = size;
             return;
         }
@@ -366,28 +315,23 @@ impl PostChain {
                 }
             })
             .collect();
-        if let Some(blit) = &mut self.blit {
-            blit.bind_groups = self
-                .history
-                .iter()
-                .map(|history| {
-                    device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("post blit"),
-                        layout: &blit.layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&history.view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.sampler),
-                            },
-                        ],
-                    })
+        self.blit_bind_groups = self
+            .history
+            .iter()
+            .map(|history| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("post blit"),
+                    layout: &self.blit_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&history.view),
+                        },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    ],
                 })
-                .collect();
-        }
+            })
+            .collect();
     }
 
     /// Where the terminal is rendered when the chain is active.
@@ -421,7 +365,7 @@ impl PostChain {
             draw(encoder, view, pipeline, bind_group);
         }
         if with_history && let Some(blit) = &self.blit {
-            draw(encoder, output, &blit.pipeline, &blit.bind_groups[write]);
+            draw(encoder, output, blit, &self.blit_bind_groups[write]);
             self.history_current = write;
         }
     }

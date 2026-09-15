@@ -114,7 +114,16 @@ fn hand_off(shell: &[String]) -> ! {
         }
         command
     };
-    let error = command(program).args(args).exec();
+    let mut shell = command(program);
+    shell.args(args);
+    // macOS terminals start the shell as a login shell, like tron-pty does without the startup screen.
+    #[cfg(target_os = "macos")]
+    if args.is_empty()
+        && let Some(name) = Path::new(program).file_name()
+    {
+        shell.arg0(format!("-{}", name.to_string_lossy()));
+    }
+    let error = shell.exec();
     eprintln!("tron: cannot run {program}: {error}");
     let error = command("/bin/sh").exec();
     eprintln!("tron: cannot run /bin/sh: {error}");

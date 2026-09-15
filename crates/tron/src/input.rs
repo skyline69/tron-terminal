@@ -412,6 +412,12 @@ fn app_keypad_key(event: &KeyEvent) -> Option<Vec<u8>> {
 
 /// xterm style encoding.
 fn legacy(event: &KeyEvent, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
+    // Command combinations are shortcuts on macOS. Unbound ones type nothing
+    // rather than the plain key.
+    #[cfg(target_os = "macos")]
+    if mods.super_key {
+        return None;
+    }
     let (ctrl, alt, shift) = (mods.ctrl, mods.alt, mods.shift);
     let app_cursor = modes.app_cursor;
     if modes.app_keypad

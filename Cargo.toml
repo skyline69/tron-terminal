@@ -19,6 +19,7 @@ tron-config = { path = "crates/tron-config" }
 tron-startup = { path = "crates/tron-startup" }
 
 accesskit = "0.25.0"
+accesskit_macos = "0.27.0"
 accesskit_unix = "0.23.0"
 anyhow = "1.0.104"
 arboard = { version = "3.6.1", default-features = false }
@@ -37,12 +38,13 @@ etcetera = "0.11.0"
 memchr = "2.8.3"
 miniz_oxide = "0.9.1"
 notify = "9.0.0-rc.5"
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
 parking_lot = "0.12.5"
 png = "0.18.1"
 ratatui = "0.30.2"
 tachyonfx = { version = "0.25.2", default-features = false, features = ["std", "std-duration"] }
 pollster = "1.0.1"
-rustix = { version = "1.1.4", features = ["pty", "termios", "process", "fs", "stdio"] }
+rustix = { version = "1.1.4", features = ["pty", "termios", "process", "fs", "stdio", "shm", "mm"] }
 smithay-clipboard = "0.7.3"
 serde = { version = "1.0.229", features = ["derive"] }
 swash = "0.2.10"

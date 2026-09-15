@@ -1,9 +1,11 @@
-//! Box drawing, block element, Powerline, arrow and triangle glyphs drawn from geometry.
+//! Box drawing, block element, braille, Powerline, arrow and triangle glyphs drawn from geometry.
 //!
 //! Font glyphs for these characters rarely line up with cell edges, which leaves
 //! gaps in TUI borders. Drawing them per cell size makes them seamless. Arrows
 //! often come from a fallback font with a different weight and baseline, so they
 //! are drawn too, centered in the cell with a stroke that matches the cell size.
+//! Braille patterns are the pixels of graphs in tools like btop; few coding fonts
+//! have them, so they are drawn as a grid of dots that lines up across cells.
 
 use crate::{GlyphFormat, RasterizedGlyph};
 
@@ -29,7 +31,10 @@ const HALF_LINES: [&str; 12] =
     ["0001", "1000", "0100", "0010", "0002", "2000", "0200", "0020", "0201", "1020", "0102", "2010"];
 
 pub fn is_sprite(c: char) -> bool {
-    matches!(u32::from(c), 0x2190..=0x2195 | 0x2500..=0x259F | 0x25B2 | 0x25B6 | 0x25BC | 0x25C0 | 0xE0B0..=0xE0B4 | 0xE0B6)
+    matches!(
+        u32::from(c),
+        0x2190..=0x2195 | 0x2500..=0x259F | 0x25B2 | 0x25B6 | 0x25BC | 0x25C0 | 0x2800..=0x28FF | 0xE0B0..=0xE0B4 | 0xE0B6
+    )
 }
 
 /// Draws `c` into a `width` x `height` mask. `thickness` is the light stroke width.
@@ -56,6 +61,7 @@ pub fn render(c: char, width: u32, height: u32, baseline: u32, thickness: u32) -
         0xE0B0..=0xE0B4 | 0xE0B6 => canvas.powerline(cp, light),
         0x2190..=0x2195 => canvas.arrow(cp, light),
         0x25B2 | 0x25B6 | 0x25BC | 0x25C0 => canvas.triangle(cp),
+        0x2800..=0x28FF => canvas.braille((cp - 0x2800) as u8),
         _ => return None,
     }
     Some(RasterizedGlyph {
@@ -92,6 +98,26 @@ impl Canvas {
                 let pixel = &mut self.data[row + x as usize];
                 *pixel = (*pixel).max(alpha);
             }
+        }
+    }
+
+    /// Braille dots: bit 0 to 7 are dots 1 to 8, in two columns of four rows.
+    /// Dots fill their share of the cell less a gap, so graphs drawn with them
+    /// keep an even spacing across neighboring cells.
+    fn braille(&mut self, dots: u8) {
+        const POSITIONS: [(i32, i32); 8] = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (0, 3), (1, 3)];
+        let (w, h) = (self.width as i32, self.height as i32);
+        let column = |i: i32| i * w / 2;
+        let row = |i: i32| i * h / 4;
+        for (bit, (col, line)) in POSITIONS.into_iter().enumerate() {
+            if dots & (1 << bit) == 0 {
+                continue;
+            }
+            let (x0, x1, y0, y1) = (column(col), column(col + 1), row(line), row(line + 1));
+            // A gap of a quarter of the dot's share on each axis, split around it.
+            let gap_x = ((x1 - x0) / 4).max(1);
+            let gap_y = ((y1 - y0) / 4).max(1);
+            self.rect(x0 + gap_x / 2, y0 + gap_y / 2, x1 - (gap_x - gap_x / 2), y1 - (gap_y - gap_y / 2), 255);
         }
     }
 
@@ -376,6 +402,21 @@ mod tests {
         // The head narrows toward the tip on the right.
         let column = |x: usize| (0..20).filter(|y| right[y * 10 + x] > 0).count();
         assert!(column(8) < column(6), "tip {} base {}", column(8), column(6));
+    }
+
+    #[test]
+    fn braille_dots_sit_in_their_grid_positions() {
+        let at = |data: &[u8], x: usize, y: usize| data[y * 10 + x];
+        // Dot 1 top left, dot 8 bottom right; each fills the middle of its 5x5 share.
+        let first = coverage('⠁');
+        assert_eq!((at(&first, 2, 2), at(&first, 7, 2), at(&first, 2, 17)), (255, 0, 0));
+        let last = coverage('⢀');
+        assert_eq!((at(&last, 7, 17), at(&last, 2, 17), at(&last, 7, 2)), (255, 0, 0));
+        // All dots: separated by gaps, never touching the neighbor dot.
+        let full = coverage('⣿');
+        assert_eq!(at(&full, 2, 7), 255);
+        assert!((0..10).any(|x| at(&full, x, 5 * 2 - 1) == 0 || at(&full, x, 5) == 0));
+        assert!(coverage('⠀').iter().all(|&a| a == 0), "blank pattern stays empty");
     }
 
     #[test]

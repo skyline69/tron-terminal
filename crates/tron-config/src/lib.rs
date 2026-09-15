@@ -1,7 +1,7 @@
 //! User configuration.
 //!
-//! The config directory is located with `etcetera`: `$XDG_CONFIG_HOME/tron` on
-//! Linux, usually `~/.config/tron`. `TRON_CONFIG_DIR` overrides it.
+//! The config directory is `$XDG_CONFIG_HOME/tron`, usually `~/.config/tron`, on
+//! Linux and macOS alike. `TRON_CONFIG_DIR` overrides it.
 //!
 //! ```text
 //! ~/.config/tron/
@@ -55,12 +55,12 @@ pub struct Paths {
 
 impl Paths {
     pub fn discover() -> Option<Self> {
-        let strategy = etcetera::choose_app_strategy(AppStrategyArgs {
-            top_level_domain: "dev".into(),
-            author: "tron".into(),
-            app_name: "tron".into(),
-        })
-        .ok()?;
+        let args = AppStrategyArgs { top_level_domain: "dev".into(), author: "tron".into(), app_name: "tron".into() };
+        #[cfg(not(target_os = "macos"))]
+        let strategy = etcetera::choose_app_strategy(args).ok()?;
+        // Not ~/Library: terminal configuration on macOS lives with the other dotfiles.
+        #[cfg(target_os = "macos")]
+        let strategy = etcetera::app_strategy::Xdg::new(args).ok()?;
         let config_dir =
             std::env::var_os("TRON_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| strategy.config_dir());
         Some(Self::with_dirs(config_dir, strategy.data_dir()))
@@ -360,6 +360,18 @@ pub struct WindowConfig {
     pub rows: u16,
     /// Close the window when the shell exits.
     pub close_on_exit: bool,
+    /// macOS: Option keys that act as Alt. The others type special characters.
+    pub option_as_alt: OptionAsAlt,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionAsAlt {
+    #[default]
+    None,
+    Left,
+    Right,
+    Both,
 }
 
 impl Default for WindowConfig {
@@ -374,10 +386,12 @@ impl Default for WindowConfig {
             columns: 100,
             rows: 30,
             close_on_exit: true,
+            option_as_alt: OptionAsAlt::None,
         }
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("ctrl+shift+c", "copy"),
     ("ctrl+shift+v", "paste"),
@@ -397,6 +411,41 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("ctrl+shift+n", "new_window"),
     ("ctrl+shift+comma", "reload_config"),
 ];
+
+/// The Command key shortcuts of other macOS terminals.
+#[cfg(target_os = "macos")]
+const DEFAULT_BINDINGS: &[(&str, &str)] = &[
+    ("super+c", "copy"),
+    ("super+v", "paste"),
+    ("shift+insert", "paste_selection"),
+    ("super+equal", "increase_font_size"),
+    ("super+plus", "increase_font_size"),
+    ("super+minus", "decrease_font_size"),
+    ("super+0", "reset_font_size"),
+    ("shift+page_up", "scroll_page_up"),
+    ("shift+page_down", "scroll_page_down"),
+    ("super+page_up", "scroll_page_up"),
+    ("super+page_down", "scroll_page_down"),
+    ("super+home", "scroll_to_top"),
+    ("super+end", "scroll_to_bottom"),
+    ("super+k", "clear_scrollback"),
+    ("super+f", "search"),
+    ("super+up", "scroll_to_previous_prompt"),
+    ("super+down", "scroll_to_next_prompt"),
+    ("super+shift+up", "select_command_output"),
+    ("super+n", "new_window"),
+    ("super+comma", "reload_config"),
+];
+
+#[cfg(not(target_os = "macos"))]
+const OPEN_COMMAND: &str = "xdg-open";
+#[cfg(target_os = "macos")]
+const OPEN_COMMAND: &str = "open";
+
+#[cfg(not(target_os = "macos"))]
+const NOTIFY_COMMAND: &str = "notify-send";
+#[cfg(target_os = "macos")]
+const NOTIFY_COMMAND: &str = "osascript";
 
 /// A key with modifiers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -584,13 +633,13 @@ pub struct BellConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LinkConfig {
-    /// Program that opens links clicked with Ctrl.
+    /// Program that opens links clicked with Ctrl (Command on macOS).
     pub open_command: String,
 }
 
 impl Default for LinkConfig {
     fn default() -> Self {
-        Self { open_command: "xdg-open".into() }
+        Self { open_command: OPEN_COMMAND.into() }
     }
 }
 
@@ -610,13 +659,14 @@ pub struct NotificationConfig {
     /// When desktop notifications from applications (OSC 9, 99, 777) are shown.
     /// Applications using OSC 99 may ask for a stricter condition.
     pub mode: NotifyMode,
-    /// Program run as `command --app-name tron -- title body`.
+    /// Program run as `command --app-name tron -- title body`. `osascript`
+    /// shows a macOS notification instead.
     pub command: String,
 }
 
 impl Default for NotificationConfig {
     fn default() -> Self {
-        Self { mode: NotifyMode::Unfocused, command: "notify-send".into() }
+        Self { mode: NotifyMode::Unfocused, command: NOTIFY_COMMAND.into() }
     }
 }
 
@@ -966,28 +1016,32 @@ mod tests {
 
     #[test]
     fn keybindings_merge_with_defaults() {
-        let config = Config::parse(
+        #[cfg(not(target_os = "macos"))]
+        let (copy, paste, previous_prompt) = ("ctrl+shift+c", "ctrl+shift+v", "ctrl+shift+z");
+        #[cfg(target_os = "macos")]
+        let (copy, paste, previous_prompt) = ("super+c", "super+v", "super+up");
+        let config = Config::parse(&format!(
             r#"
             [keybindings]
-            "ctrl+shift+c" = "none"
+            "{copy}" = "none"
             "alt+enter" = "new_window"
             "ctrl++" = "increase_font_size"
             "super+k" = "text:\u0015"
             "ctrl+bogus" = "copy"
             "#,
-        )
+        ))
         .unwrap();
         let (bindings, errors) = config.bindings();
         let find = |combo: &str| {
             let combo = KeyCombo::parse(combo).unwrap();
             bindings.iter().find(|b| b.combo == combo).map(|b| b.action.clone())
         };
-        assert_eq!(find("ctrl+shift+c"), None);
-        assert_eq!(find("ctrl+shift+v"), Some(Action::Paste));
+        assert_eq!(find(copy), None);
+        assert_eq!(find(paste), Some(Action::Paste));
         assert_eq!(find("Alt+Return"), Some(Action::NewWindow));
         assert_eq!(find("ctrl+plus"), Some(Action::IncreaseFontSize));
         assert_eq!(find("super+k"), Some(Action::SendText("\u{15}".into())));
-        assert_eq!(find("ctrl+shift+z"), Some(Action::ScrollToPreviousPrompt));
+        assert_eq!(find(previous_prompt), Some(Action::ScrollToPreviousPrompt));
         assert_eq!(errors.len(), 1);
     }
 

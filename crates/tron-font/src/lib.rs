@@ -11,8 +11,8 @@ use foldhash::HashMap;
 use std::str::FromStr;
 
 use fontique::{
-    Attributes, Blob, Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, GenericFamily, QueryFamily,
-    QueryStatus, SourceCache, Synthesis,
+    Attributes, Blob, Collection, CollectionOptions, FallbackKey, FontStyle, FontWeight, FontWidth, GenericFamily,
+    QueryFamily, QueryStatus, Script, SourceCache, Synthesis,
 };
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
@@ -210,8 +210,9 @@ impl FontSystem {
             "serif" => Some(GenericFamily::Serif),
             _ => None,
         };
-        let mut families = Vec::with_capacity(2);
+        let mut families = Vec::with_capacity(3);
         match generic {
+            Some(GenericFamily::Monospace) => {}
             Some(generic) => families.push(QueryFamily::Generic(generic)),
             None => {
                 let id = self.collection.family_id(&self.family);
@@ -222,8 +223,24 @@ impl FontSystem {
                 }
             }
         }
-        families.push(QueryFamily::Generic(GenericFamily::Monospace));
+        self.push_monospace(&mut families);
         families
+    }
+
+    /// The system monospace family.
+    #[cfg(not(target_os = "macos"))]
+    fn push_monospace(&mut self, families: &mut Vec<QueryFamily<'static>>) {
+        families.push(QueryFamily::Generic(GenericFamily::Monospace));
+    }
+
+    /// The system monospace family. fontique resolves it to Courier on macOS,
+    /// where terminals use Menlo.
+    #[cfg(target_os = "macos")]
+    fn push_monospace(&mut self, families: &mut Vec<QueryFamily<'static>>) {
+        if let Some(id) = self.collection.family_id("Menlo") {
+            families.push(QueryFamily::Id(id));
+        }
+        families.push(QueryFamily::Generic(GenericFamily::Monospace));
     }
 
     /// Resolves the primary face of each style from the configured families.
@@ -445,6 +462,11 @@ impl FontSystem {
         let mut query = self.collection.query(&mut self.source_cache);
         query.set_families(families.iter().copied());
         query.set_attributes(style.attributes());
+        // After the families, the system's fallback fonts for the character's
+        // script. On macOS the generic families alone miss scripts such as CJK.
+        if let Some(ch) = ch {
+            query.set_fallbacks(FallbackKey::new(script_of(ch), None));
+        }
         query.matches_with(|font| {
             if let Some(ch) = ch {
                 let covered = FontRef::from_index(font.blob.data(), font.index as usize)
@@ -621,6 +643,33 @@ fn downscale(glyph: &RasterizedGlyph, scale: f32) -> RasterizedGlyph {
         top: (glyph.top as f32 * scale).round() as i32,
         data,
     }
+}
+
+/// The Unicode script of `ch`, as the shaper determines it.
+fn script_of(ch: char) -> Script {
+    let mut buffer = harfrust::UnicodeBuffer::new();
+    buffer.add(ch, 0);
+    buffer.guess_segment_properties();
+    Script::from_bytes(buffer.script().tag().to_be_bytes())
+}
+
+/// Installed families whose default face is monospaced, for systems without `fc-list`.
+#[cfg(target_os = "macos")]
+pub fn monospace_families() -> Vec<String> {
+    let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: true });
+    let mut cache = SourceCache::default();
+    // Names starting with a dot are private system fonts.
+    let names: Vec<String> =
+        collection.family_names().filter(|name| !name.starts_with('.')).map(str::to_owned).collect();
+    names
+        .into_iter()
+        .filter(|name| {
+            let Some(family) = collection.family_by_name(name) else { return false };
+            let Some(font) = family.default_font() else { return false };
+            let Some(blob) = font.load(Some(&mut cache)) else { return false };
+            FontRef::from_index(blob.as_ref(), font.index() as usize).is_some_and(|f| f.metrics(&[]).is_monospace)
+        })
+        .collect()
 }
 
 #[cfg(test)]

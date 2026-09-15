@@ -635,6 +635,9 @@ impl Parser {
 /// Length of the leading run of printable ASCII bytes (`0x20..=0x7e`).
 #[inline]
 fn printable_ascii_len(bytes: &[u8]) -> usize {
+    // Only the SSE2 path advances `i`. Elsewhere, like Apple Silicon, LLVM
+    // vectorizes the byte loop as well as hand-written NEON did.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
     let mut i = 0;
     #[cfg(target_arch = "x86_64")]
     {
@@ -664,6 +667,7 @@ fn printable_ascii_len(bytes: &[u8]) -> usize {
 /// Index of the first C0 control or DEL byte, or the length when there is none.
 #[inline]
 fn control_position(bytes: &[u8]) -> usize {
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
     let mut i = 0;
     #[cfg(target_arch = "x86_64")]
     {

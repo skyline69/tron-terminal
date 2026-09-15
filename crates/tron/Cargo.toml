@@ -25,7 +25,12 @@ parking_lot.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
-smithay-clipboard.workspace = true
 arboard.workspace = true
 accesskit.workspace = true
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+smithay-clipboard.workspace = true
 accesskit_unix.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+accesskit_macos.workspace = true

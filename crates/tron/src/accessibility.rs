@@ -1,4 +1,4 @@
-//! Screen reader support through AccessKit (AT-SPI on Linux).
+//! Screen reader support through AccessKit (AT-SPI on Linux, NSAccessibility on macOS).
 //!
 //! The tree is a window holding a terminal node with one text run per visible
 //! row. It is built from the render snapshot, only while an assistive
@@ -15,6 +15,17 @@ use accesskit::{
 };
 use tron_core::{Flags, Row, Snapshot};
 use winit::event_loop::EventLoopProxy;
+use winit::window::Window;
+
+#[cfg(not(target_os = "macos"))]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(not(target_os = "macos"))]
+use linux::Adapter;
+#[cfg(target_os = "macos")]
+use macos::Adapter;
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 const WINDOW: NodeId = NodeId(0);
@@ -66,26 +77,22 @@ impl ActionHandler for IgnoreActions {
 }
 
 pub struct Accessibility {
-    adapter: accesskit_unix::Adapter,
+    adapter: Adapter,
     flags: Arc<AdapterFlags>,
     last_sent: Option<Instant>,
     last_hash: u64,
 }
 
 impl Accessibility {
-    /// Registers with the accessibility bus in the background. Never blocks.
-    pub fn new(proxy: EventLoopProxy) -> Self {
+    /// Connects the window to the platform's accessibility API. Never blocks.
+    pub fn new(proxy: EventLoopProxy, window: &dyn Window) -> Option<Self> {
         let flags = Arc::new(AdapterFlags::default());
-        let adapter = accesskit_unix::Adapter::new(
-            Activation { flags: flags.clone(), proxy },
-            IgnoreActions,
-            Deactivation(flags.clone()),
-        );
-        Self { adapter, flags, last_sent: None, last_hash: 0 }
+        let adapter = Adapter::new(Activation { flags: flags.clone(), proxy }, Deactivation(flags.clone()), window)?;
+        Some(Self { adapter, flags, last_sent: None, last_hash: 0 })
     }
 
     pub fn set_focused(&mut self, focused: bool) {
-        self.adapter.update_window_focus_state(focused);
+        self.adapter.set_focused(focused);
     }
 
     /// Sends the screen when it changed. Returns when to call again if an

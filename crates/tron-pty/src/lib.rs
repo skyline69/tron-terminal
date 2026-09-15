@@ -1,6 +1,6 @@
 //! Pseudo terminal creation and child process management.
 //!
-//! Linux first. Uses `rustix` for the pty syscalls, no libc bindings.
+//! Linux and macOS. Uses `rustix` for the pty syscalls, no libc bindings.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -146,6 +146,8 @@ impl Pty {
         if let Some(cwd) = &options.cwd {
             command.current_dir(cwd);
         }
+        #[cfg(target_os = "macos")]
+        macos_session(&mut command, options, &program);
 
         // SAFETY: the closure only performs async-signal-safe syscalls.
         unsafe {
@@ -193,7 +195,7 @@ impl Drop for Pty {
 }
 
 fn open_pair(size: WindowSize) -> io::Result<(OwnedFd, OwnedFd)> {
-    let master = rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
+    let master = open_master()?;
     rustix::pty::grantpt(&master)?;
     rustix::pty::unlockpt(&master)?;
     let name = rustix::pty::ptsname(&master, Vec::new())?;
@@ -206,7 +208,42 @@ fn open_pair(size: WindowSize) -> io::Result<(OwnedFd, OwnedFd)> {
     Ok((master, slave))
 }
 
-/// Linux reports `EIO` on the master once the child side is gone.
+#[cfg(not(target_os = "macos"))]
+fn open_master() -> io::Result<OwnedFd> {
+    Ok(rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?)
+}
+
+/// macOS `posix_openpt` takes no `O_CLOEXEC`, so the flag is set afterwards.
+#[cfg(target_os = "macos")]
+fn open_master() -> io::Result<OwnedFd> {
+    let master = rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+    rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
+    Ok(master)
+}
+
+/// Starts the default shell the way macOS terminals do: as a login shell, which
+/// sets up `PATH` through `path_helper`, and in the home directory when tron was
+/// launched from Finder or the Dock with `/` as its directory.
+#[cfg(target_os = "macos")]
+fn macos_session(command: &mut Command, options: &SpawnOptions, program: &str) {
+    if options.program.is_none()
+        && options.args.is_empty()
+        && let Some(name) = std::path::Path::new(program).file_name()
+    {
+        let mut arg0 = OsString::from("-");
+        arg0.push(name);
+        command.arg0(arg0);
+    }
+    if options.cwd.is_none()
+        && std::env::current_dir().is_ok_and(|dir| dir == std::path::Path::new("/"))
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        command.current_dir(home);
+    }
+}
+
+/// Linux reports `EIO` on the master once the child side is gone; macOS reports
+/// end of file or `EIO`.
 pub fn is_closed_error(error: &io::Error) -> bool {
     error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error())
 }
@@ -223,7 +260,8 @@ mod tests {
             program: Some("/bin/sh".into()),
             args: vec![
                 "-c".into(),
-                "printf 'cols=%s' \"$(tput cols 2>/dev/null || stty size | cut -d' ' -f2)\"".into(),
+                // stty reads stdin, the pty. macOS tput reads stdout, a pipe inside $(...).
+                "printf 'cols=%s' \"$(stty size | cut -d' ' -f2)\"".into(),
             ],
             ..Default::default()
         };

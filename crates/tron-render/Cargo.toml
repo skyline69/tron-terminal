@@ -20,3 +20,6 @@ bytemuck.workspace = true
 log.workspace = true
 thiserror.workspace = true
 foldhash.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-quartz-core.workspace = true

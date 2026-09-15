@@ -9,6 +9,7 @@
 
 mod atlas;
 mod cells;
+mod compile;
 mod images;
 mod post;
 
@@ -21,13 +22,26 @@ use tron_core::{Point, Snapshot};
 use tron_font::{CellMetrics, FontSystem};
 
 use cells::CellPipeline;
+use compile::Compiler;
 use images::{ImagePipeline, Layer};
-use post::{PostChain, PostUniforms};
+use post::{Layouts, PostChain, PostUniforms};
 
 pub use post::PostShader;
 
 /// Effects shown only while tron's startup screen runs.
 const STARTUP_SHADER: &str = include_str!("startup.wgsl");
+/// Compiler chain ids.
+const USER_CHAIN: usize = 0;
+const STARTUP_CHAIN: usize = 1;
+
+/// What [`Renderer::poll_shaders`] installed.
+#[derive(Debug, Default)]
+pub struct InstalledShaders {
+    /// A shader chain changed, so the window needs a redraw.
+    pub any: bool,
+    /// Compile errors of the user's chain, when that chain changed.
+    pub user_errors: Option<Vec<String>>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
@@ -235,6 +249,60 @@ pub struct Renderer {
     pipeline_cache: Option<PipelineCacheFile>,
     capture: Option<PathBuf>,
     device_lost: Arc<AtomicBool>,
+    /// Alpha modes the surface supports.
+    alpha_modes: Vec<wgpu::CompositeAlphaMode>,
+    compiler: Compiler,
+    /// The GPU has not finished the last submitted frame.
+    gpu_busy: Arc<AtomicBool>,
+    /// The startup screen's shader was requested.
+    startup_enabled: bool,
+}
+
+/// Runs `f` with the Metal layer behind a surface.
+#[cfg(target_os = "macos")]
+fn metal_layer(surface: &wgpu::Surface<'_>, f: impl FnOnce(&objc2_quartz_core::CAMetalLayer)) {
+    // SAFETY: the layer is only configured here, never released or replaced.
+    match unsafe { surface.as_hal::<wgpu::hal::api::Metal>() } {
+        Some(surface) => f(&surface.render_layer().lock()),
+        None => log::debug!("surface has no Metal layer"),
+    }
+}
+
+/// Mailbox where available: frames are paced by tron, never blocking on vsync.
+#[cfg(not(target_os = "macos"))]
+fn present_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    if modes.contains(&wgpu::PresentMode::Mailbox) { wgpu::PresentMode::Mailbox } else { wgpu::PresentMode::Fifo }
+}
+
+/// Metal has no Mailbox. With Fifo, getting the next drawable blocks the main
+/// thread until the display's next refresh, which stalls input and live resizing
+/// by up to a frame. Immediate turns display sync off; windows still go through
+/// the compositor, so frames do not tear, and tron paces them to the display.
+#[cfg(target_os = "macos")]
+fn present_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    if modes.contains(&wgpu::PresentMode::Immediate) { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::Fifo }
+}
+
+/// Premultiplied output whenever possible, so opacity can change at runtime.
+#[cfg(not(target_os = "macos"))]
+fn alpha_mode(modes: &[wgpu::CompositeAlphaMode], _opacity: f32) -> wgpu::CompositeAlphaMode {
+    [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::Opaque]
+        .into_iter()
+        .find(|mode| modes.contains(mode))
+        .unwrap_or(modes[0])
+}
+
+/// Metal offers Opaque and PostMultiplied. PostMultiplied only marks the layer
+/// non-opaque, and Core Animation composites it as premultiplied, which matches
+/// the output. The window server has to blend non-opaque layers, so it is only
+/// used while the background is translucent.
+#[cfg(target_os = "macos")]
+fn alpha_mode(modes: &[wgpu::CompositeAlphaMode], opacity: f32) -> wgpu::CompositeAlphaMode {
+    if opacity < 1.0 && modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+        wgpu::CompositeAlphaMode::PostMultiplied
+    } else {
+        wgpu::CompositeAlphaMode::Opaque
+    }
 }
 
 impl Renderer {
@@ -290,30 +358,27 @@ impl Renderer {
             surface.get_default_config(&adapter, width.max(1), height.max(1)).ok_or(RenderError::Unsupported)?;
         config.format = format;
         config.view_formats.clear();
-        config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
-        };
-        // Premultiplied output whenever possible, so opacity can change at runtime.
-        config.alpha_mode = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-            wgpu::CompositeAlphaMode::PreMultiplied
-        } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
-            wgpu::CompositeAlphaMode::Opaque
-        } else {
-            caps.alpha_modes[0]
-        };
-        let _ = theme.opacity;
+        config.present_mode = present_mode(&caps.present_modes);
+        config.alpha_mode = alpha_mode(&caps.alpha_modes, theme.opacity);
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
+        // While a window resizes, a frame of the old size stays at the top left
+        // instead of being stretched over the new size.
+        #[cfg(target_os = "macos")]
+        metal_layer(&surface, |layer| {
+            // SAFETY: a constant string defined by Core Animation.
+            layer.setContentsGravity(unsafe { objc2_quartz_core::kCAGravityTopLeft });
+        });
         log::debug!("gpu init: surface configured after {:?}", started.elapsed());
 
         let cells = CellPipeline::new(&device, format, metrics, padding, cache);
         log::debug!("gpu init: cell pipeline after {:?}", started.elapsed());
         let images = ImagePipeline::new(&device, format, cache);
         log::debug!("gpu init: image pipeline after {:?}", started.elapsed());
-        let mut post = PostChain::new(&device, format, cache);
-        let startup = PostChain::new(&device, format, cache);
+        let layouts = Layouts::new(&device, format, cache);
+        let mut post = PostChain::new(&device, &layouts);
+        let startup = PostChain::new(&device, &layouts);
+        let compiler = Compiler::new(device.clone(), layouts);
         post.resize(&device, config.width, config.height);
         log::debug!("gpu init: post chain after {:?}", started.elapsed());
         if let Some(cache) = &pipeline_cache {
@@ -346,12 +411,16 @@ impl Renderer {
             pipeline_cache,
             capture: None,
             device_lost,
+            alpha_modes: caps.alpha_modes,
+            compiler,
+            gpu_busy: Arc::new(AtomicBool::new(false)),
+            startup_enabled: false,
         })
     }
 
     /// Whether the surface can show a translucent background.
     pub fn supports_transparency(&self) -> bool {
-        self.config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied
+        alpha_mode(&self.alpha_modes, 0.0) != wgpu::CompositeAlphaMode::Opaque
     }
 
     /// True after the GPU device was lost. The renderer must be recreated.
@@ -444,41 +513,73 @@ impl Renderer {
 
     pub fn set_theme(&mut self, theme: Theme) {
         if theme != self.theme {
+            let alpha_mode = alpha_mode(&self.alpha_modes, theme.opacity);
+            if alpha_mode != self.config.alpha_mode {
+                self.config.alpha_mode = alpha_mode;
+                self.surface.configure(&self.device, &self.config);
+            }
             self.theme = theme;
             self.cells.invalidate();
         }
     }
 
-    /// Replaces the post-processing chain. Returns compile errors.
-    /// `animation`: `Some(true)` always redraw, `Some(false)` never, `None` auto.
-    pub fn set_shaders(&mut self, shaders: &[PostShader], animation: Option<bool>) -> Vec<String> {
-        let errors = self.post.set_shaders(&self.device, shaders, animation);
+    /// Replaces the post-processing chain once its shaders compiled in the
+    /// background; see [`Self::poll_shaders`]. The current chain keeps drawing
+    /// until then. `animation`: `Some(true)` always redraw, `Some(false)` never, `None` auto.
+    pub fn set_shaders(&mut self, shaders: &[PostShader], animation: Option<bool>) {
         self.post.resize(&self.device, self.config.width, self.config.height);
-        self.post_frame = 0;
-        if !shaders.is_empty()
-            && let Some(cache) = &self.pipeline_cache
-        {
-            cache.save();
-        }
-        errors
+        self.post.request(&self.device, &self.compiler, USER_CHAIN, shaders, animation);
     }
 
-    /// Loads or unloads the startup screen's shader. Returns whether it runs.
+    /// Loads or unloads the startup screen's shader. Loading finishes in the background.
     pub fn set_startup_shader(&mut self, enabled: bool) -> bool {
-        if enabled == self.startup.is_active() {
+        if enabled == self.startup_enabled {
             return enabled;
         }
+        self.startup_enabled = enabled;
         let shaders: Vec<PostShader> = if enabled {
             vec![PostShader { name: "startup".into(), source: STARTUP_SHADER.into() }]
         } else {
             Vec::new()
         };
-        for error in self.startup.set_shaders(&self.device, &shaders, Some(true)) {
-            log::error!("{error}");
-        }
         self.startup.resize(&self.device, self.config.width, self.config.height);
-        self.startup_frame = 0;
-        self.startup.is_active()
+        self.startup.request(&self.device, &self.compiler, STARTUP_CHAIN, &shaders, Some(true));
+        enabled
+    }
+
+    /// Called from the compiler thread when compiled shaders are ready for
+    /// [`Self::poll_shaders`].
+    pub fn set_shader_notify(&self, notify: impl Fn() + Send + 'static) {
+        self.compiler.set_notify(notify);
+    }
+
+    /// Compiles shaders in the background ahead of use, so they switch instantly later.
+    pub fn warm_shaders(&self, shaders: Vec<PostShader>) {
+        self.compiler.warm(shaders);
+    }
+
+    /// Installs shader chains that finished compiling.
+    pub fn poll_shaders(&mut self) -> InstalledShaders {
+        let mut installed = InstalledShaders::default();
+        for compiled in self.compiler.take_results() {
+            let id = compiled.chain;
+            let chain = if id == STARTUP_CHAIN { &mut self.startup } else { &mut self.post };
+            let Some(errors) = chain.apply(&self.device, compiled) else { continue };
+            installed.any = true;
+            if id == STARTUP_CHAIN {
+                self.startup_frame = 0;
+                for error in errors {
+                    log::error!("{error}");
+                }
+            } else {
+                self.post_frame = 0;
+                installed.user_errors = Some(errors);
+            }
+            if let Some(cache) = &self.pipeline_cache {
+                cache.save();
+            }
+        }
+        installed
     }
 
     /// Scene and parameters for the startup screen's shader.
@@ -525,19 +626,27 @@ impl Renderer {
         );
     }
 
-    /// Presents the prepared frame.
-    pub fn render(&mut self) {
+    /// Presents the prepared frame. Returns false when no frame was presented,
+    /// because the GPU is still drawing the previous one or the surface is not
+    /// ready; call again shortly.
+    pub fn render(&mut self) -> bool {
+        // An unfinished frame holds a drawable, and waiting for the next one would
+        // block the event loop for as long as a heavy shader takes. Skip instead.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        if self.gpu_busy.load(Ordering::Acquire) {
+            return false;
+        }
         let (frame, reconfigure) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => (frame, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => (frame, true),
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return false,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return false;
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 log::error!("surface validation error");
-                return;
+                return false;
             }
         };
         let viewport = [self.config.width as f32, self.config.height as f32];
@@ -642,6 +751,9 @@ impl Renderer {
             (path, buffer, padded)
         });
         self.queue.submit([encoder.finish()]);
+        self.gpu_busy.store(true, Ordering::Release);
+        let busy = self.gpu_busy.clone();
+        self.queue.on_submitted_work_done(move || busy.store(false, Ordering::Release));
         if let Some((path, buffer, padded)) = capture {
             match self.save_capture(&buffer, padded, &path) {
                 Ok(()) => log::info!("saved frame to {}", path.display()),
@@ -652,6 +764,7 @@ impl Renderer {
         if reconfigure {
             self.surface.configure(&self.device, &self.config);
         }
+        true
     }
 
     fn save_capture(&self, buffer: &wgpu::Buffer, padded_row: u32, path: &std::path::Path) -> Result<(), String> {

@@ -52,6 +52,9 @@ columns = 100
 rows = 30
 # Close the window when the shell exits. false keeps it open until a key press.
 close_on_exit = true
+# macOS: Option keys that act as Alt: none, left, right or both. The others
+# type special characters.
+option_as_alt = "none"
 
 [cursor]
 # block, beam or underline
@@ -114,15 +117,17 @@ file_transfer = true
 mode = "attention"
 
 [links]
-# Program that opens links clicked with Ctrl.
-open_command = "xdg-open"
+# Program that opens links clicked with Ctrl (Command on macOS).
+# Default: xdg-open, open on macOS.
+# open_command = "xdg-open"
 
 [notifications]
 # Desktop notifications from applications (OSC 9, 99 and 777): never,
 # unfocused (only while the window has no focus) or always.
 mode = "unfocused"
-# Run as: command --app-name tron -- title body
-command = "notify-send"
+# Run as: command --app-name tron -- title body. Default: notify-send, or
+# osascript on macOS, which shows the notification itself.
+# command = "notify-send"
 
 # Key combination = action. Entries override the defaults, "none" removes one.
 # Actions: copy, paste, paste_selection, increase_font_size, decrease_font_size,
@@ -130,6 +135,7 @@ command = "notify-send"
 # scroll_page_down, scroll_to_top, scroll_to_bottom, clear_scrollback,
 # scroll_to_previous_prompt, scroll_to_next_prompt, select_command_output,
 # copy_command_output, search, new_window, reload_config, text:<text to send>, none.
+# The defaults on macOS use Command ("super+c", "super+v", ...) instead.
 [keybindings]
 # "ctrl+shift+c" = "copy"
 # "ctrl+shift+v" = "paste"

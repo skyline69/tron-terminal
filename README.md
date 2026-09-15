@@ -21,21 +21,27 @@ A GPU accelerated terminal emulator written in Rust. Fast first, then beautiful.
 - **Images and video.** `chafa`, `kitten icat`-style tools, `yazi` previews and
   `mpv --vo=kitty` work out of the box.
 
-Linux and Wayland are the primary platform. Tabs and splits are out of scope:
-use your window manager or a multiplexer.
+Linux (Wayland and X11) and macOS are supported. Tabs and splits are out of
+scope: use your window manager or a multiplexer.
 
 ## Building
 
-Requires Rust 1.98 or newer and the development files for Wayland,
-xkbcommon and fontconfig. `tic` from ncurses is used at runtime to install the
-bundled terminfo entry.
+Requires Rust 1.98 or newer. `tic` from ncurses is used at runtime to install
+the bundled terminfo entry.
+
+On Linux, install the development files for Wayland, xkbcommon and fontconfig:
 
 ```sh
 # Fedora
 sudo dnf install wayland-devel libxkbcommon-devel fontconfig-devel ncurses
 # Debian / Ubuntu
 sudo apt install libwayland-dev libxkbcommon-dev libfontconfig-dev ncurses-bin
+```
 
+macOS needs nothing beyond the Xcode command line tools; `tic` ships with the
+system. Rendering goes through Metal.
+
+```sh
 cargo build --release
 ./target/release/tron
 ```
@@ -73,6 +79,14 @@ The startup screen opens by itself the first time tron starts. Set
 | `Ctrl+Shift+,` | Reload configuration |
 | `Ctrl+click` | Open a link |
 
+On macOS the defaults use Command instead: `Cmd+C` / `Cmd+V`, `Cmd+=` /
+`Cmd+-` / `Cmd+0`, `Cmd+F` search, `Cmd+K` clear scrollback, `Cmd+Up` /
+`Cmd+Down` previous / next prompt, `Cmd+Shift+Up` select command output,
+`Cmd+N` new window, `Cmd+,` reload configuration and `Cmd+click` to open a
+link. Option types special characters unless `option_as_alt` under `[window]`
+is `left`, `right` or `both`. The shell starts as a login shell, like in
+Terminal.app, and middle click pastes tron's own selection.
+
 Mouse: drag to select, double click for words, triple click for lines,
 `Alt`+drag for a block, `Shift`+click to extend. Hold `Shift` to select text in
 applications that use the mouse. Dropping files inserts their shell-quoted
@@ -92,12 +106,14 @@ started from, such as `TMUX`, are removed.
 
 ### Accessibility
 
-tron exposes the screen to screen readers such as Orca over AT-SPI. Set
+tron exposes the screen to screen readers such as Orca over AT-SPI, and to
+VoiceOver on macOS. Set
 `TRON_ACCESSIBILITY=0` to turn it off.
 
 ## Configuration
 
-tron reads `~/.config/tron/config.toml` (the XDG config directory) and applies
+tron reads `~/.config/tron/config.toml` (the XDG config directory, also on
+macOS) and applies
 changes while running. The first launch writes the documented
 [`examples/config.toml`](examples/config.toml) there. Every key is optional.
 
@@ -185,8 +201,8 @@ preexec() { print -n '\e]133;C\e\\' }
 ## Notifications
 
 Applications can show desktop notifications with OSC 9, OSC 777 (`notify`)
-and kitty's OSC 99. tron runs `notify-send` for them, by default only while
-its window is unfocused:
+and kitty's OSC 99. tron runs `notify-send` for them (`osascript` on macOS),
+by default only while its window is unfocused:
 
 ```sh
 printf '\e]777;notify;Build;finished\e\\'
