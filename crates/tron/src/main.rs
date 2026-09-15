@@ -351,6 +351,8 @@ impl App {
             .with_window_icon(window_icon());
         #[cfg(target_os = "macos")]
         let attributes = macos::window_attributes(attributes, config.window.option_as_alt);
+        #[cfg(not(target_os = "macos"))]
+        let attributes = with_app_id(attributes, event_loop);
         let window: Arc<dyn Window> = Arc::from(event_loop.create_window(attributes)?);
         window.set_cursor(CursorIcon::Text.into());
         log::debug!("startup: window created after {:?}", started.elapsed());
@@ -2019,6 +2021,22 @@ fn spawn_detached(mut command: Command) {
             });
         }
         Err(error) => log::error!("failed to run {:?}: {error}", command.get_program()),
+    }
+}
+
+/// Names the window after the desktop entry (Wayland app id, X11 `WM_CLASS`), so
+/// launchers, task bars and desktop search match windows to it and show its icon.
+#[cfg(not(target_os = "macos"))]
+fn with_app_id(attributes: WindowAttributes, event_loop: &dyn ActiveEventLoop) -> WindowAttributes {
+    use winit::platform::wayland::{ActiveEventLoopExtWayland, WindowAttributesWayland};
+    use winit::platform::x11::{ActiveEventLoopExtX11, WindowAttributesX11};
+    const APP_ID: &str = "dev.tron.Terminal";
+    if event_loop.is_wayland() {
+        attributes.with_platform_attributes(Box::new(WindowAttributesWayland::default().with_name(APP_ID, "tron")))
+    } else if event_loop.is_x11() {
+        attributes.with_platform_attributes(Box::new(WindowAttributesX11::default().with_name(APP_ID, "tron")))
+    } else {
+        attributes
     }
 }
 

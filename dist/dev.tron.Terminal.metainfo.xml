@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata: lets software centers and desktop search describe tron. -->
+<component type="desktop-application">
+  <id>dev.tron.Terminal</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>tron</name>
+  <summary>Fast GPU accelerated terminal emulator</summary>
+  <developer id="io.github.skyline69">
+    <name>Ö. Efe D.</name>
+  </developer>
+  <description>
+    <p>
+      tron is a terminal emulator written in Rust that puts speed first. It
+      renders on the GPU, launches in about 55 ms and outpaces Alacritty and
+      Ghostty in throughput benchmarks.
+    </p>
+    <ul>
+      <li>Ligatures, font fallback, color emoji and right-to-left text</li>
+      <li>WGSL post-processing shaders such as CRT, bloom and cursor trails</li>
+      <li>About 460 built-in color themes and hot reloaded configuration</li>
+      <li>Kitty graphics and keyboard protocols, Sixel and iTerm2 inline images</li>
+      <li>Hyperlinks, desktop notifications, shell integration and screen reader support</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">dev.tron.Terminal.desktop</launchable>
+  <icon type="stock">dev.tron.Terminal</icon>
+  <url type="homepage">https://github.com/skyline69/tron-terminal</url>
+  <url type="bugtracker">https://github.com/skyline69/tron-terminal/issues</url>
+  <url type="vcs-browser">https://github.com/skyline69/tron-terminal</url>
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+  <keywords>
+    <keyword>terminal</keyword>
+    <keyword>terminal emulator</keyword>
+    <keyword>console</keyword>
+    <keyword>shell</keyword>
+    <keyword>command line</keyword>
+    <keyword>gpu</keyword>
+  </keywords>
+  <provides>
+    <binary>tron</binary>
+  </provides>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <branding>
+    <color type="primary" scheme_preference="light">#4fd6ff</color>
+    <color type="primary" scheme_preference="dark">#3a0c5c</color>
+  </branding>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-09-15"/>
+  </releases>
+</component>

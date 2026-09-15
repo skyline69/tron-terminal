@@ -1,9 +1,16 @@
 [package]
 name = "tron"
+description = "Fast GPU accelerated terminal emulator with WGSL shaders, kitty graphics and Sixel"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["terminal", "terminal-emulator", "gpu", "wgpu", "shaders"]
+categories = ["command-line-utilities", "gui", "rendering"]
 
 [lints]
 workspace = true

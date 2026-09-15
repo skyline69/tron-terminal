@@ -1,14 +1,19 @@
 [Desktop Entry]
 Type=Application
+Version=1.5
 Name=tron
-GenericName=Terminal
-Comment=GPU accelerated terminal emulator
+GenericName=Terminal Emulator
+Comment=Fast GPU accelerated terminal emulator
 Exec=tron
+TryExec=tron
 Icon=dev.tron.Terminal
 Terminal=false
 Categories=System;TerminalEmulator;
-Keywords=terminal;shell;prompt;command;commandline;
-StartupWMClass=tron
+Keywords=terminal;terminal emulator;console;shell;prompt;command;command line;commandline;cli;tty;bash;zsh;fish;gpu;
+StartupNotify=true
+StartupWMClass=dev.tron.Terminal
+X-ExecArg=-e
+X-TerminalArgExec=-e
 Actions=new-window;
 
 [Desktop Action new-window]

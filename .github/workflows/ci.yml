@@ -25,6 +25,8 @@ jobs:
       - uses: taiki-e/install-action@v2.87.12
         with:
           tool: nextest
+      - name: ShellCheck
+        run: shellcheck install.sh
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy

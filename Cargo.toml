@@ -9,6 +9,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"
+authors = ["Ö. Efe D."]
+repository = "https://github.com/skyline69/tron-terminal"
+homepage = "https://github.com/skyline69/tron-terminal"
 
 [workspace.dependencies]
 tron-core = { path = "crates/tron-core" }
