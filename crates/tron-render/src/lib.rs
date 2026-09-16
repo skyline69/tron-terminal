@@ -282,6 +282,9 @@ pub struct Renderer {
     /// What the terminal was last drawn into a shader chain's input texture with,
     /// see [`TerminalKey`]. `None` when it was drawn to the surface.
     drawn_terminal: Option<TerminalKey>,
+    /// What the frame on screen was presented with. `None` when it is unknown, like
+    /// after the surface was configured, which discards the presented contents.
+    presented: Option<PresentedKey>,
     images: ImagePipeline,
     post: PostChain,
     /// The startup screen's own chain, after the user's shaders.
@@ -333,6 +336,22 @@ struct TerminalKey {
     chains: (u64, u64),
     clear: [u64; 4],
 }
+
+/// Everything besides the uploaded cells that a presented frame depends on while
+/// no shader animates and no image is shown. While it stays the same, presenting
+/// again would show the same pixels, and only make the compositor redraw the window.
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct PresentedKey {
+    size: (u32, u32),
+    chains: (u64, u64),
+    clear: [u64; 4],
+    focused: bool,
+}
+
+/// Whether the window keeps showing the last presented frame until the next one.
+/// Core Animation keeps a layer's contents. An X11 server without a compositor
+/// does not, and asks for a redraw when a covered window shows again.
+const KEEPS_PRESENTED_FRAME: bool = cfg!(target_os = "macos");
 
 /// Mailbox where available: frames are paced by tron, never blocking on vsync.
 #[cfg(not(target_os = "macos"))]
@@ -457,6 +476,7 @@ impl Renderer {
         Ok(Self {
             top_inset: 0.0,
             drawn_terminal: None,
+            presented: None,
             srgb_output: format.is_srgb(),
             instance,
             adapter,
@@ -555,7 +575,7 @@ impl Renderer {
     /// Allows reading presented frames back. Returns false when the surface does not support it.
     pub fn enable_capture(&mut self) -> bool {
         self.config.usage |= wgpu::TextureUsages::COPY_SRC;
-        self.surface.configure(&self.device, &self.config);
+        self.configure_surface();
         true
     }
 
@@ -572,10 +592,15 @@ impl Renderer {
         self.resized_at = self.started.elapsed().as_secs_f32();
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.configure_surface();
         self.post.resize(&self.device, width, height);
         self.startup.resize(&self.device, width, height);
         self.cells.invalidate();
+    }
+
+    fn configure_surface(&mut self) {
+        self.surface.configure(&self.device, &self.config);
+        self.presented = None;
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -620,7 +645,7 @@ impl Renderer {
             let alpha_mode = alpha_mode(&self.alpha_modes, theme.opacity);
             if alpha_mode != self.config.alpha_mode {
                 self.config.alpha_mode = alpha_mode;
-                self.surface.configure(&self.device, &self.config);
+                self.configure_surface();
             }
             self.theme = theme;
             self.cells.invalidate();
@@ -743,27 +768,9 @@ impl Renderer {
 
     /// Presents the prepared frame. Returns false when no frame was presented,
     /// because the GPU is still drawing the previous one or the surface is not
-    /// ready; call again shortly.
+    /// ready; call again shortly. A frame identical to the one on screen is not
+    /// presented again, and counts as presented.
     pub fn render(&mut self) -> bool {
-        // An unfinished frame holds a drawable, and waiting for the next one would
-        // block the event loop for as long as a heavy shader takes. Skip instead.
-        let _ = self.device.poll(wgpu::PollType::Poll);
-        if self.gpu_busy.load(Ordering::Acquire) {
-            return false;
-        }
-        let (frame, reconfigure) = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => (frame, false),
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => (frame, true),
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return false,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
-                return false;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                log::error!("surface validation error");
-                return false;
-            }
-        };
         let viewport = [self.config.width as f32, self.config.height as f32];
         let cells_changed = self.cells.upload(&self.device, &self.queue);
         self.images.upload_instances(&self.device, &self.queue, viewport);
@@ -775,6 +782,50 @@ impl Renderer {
             g: f64::from(background[1] * alpha),
             b: f64::from(background[2] * alpha),
             a: f64::from(alpha),
+        };
+        let presented = PresentedKey {
+            size: (self.config.width, self.config.height),
+            chains: (self.post.targets_revision(), self.startup.targets_revision()),
+            clear: [clear.r, clear.g, clear.b, clear.a].map(f64::to_bits),
+            focused: self.focused,
+        };
+        // Programs like btop rewrite the screen with what it already shows. Every
+        // present makes the window server composite the window again, which costs
+        // far more GPU time than drawing the terminal.
+        if KEEPS_PRESENTED_FRAME
+            && !cells_changed
+            && self.images.is_empty()
+            && self.capture.is_none()
+            && !self.is_animated()
+            && self.presented == Some(presented)
+        {
+            return true;
+        }
+        // An unfinished frame holds a drawable, and waiting for the next one would
+        // block the event loop for as long as a heavy shader takes. Skip instead.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let frame = if self.gpu_busy.load(Ordering::Acquire) {
+            None
+        } else {
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(frame) => Some((frame, false)),
+                wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some((frame, true)),
+                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => None,
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    self.configure_surface();
+                    None
+                }
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    log::error!("surface validation error");
+                    None
+                }
+            }
+        };
+        let Some((frame, reconfigure)) = frame else {
+            // The cells were uploaded but not drawn: the next call must draw them.
+            self.presented = None;
+            self.drawn_terminal = None;
+            return false;
         };
         let surface_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
@@ -886,8 +937,9 @@ impl Renderer {
             }
         }
         self.queue.present(frame);
+        self.presented = Some(presented);
         if reconfigure {
-            self.surface.configure(&self.device, &self.config);
+            self.configure_surface();
         }
         true
     }
