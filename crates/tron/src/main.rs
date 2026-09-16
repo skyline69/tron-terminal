@@ -502,6 +502,11 @@ struct Session {
     top_inset: f32,
     /// `[shader] fps`: frame rate cap of continuous animations, 0 for none.
     animation_fps: u32,
+    /// `[shader] pause_after`: continuous animations pause after this long without
+    /// input or output. `None` never pauses them.
+    pause_after: Option<Duration>,
+    /// Last key press, mouse event, focus gain or program output.
+    last_activity: Instant,
     /// The window is hidden, minimized or covered: animations stop.
     occluded: bool,
     scrollbar: ScrollbarState,
@@ -694,6 +699,8 @@ impl App {
             ime_area: None,
             top_inset: inset,
             animation_fps: config.shader.fps,
+            pause_after: pause_after(config.shader.pause_after),
+            last_activity: Instant::now(),
             occluded: false,
             scrollbar: ScrollbarState::new(),
             harness_watch,
@@ -972,7 +979,7 @@ impl ApplicationHandler for App {
             if session.suspended.is_some() && session.shared.exited.load(Ordering::Acquire) {
                 session.restore_shell(&self.config, self.paths.as_ref());
             }
-            session.shared.wake_pending.store(false, Ordering::Release);
+            let output = session.shared.wake_pending.swap(false, Ordering::AcqRel);
             session.poll_shaders();
             session.update_harness();
             if session.shared.exited.load(Ordering::Acquire) && !session.exited {
@@ -990,6 +997,9 @@ impl ApplicationHandler for App {
             };
             session.handle_events(events);
             session.update_pointer_icon(modes);
+            if output {
+                session.note_activity();
+            }
             session.schedule_redraw();
             previews.extend(session.preview_request.take());
         }
@@ -1098,6 +1108,17 @@ impl App {
 
     fn session_event(&mut self, event_loop: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let Some(session) = self.sessions.get_mut(&id) else { return };
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::Ime(_)
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::PointerMoved { .. }
+                | WindowEvent::PointerButton { .. }
+                | WindowEvent::Focused(true)
+        ) {
+            session.note_activity();
+        }
         match event {
             WindowEvent::CloseRequested => self.close_window(event_loop, id),
             WindowEvent::RedrawRequested => {
@@ -1303,6 +1324,8 @@ impl Session {
     fn apply_config(&mut self, config: &Config, paths: Option<&Paths>) {
         self.settings = Settings::new(config);
         self.animation_fps = config.shader.fps;
+        self.pause_after = pause_after(config.shader.pause_after);
+        self.note_activity();
         self.harness_watch.set_names(harness::names(&config.harness));
         self.harness_config = config.harness.clone();
         if let Some(found) = &self.harness_line.harness {
@@ -1617,6 +1640,20 @@ impl Session {
         }
     }
 
+    /// Restarts the time until continuous animations pause, and resumes them.
+    fn note_activity(&mut self) {
+        let now = Instant::now();
+        let paused = self.animations_paused(now);
+        self.last_activity = now;
+        if paused {
+            self.window.request_redraw();
+        }
+    }
+
+    fn animations_paused(&self, now: Instant) -> bool {
+        self.pause_after.is_some_and(|after| now.duration_since(self.last_activity) >= after)
+    }
+
     /// Redraws at most once per display refresh. Output that arrives faster is
     /// batched into the next frame instead of rendering every chunk.
     fn schedule_redraw(&mut self) {
@@ -1778,7 +1815,7 @@ impl Session {
         if !self.occluded {
             if self.renderer.has_smooth_animation() {
                 wake_at(self.next_frame);
-            } else if self.renderer.has_ambient_animation() {
+            } else if self.renderer.has_ambient_animation() && !self.animations_paused(now) {
                 wake_at(self.last_frame + animation_interval(self.animation_fps, self.focused, self.frame_interval));
             }
         }
@@ -3101,6 +3138,11 @@ fn top_inset(window: &dyn Window) -> f32 {
 fn padding(padding: (u16, u16), scale_factor: f64) -> [f32; 2] {
     let scale = scale_factor as f32;
     [f32::from(padding.0) * scale, f32::from(padding.1) * scale]
+}
+
+/// `[shader] pause_after` in seconds, 0 for never.
+fn pause_after(seconds: u32) -> Option<Duration> {
+    (seconds > 0).then(|| Duration::from_secs(u64::from(seconds)))
 }
 
 /// Time between frames of continuous shader animations: the display's rate for

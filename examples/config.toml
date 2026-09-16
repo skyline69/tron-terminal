@@ -110,6 +110,9 @@ animation = "auto"
 # to 10 frames per second without focus. Output, typing and cursor shaders
 # always draw at the display's rate, and animations stop while the window is hidden.
 fps = 0
+# Pause continuous animations after this many seconds without typing, mouse
+# input or output, until something happens again. 0 never pauses them.
+pause_after = 0
 
 [images]
 # Memory for decoded kitty graphics protocol images, in MiB.

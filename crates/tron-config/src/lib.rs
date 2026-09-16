@@ -853,6 +853,9 @@ pub struct ShaderConfig {
     /// Frames per second of continuous animations, 0 (the default) for the
     /// display's refresh rate. A cap also slows animations further without focus.
     pub fps: u32,
+    /// Seconds without typing, mouse input or output after which continuous
+    /// animations pause, 0 (the default) to never pause them.
+    pub pause_after: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]

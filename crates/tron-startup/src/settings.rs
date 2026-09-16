@@ -120,6 +120,13 @@ pub fn list(fonts: &[String], max_fps: Option<u32>) -> Vec<Setting> {
             fps_choices(max_fps),
         ),
         setting(
+            "shader.pause_after",
+            "Pause animations after",
+            "Seconds without typing, mouse input or output before background animations pause. \
+             0 never pauses them.",
+            Kind::Integer { min: 0, max: 3600, step: 30 },
+        ),
+        setting(
             "cursor.shape",
             "Cursor shape",
             "Shape of the text cursor, unless an application sets one.",
@@ -198,6 +205,7 @@ pub fn read(config: &Config) -> BTreeMap<&'static str, toml::Value> {
             "shader.fps",
             String(if config.shader.fps == 0 { DISPLAY_RATE.to_owned() } else { config.shader.fps.to_string() }),
         ),
+        ("shader.pause_after", Integer(i64::from(config.shader.pause_after))),
         ("cursor.shape", name(config.cursor.shape)),
         ("cursor.blinking", name(config.cursor.blinking)),
         ("scrollback.lines", Integer(config.scrollback.lines as i64)),
