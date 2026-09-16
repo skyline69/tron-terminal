@@ -1994,6 +1994,9 @@ impl Session {
         self.palette = None;
         self.update_overlays();
         self.window.request_redraw();
+        // The hand shown over a command would stay until the pointer moves.
+        let modes = self.shared.term.lock().modes();
+        self.update_pointer_icon(modes);
     }
 
     fn set_update_notice(&mut self, version: Option<String>) {
@@ -2004,6 +2007,8 @@ impl Session {
         self.notice_hover = None;
         self.update_overlays();
         self.window.request_redraw();
+        let modes = self.shared.term.lock().modes();
+        self.update_pointer_icon(modes);
     }
 
     /// What the pointer is over on the update notice, or `None` while it is hidden.
@@ -2383,9 +2388,13 @@ impl Session {
         if !modes.intersects(Modes::MOUSE_TRACKING) {
             self.app_pointer = None;
         }
-        let over_palette = self.palette_hit().is_some_and(|hit| hit != panel::PaletteHit::Outside);
+        // A hand over the commands and buttons of tron's own boxes, an arrow over the rest of them.
+        let palette = self.palette_hit().filter(|&hit| hit != panel::PaletteHit::Outside);
+        let over_palette = palette.is_some();
         let notice = self.notice_hit();
-        let icon = if matches!(notice, Some(panel::NoticeHit::Button(_))) && !over_palette {
+        let icon = if matches!(palette, Some(panel::PaletteHit::Entry(_)))
+            || (!over_palette && matches!(notice, Some(panel::NoticeHit::Button(_))))
+        {
             CursorIcon::Pointer
         } else if self.in_title_bar(self.mouse.position.1) || self.scrollbar.hovered || over_palette || notice.is_some()
         {
