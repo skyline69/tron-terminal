@@ -13,7 +13,11 @@
 //
 // Redraws: shaders that read `tron.time` or `tron.frame` redraw every frame.
 // Shaders that read `tron.cursor_change_time` or `tron.previous_cursor` redraw
-// for one second after each cursor move, then stop until the next change.
+// after each cursor move for the seconds they declare with
+//
+//     const TRON_CURSOR_DURATION: f32 = 0.2;
+//
+// or for one second without it. The shader's image must not change after that.
 
 struct TronUniforms {
     // Surface size in pixels.

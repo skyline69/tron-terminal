@@ -11,7 +11,9 @@
 const BLUE_SHIFT: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 
 // === Configuration Constants ===
-const DURATION: f32 = 0.2;
+// How long tron redraws after the cursor moves: the effect must not change after it.
+const TRON_CURSOR_DURATION: f32 = 0.2;
+const DURATION: f32 = TRON_CURSOR_DURATION;
 const FADE_IN_TIME: f32 = 0.06;
 const FADE_OUT_TIME: f32 = 0.1;
 const TOTAL_PARTICLES: f32 = 15.0; // default 50

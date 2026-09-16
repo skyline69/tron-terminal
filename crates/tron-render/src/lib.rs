@@ -302,6 +302,9 @@ pub struct Renderer {
     previous_cursor: [f32; 4],
     /// Seconds since `started` when the cursor rectangle last changed.
     cursor_change_time: f32,
+    /// Whether a frame drawn once cursor shaders finished animating is presented:
+    /// the effect's last image, which stays until the cursor moves again.
+    cursor_settled: bool,
     /// Value of `time` when the surface or cell size last changed.
     resized_at: f32,
     pipeline_cache: Option<PipelineCacheFile>,
@@ -499,6 +502,7 @@ impl Renderer {
             cursor: [0.0; 4],
             previous_cursor: [0.0; 4],
             cursor_change_time: -1.0e6,
+            cursor_settled: true,
             resized_at: -1.0e6,
             pipeline_cache,
             capture: None,
@@ -733,12 +737,9 @@ impl Renderer {
     }
 
     /// Whether an animation needs every display frame: the startup screen's shader,
-    /// or a cursor shader shortly after the cursor moved.
+    /// or a cursor shader until it drew its final image after the cursor moved.
     pub fn has_smooth_animation(&self) -> bool {
-        const CURSOR_ANIMATION: f32 = 1.0;
-        self.startup.is_animated()
-            || (self.post.uses_cursor_motion()
-                && self.started.elapsed().as_secs_f32() - self.cursor_change_time < CURSOR_ANIMATION)
+        self.startup.is_animated() || (self.post.uses_cursor_motion() && !self.cursor_settled)
     }
 
     /// Builds the frame from a terminal snapshot.
@@ -872,6 +873,7 @@ impl Renderer {
             }
             self.cursor = cursor;
         }
+        self.cursor_settled = time - self.cursor_change_time >= self.post.cursor_duration();
         if self.post.is_active() || self.startup.is_active() {
             let m = self.cells.metrics();
             let mut uniforms = PostUniforms {

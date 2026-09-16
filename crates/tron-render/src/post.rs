@@ -40,6 +40,9 @@ fn fs(v: VertexOut) -> @location(0) vec4<f32> {
 }
 ";
 
+/// How long cursor shaders animate when they do not declare `TRON_CURSOR_DURATION`.
+const DEFAULT_CURSOR_DURATION: f32 = 1.0;
+
 /// A user shader to compile.
 #[derive(Clone, Debug)]
 pub struct PostShader {
@@ -157,6 +160,8 @@ pub struct PostChain {
     animated: bool,
     uses_previous: bool,
     uses_cursor_motion: bool,
+    /// Seconds cursor shaders animate after the cursor moves.
+    cursor_duration: f32,
     /// Counts requests, so results of superseded ones are dropped.
     generation: u64,
     /// Counts replacements of the render targets. New targets start empty, so a
@@ -196,6 +201,7 @@ impl PostChain {
             animated: false,
             uses_previous: false,
             uses_cursor_motion: false,
+            cursor_duration: 0.0,
             generation: 0,
             targets_revision: 0,
             animation: None,
@@ -227,6 +233,11 @@ impl PostChain {
     /// while after the cursor moves.
     pub fn uses_cursor_motion(&self) -> bool {
         self.is_active() && self.uses_cursor_motion
+    }
+
+    /// Seconds after a cursor move until every cursor shader shows its final image.
+    pub fn cursor_duration(&self) -> f32 {
+        self.cursor_duration
     }
 
     /// Asks for `shaders` to replace the chain once compiled. An empty list
@@ -263,6 +274,11 @@ impl PostChain {
         let reads = compiled.passes.iter().map(|(_, reads)| *reads);
         self.animated = self.animation.unwrap_or(reads.clone().any(|r| r.time));
         self.uses_cursor_motion = self.animation.is_none() && reads.clone().any(|r| r.cursor_motion);
+        self.cursor_duration = reads
+            .clone()
+            .filter(|r| r.cursor_motion)
+            .map(|r| r.cursor_duration.unwrap_or(DEFAULT_CURSOR_DURATION))
+            .fold(0.0, f32::max);
         self.uses_previous = compiled.blit.is_some();
         self.passes = compiled.passes.into_iter().map(|(pipeline, _)| pipeline).collect();
         self.blit = compiled.blit;

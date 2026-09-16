@@ -11,7 +11,9 @@
 // Reads tron.cursor_change_time, so tron redraws for a moment after each move.
 
 // CONFIGURATION
-const DURATION: f32 = 0.15; // How long the ripple animates (seconds)
+// How long tron redraws after the cursor moves: the effect must not change after it.
+const TRON_CURSOR_DURATION: f32 = 0.15; // How long the ripple animates (seconds)
+const DURATION: f32 = TRON_CURSOR_DURATION;
 const MAX_SIZE: f32 = 0.05; // Max radius in normalized coords (0.5 = 1/4 screen height)
 const RING_THICKNESS: f32 = 0.02; // Ring width in normalized coords
 const CURSOR_WIDTH_CHANGE_THRESHOLD: f32 = 0.5; // Triggers ripple if cursor width changes by this fraction

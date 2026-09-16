@@ -12,7 +12,9 @@
 // Reads tron.cursor_change_time, so tron redraws for a moment after each move.
 
 // --- CONFIGURATION ---
-const DURATION: f32 = 0.2; // in seconds
+// How long tron redraws after the cursor moves: the effect must not change after it.
+const TRON_CURSOR_DURATION: f32 = 0.2; // in seconds
+const DURATION: f32 = TRON_CURSOR_DURATION;
 const TRAIL_LENGTH: f32 = 0.5;
 const BLUR: f32 = 2.0; // blur size in pixels (for antialiasing)
 

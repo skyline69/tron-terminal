@@ -26,6 +26,8 @@ pub struct Reads {
     pub previous: bool,
     /// `tron.cursor_change_time` or `tron.previous_cursor`.
     pub cursor_motion: bool,
+    /// Seconds a cursor effect lasts, from `const TRON_CURSOR_DURATION`.
+    pub cursor_duration: Option<f32>,
 }
 
 impl Reads {
@@ -37,8 +39,24 @@ impl Reads {
             time: !cursor_motion && (reads("tron.time") || reads("tron.frame")),
             previous: reads("previous("),
             cursor_motion,
+            cursor_duration: cursor_duration(source),
         }
     }
+}
+
+/// The value of `const TRON_CURSOR_DURATION: f32 = <seconds>;`, when declared.
+fn cursor_duration(source: &str) -> Option<f32> {
+    const NAME: &str = "TRON_CURSOR_DURATION";
+    let (at, _) = source.match_indices(NAME).find(|(at, _)| {
+        let before = source[..*at].trim_end();
+        before.ends_with("const") && before.len() < *at
+    })?;
+    let rest = source[at + NAME.len()..].trim_start();
+    let rest = rest.strip_prefix(':').map_or(rest, |typed| typed.trim_start().strip_prefix("f32").unwrap_or(typed));
+    let value = rest.trim_start().strip_prefix('=')?;
+    let value = value[..value.find(';')?].trim();
+    let seconds: f32 = value.strip_suffix('f').unwrap_or(value).parse().ok()?;
+    (seconds.is_finite() && seconds >= 0.0).then_some(seconds)
 }
 
 /// A chain compiled for [`Compiler::compile`].
@@ -257,5 +275,20 @@ impl Worker {
             Some(error) => Err(error.to_string()),
             None => Ok(pipeline),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_duration_is_read_from_the_constant() {
+        assert_eq!(cursor_duration("const TRON_CURSOR_DURATION: f32 = 0.2;"), Some(0.2));
+        assert_eq!(cursor_duration("const TRON_CURSOR_DURATION = 1.5f;"), Some(1.5));
+        assert_eq!(cursor_duration("const  TRON_CURSOR_DURATION :f32= 0.09 ;"), Some(0.09));
+        assert_eq!(cursor_duration("const TRON_CURSOR_DURATION: f32 = DURATION;"), None);
+        assert_eq!(cursor_duration("const TRON_CURSOR_DURATION: f32 = -1.0;"), None);
+        assert_eq!(cursor_duration("const DURATION: f32 = 0.2;"), None);
     }
 }

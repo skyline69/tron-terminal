@@ -257,8 +257,9 @@ Available inputs on the `tron` uniform: `resolution`, `time`, `frame`,
 `cursor` (x, y, width, height in pixels), `previous_cursor` and
 `cursor_change_time` (for cursor trails), `cell_size`, `focused` and
 `background`. Shaders that read `tron.time` or `tron.frame` redraw every
-frame; shaders that read `tron.cursor_change_time` redraw for a second after
-the cursor moves. Examples: CRT, bloom, cursor glow, cursor trail and
+frame. Shaders that read `tron.cursor_change_time` redraw after the cursor
+moves for as long as they declare with `const TRON_CURSOR_DURATION: f32 = 0.2;`,
+or for a second without it. Examples: CRT, bloom, cursor glow, cursor trail and
 afterglow in [`examples/shaders`](examples/shaders). Compiled pipelines are
 cached in `~/.cache/tron`.
 

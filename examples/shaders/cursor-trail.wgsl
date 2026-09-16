@@ -1,7 +1,9 @@
 // A smear from the previous cursor position to the current one that fades
 // over 150 ms. Redraws only for a moment after the cursor moves.
 
-const DURATION: f32 = 0.15;
+// How long tron redraws after the cursor moves: the effect must not change after it.
+const TRON_CURSOR_DURATION: f32 = 0.15;
+const DURATION: f32 = TRON_CURSOR_DURATION;
 const TINT: vec3<f32> = vec3<f32>(0.31, 0.84, 1.0);
 
 // Distance from `p` to the segment `a`-`b`.
