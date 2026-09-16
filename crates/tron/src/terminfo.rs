@@ -6,6 +6,10 @@
 //! Remote hosts do not have the entry. An `ssh` wrapper placed first in `PATH`
 //! copies it to each host before the first interactive session, and remembers
 //! the hosts that have it. Hosts that cannot take it get `TERM=xterm-256color`.
+//!
+//! tmux resets the cursor of `xterm-*` terminals to a block whatever the entry
+//! says. A `tmux` wrapper beside the `ssh` one has it reset to the configured
+//! cursor instead.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -13,11 +17,17 @@ use std::process::{Command, Stdio};
 
 const SOURCE: &str = include_str!("../terminfo/xterm-tron.terminfo");
 const SSH_WRAPPER: &str = include_str!("../terminfo/ssh");
+const TMUX_WRAPPER: &str = include_str!("../terminfo/tmux");
 
-/// Writes the `ssh` wrapper and returns its directory.
-pub fn install_ssh_wrapper(data_dir: &Path) -> Option<PathBuf> {
+/// Commands that tron wraps while it uses its own terminfo entry.
+pub const WRAPPED: &[&str] = &["ssh", "tmux"];
+
+/// Writes the `ssh` and `tmux` wrappers and returns their directory.
+pub fn install_wrappers(data_dir: &Path) -> Option<PathBuf> {
     let dir = data_dir.join("bin");
-    crate::launcher::write_executable(&dir.join("ssh"), SSH_WRAPPER).then_some(dir)
+    let ssh = crate::launcher::write_executable(&dir.join("ssh"), SSH_WRAPPER);
+    let tmux = crate::launcher::write_executable(&dir.join("tmux"), TMUX_WRAPPER);
+    (ssh && tmux).then_some(dir)
 }
 
 /// `PATH` value with `dir` first, unless it is already in the path.
@@ -130,8 +140,8 @@ esac
             let root = std::env::temp_dir().join(format!("tron-ssh-wrapper-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             let terminfo = install(&root).expect("tic compiles the entry");
-            let wrapper_dir = install_ssh_wrapper(&root).unwrap();
-            assert_eq!(install_ssh_wrapper(&root), Some(wrapper_dir.clone()));
+            let wrapper_dir = install_wrappers(&root).unwrap();
+            assert_eq!(install_wrappers(&root), Some(wrapper_dir.clone()));
 
             let fake_dir = root.join("fake");
             std::fs::create_dir_all(root.join("home")).unwrap();
@@ -225,5 +235,48 @@ esac
         assert_eq!(calls.len(), 2, "{calls:?}");
 
         std::fs::remove_dir_all(&fixture.root).unwrap();
+    }
+
+    #[test]
+    fn tmux_wrapper_overrides_the_cursor_reset_before_attaching() {
+        let root = std::env::temp_dir().join(format!("tron-tmux-wrapper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let wrapper_dir = install_wrappers(&root).unwrap();
+        let fake_dir = root.join("fake");
+        std::fs::create_dir_all(&fake_dir).unwrap();
+        let fake = fake_dir.join("tmux");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s|' \"$@\" >>\"$FAKE_LOG\"\necho >>\"$FAKE_LOG\"\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut path = OsString::from(&wrapper_dir);
+        path.push(":");
+        path.push(&fake_dir);
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        let log = root.join("log");
+        let run = |term: &str, args: &[&str]| {
+            let status = Command::new(wrapper_dir.join("tmux"))
+                .args(args)
+                .env("TERM", term)
+                .env("PATH", &path)
+                .env("FAKE_LOG", &log)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let call = std::fs::read_to_string(&log).unwrap();
+            std::fs::remove_file(&log).unwrap();
+            call.trim_end().to_owned()
+        };
+        let set = r"set-option|-s|terminal-overrides[9173]|xterm-tron:Se=\E[0 q|;|";
+        assert_eq!(run("xterm-tron", &[]), format!("{set}new-session|"));
+        assert_eq!(run("xterm-tron", &["-L", "work", "a", "-t", "main"]), format!("-L|work|{set}a|-t|main|"));
+        assert_eq!(run("xterm-tron", &["-2u", "-Lwork", "new", "-s", "x"]), format!("-2u|-Lwork|{set}new|-s|x|"));
+        assert_eq!(run("xterm-tron", &["--", "attach-session"]), format!("--|{set}attach-session|"));
+        // Commands that attach nothing, and other terminals, run as they are.
+        assert_eq!(run("xterm-tron", &["ls"]), "ls|");
+        assert_eq!(run("xterm-tron", &["new-window"]), "new-window|");
+        assert_eq!(run("xterm-tron", &["-V"]), "-V|");
+        assert_eq!(run("xterm-tron", &["-c", "echo attach"]), "-c|echo attach|");
+        assert_eq!(run("tmux-256color", &["attach"]), "attach|");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

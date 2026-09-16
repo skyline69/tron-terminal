@@ -744,7 +744,8 @@ impl App {
                 }
             }
         }
-        // `tron` in the shell runs this tron, and `ssh` copies the terminfo entry to hosts.
+        // `tron` in the shell runs this tron, `ssh` copies the terminfo entry to hosts,
+        // and `tmux` resets the cursor to the configured one.
         if let Some(bin) = data_dir.and_then(|dir| launcher::install(dir, options.term == "xterm-tron")) {
             options.env.push(("PATH".into(), terminfo::path_with(&bin)));
         }

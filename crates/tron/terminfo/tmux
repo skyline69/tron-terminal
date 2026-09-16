@@ -1,0 +1,80 @@
+#!/bin/sh
+# Written by tron. tmux replaces the cursor reset of terminals named xterm-*
+# with \E[2 q, a steady block, so a program that resets the cursor in tmux,
+# such as Neovim when it exits, leaves a block instead of the configured
+# cursor. tmux reads its terminal-overrides only when a client attaches, so
+# before a command that attaches this terminal, an override makes it reset
+# with \E[0 q, which gives back the configured cursor.
+
+bin=${0%/*}
+
+real=
+set -f
+saved_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+    if [ -n "$dir" ] && [ "$dir" != "$bin" ] && [ -f "$dir/tmux" ] && [ -x "$dir/tmux" ]; then
+        real=$dir/tmux
+        break
+    fi
+done
+IFS=$saved_ifs
+set +f
+if [ -z "$real" ]; then
+    echo "tmux: command not found" >&2
+    exit 127
+fi
+
+[ "$TERM" = xterm-tron ] || exec "$real" "$@"
+
+# The number of options before the command, as tmux's getopt reads them.
+options=0
+want=
+ended=
+command=
+for arg; do
+    if [ -n "$want" ]; then
+        want=
+    elif [ -z "$ended" ] && [ "$arg" = -- ]; then
+        ended=1
+    elif [ -z "$ended" ] && [ "${arg#-}" != "$arg" ] && [ "$arg" != - ]; then
+        rest=${arg#-}
+        while [ -n "$rest" ]; do
+            flag=${rest%"${rest#?}"}
+            rest=${rest#?}
+            case $flag in
+                # A shell command or the version: nothing attaches.
+                [cV]) exec "$real" "$@" ;;
+                [fLST])
+                    [ -z "$rest" ] && want=1
+                    rest= ;;
+            esac
+        done
+    else
+        command=$arg
+        break
+    fi
+    options=$((options + 1))
+done
+[ -z "$want" ] || exec "$real" "$@"
+
+case $command in
+    '' | new | new-s* | a | at | att | atta | attac | attach | attach-s*) ;;
+    *) exec "$real" "$@" ;;
+esac
+
+# A fixed index, so attaching again replaces the override instead of adding one.
+i=0
+for arg; do
+    if [ "$i" = "$options" ]; then
+        set -- "$@" set-option -s 'terminal-overrides[9173]' 'xterm-tron:Se=\E[0 q' ';'
+    fi
+    set -- "$@" "$arg"
+    shift
+    i=$((i + 1))
+done
+# No command: tmux creates a session.
+if [ -z "$command" ]; then
+    set -- "$@" set-option -s 'terminal-overrides[9173]' 'xterm-tron:Se=\E[0 q' ';' new-session
+fi
+exec "$real" "$@"

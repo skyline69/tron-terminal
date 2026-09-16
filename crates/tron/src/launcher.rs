@@ -11,17 +11,19 @@ use std::path::{Path, PathBuf};
 /// Flatpak id used when the sandbox does not name one.
 const FLATPAK_ID: &str = "dev.tron.Terminal";
 
-/// Writes the launchers and returns their directory. The `ssh` wrapper is only
-/// kept while tron uses its own terminfo entry.
-pub fn install(data_dir: &Path, ssh_wrapper: bool) -> Option<PathBuf> {
+/// Writes the launchers and returns their directory. The `ssh` and `tmux`
+/// wrappers are only kept while tron uses its own terminfo entry.
+pub fn install(data_dir: &Path, wrappers: bool) -> Option<PathBuf> {
     let dir = data_dir.join("bin");
     if !write_executable(&dir.join("tron"), &tron_script()?) {
         return None;
     }
-    if ssh_wrapper {
-        crate::terminfo::install_ssh_wrapper(data_dir);
+    if wrappers {
+        crate::terminfo::install_wrappers(data_dir);
     } else {
-        let _ = std::fs::remove_file(dir.join("ssh"));
+        for name in crate::terminfo::WRAPPED {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
     }
     Some(dir)
 }

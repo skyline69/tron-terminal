@@ -1927,7 +1927,7 @@ fn capability(name: &str) -> Option<&'static str> {
         "setrgbf" => "\x1b[38:2::%p1%d:%p2%d:%p3%dm",
         "setrgbb" => "\x1b[48:2::%p1%d:%p2%d:%p3%dm",
         "Ss" => "\x1b[%p1%d q",
-        "Se" => "\x1b[2 q",
+        "Se" => "\x1b[0 q",
         "Sync" => "\x1b[?2026%?%p1%{1}%-%tl%eh%;",
         "indn" => "\x1b[%p1%dS",
         "rin" => "\x1b[%p1%dT",

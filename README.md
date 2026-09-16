@@ -305,6 +305,21 @@ under `[shell]`:
 infocmp -x xterm-tron | ssh host 'mkdir -p ~/.terminfo && tic -x -o ~/.terminfo /dev/stdin'
 ```
 
+## tmux
+
+tmux resets the cursor of `xterm-*` terminals to a block, whatever the
+terminfo entry says, so the cursor could stay a block after Neovim exits. A
+`tmux` wrapper in the shell's `PATH` sets this override before tmux attaches
+the window, so resets give back the configured cursor:
+
+```tmux
+set -as terminal-overrides ',xterm-tron:Se=\E[0 q'
+```
+
+tmux reads overrides only when a client attaches, so clients attached before
+this, or started outside tron's shell, need the line in `~/.tmux.conf`, then
+a new attach.
+
 ## Performance
 
 `cat` of large files at 100x30 on Fedora, Wayland, RTX 2070 SUPER. Median of
