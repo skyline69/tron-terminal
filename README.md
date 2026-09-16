@@ -67,6 +67,12 @@ reinstalling or downgrading. From a checkout, run `./install.sh`.
 - **macOS:** `tron.app` goes to `/Applications`, where Spotlight and Launchpad
   find it, and `~/.local/bin/tron` links to it.
 
+On macOS, Homebrew installs the app from the latest release:
+
+```sh
+brew install --cask skyline69/tap/tron
+```
+
 Each [release](https://github.com/skyline69/tron-terminal/releases) also has
 packages you can install by hand:
 

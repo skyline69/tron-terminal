@@ -12,6 +12,10 @@ name: Release
 #   tron-VERSION-ARCH.flatpak        Flatpak bundle, shells run on the host (x86_64, aarch64)
 #   tron-VERSION-ARCH-macos.tar.gz   binary with install.sh (x86_64, aarch64)
 #   tron-VERSION-macos.dmg           universal tron.app on a designed disk image
+#
+# After publishing, the tron cask in skyline69/homebrew-tap is updated from
+# dist/homebrew/tron.rb. That needs the HOMEBREW_TAP_TOKEN secret: a token that
+# may write to the contents of skyline69/homebrew-tap.
 
 on:
   push:
@@ -309,3 +313,39 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "tron $VERSION" \
             --notes-file RELEASE_NOTES.md
+
+  homebrew:
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Update the cask in skyline69/homebrew-tap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set, so the Homebrew cask still names the previous release."
+            exit 0
+          fi
+          sha256=$(gh release download "$TAG" --pattern "tron-$VERSION-macos.dmg.sha256" --output - | cut -d ' ' -f 1)
+          if ! printf '%s' "$sha256" | grep -Eqx '[0-9a-f]{64}'; then
+            echo "::error::No checksum for tron-$VERSION-macos.dmg in $TAG."
+            exit 1
+          fi
+          git clone --depth 1 "https://x-access-token:$TAP_TOKEN@github.com/skyline69/homebrew-tap.git" tap
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$sha256/g" dist/homebrew/tron.rb > tap/Casks/tron.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/tron.rb
+          if git diff --cached --quiet; then
+            echo "The cask already names tron $VERSION."
+            exit 0
+          fi
+          git commit -m "tron $VERSION"
+          git push origin HEAD
