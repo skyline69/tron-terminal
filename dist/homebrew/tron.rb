@@ -2,8 +2,7 @@ cask "tron" do
   version "@VERSION@"
   sha256 "@SHA256@"
 
-  url "https://github.com/skyline69/tron-terminal/releases/download/v#{version}/tron-#{version}-macos.dmg",
-      verified: "github.com/skyline69/tron-terminal/"
+  url "https://github.com/skyline69/tron-terminal/releases/download/v#{version}/tron-#{version}-macos.dmg"
   name "tron"
   desc "GPU accelerated terminal emulator"
   homepage "https://github.com/skyline69/tron-terminal"
