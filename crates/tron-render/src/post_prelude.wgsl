@@ -3,8 +3,9 @@
 //     fn shade(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32>
 //
 // `uv` runs from (0, 0) at the top left to (1, 1). `frag_coord` is in pixels.
-// Read the rendered terminal with `terminal(uv)` and the final output of the
-// previous frame with `previous(uv)`. Output premultiplied alpha.
+// Read the rendered terminal with `terminal(uv)`, a blurred copy with
+// `terminal_blur(uv, radius)` and the final output of the previous frame with
+// `previous(uv)`. Output premultiplied alpha.
 //
 // Alpha: many shaders are written for opaque windows and return alpha 1. The
 // output alpha is kept at most at the input's alpha, rising above it only as far
@@ -53,6 +54,22 @@ struct TronUniforms {
 
 fn terminal(uv: vec2<f32>) -> vec4<f32> {
     return textureSampleLevel(terminal_texture, terminal_sampler, uv, 0.0);
+}
+
+// The terminal blurred over about `radius` pixels, at least two. It samples
+// smaller copies of the terminal, made once per frame for shaders that call it, so
+// a wide glow costs a few samples instead of a loop over the neighborhood.
+//
+// A shader that defines `fn blur_source(color: vec4<f32>) -> vec4<f32>` blurs what
+// it returns for each pixel instead, like only the bright parts for a bloom.
+fn terminal_blur(uv: vec2<f32>, radius: f32) -> vec4<f32> {
+    let levels = f32(textureNumLevels(terminal_texture));
+    let lod = clamp(log2(max(radius, 2.0)), 1.0, max(levels - 1.0, 1.0));
+    let offset = 0.5 * pow(2.0, lod) / vec2<f32>(textureDimensions(terminal_texture));
+    return (textureSampleLevel(terminal_texture, terminal_sampler, uv + offset, lod)
+        + textureSampleLevel(terminal_texture, terminal_sampler, uv - offset, lod)
+        + textureSampleLevel(terminal_texture, terminal_sampler, uv + vec2<f32>(offset.x, -offset.y), lod)
+        + textureSampleLevel(terminal_texture, terminal_sampler, uv + vec2<f32>(-offset.x, offset.y), lod)) * 0.25;
 }
 
 // The final image of the previous frame, after all shaders. Transparent on the

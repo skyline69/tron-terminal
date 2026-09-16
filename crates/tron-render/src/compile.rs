@@ -10,12 +10,14 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
-use crate::post::{BLIT, Layouts, PRELUDE, PostShader};
+use crate::post::{BLIT, BLUR_SOURCE, DOWNSAMPLE, Layouts, PRELUDE, PostShader};
 
 /// Compiled pipelines kept before the cache is cleared. tron ships about 50 shaders.
 const MAX_CACHED: usize = 128;
 /// Cache key of the pipeline that copies the history texture to the output.
 const BLIT_KEY: &str = "\0blit";
+/// Cache key of the pipeline that fills the mip levels `terminal_blur` reads.
+const DOWNSAMPLE_KEY: &str = "\0downsample";
 
 /// What a shader reads, which decides when its chain redraws.
 #[derive(Copy, Clone, Default)]
@@ -28,6 +30,10 @@ pub struct Reads {
     pub cursor_motion: bool,
     /// Seconds a cursor effect lasts, from `const TRON_CURSOR_DURATION`.
     pub cursor_duration: Option<f32>,
+    /// `terminal_blur(`.
+    pub blur: bool,
+    /// Defines `blur_source`, applied to the terminal before it is blurred.
+    pub blur_source: bool,
 }
 
 impl Reads {
@@ -40,6 +46,8 @@ impl Reads {
             previous: reads("previous("),
             cursor_motion,
             cursor_duration: cursor_duration(source),
+            blur: reads("terminal_blur("),
+            blur_source: reads("fn blur_source("),
         }
     }
 }
@@ -59,13 +67,23 @@ fn cursor_duration(source: &str) -> Option<f32> {
     (seconds.is_finite() && seconds >= 0.0).then_some(seconds)
 }
 
+/// One shader of a chain.
+pub struct Pass {
+    pub pipeline: wgpu::RenderPipeline,
+    pub reads: Reads,
+    /// Draws the first blurred level through the shader's `blur_source`.
+    pub blur_source: Option<wgpu::RenderPipeline>,
+}
+
 /// A chain compiled for [`Compiler::compile`].
 pub struct Compiled {
     pub chain: usize,
     pub generation: u64,
-    pub passes: Vec<(wgpu::RenderPipeline, Reads)>,
+    pub passes: Vec<Pass>,
     /// Present when a pass reads the previous frame.
     pub blit: Option<wgpu::RenderPipeline>,
+    /// Present when a pass reads `terminal_blur`.
+    pub downsample: Option<wgpu::RenderPipeline>,
     pub errors: Vec<String>,
 }
 
@@ -192,8 +210,13 @@ impl Worker {
         let mut passes = Vec::with_capacity(shaders.len());
         let mut errors = Vec::new();
         for shader in shaders {
-            match self.pipeline(shader) {
-                Ok(pipeline) => passes.push((pipeline, Reads::of(&shader.source))),
+            let reads = Reads::of(&shader.source);
+            let pass = self.pipeline(shader).and_then(|pipeline| {
+                let blur_source = if reads.blur && reads.blur_source { Some(self.blur_source(shader)?) } else { None };
+                Ok(Pass { pipeline, reads, blur_source })
+            });
+            match pass {
+                Ok(pass) => passes.push(pass),
                 Err(error) => errors.push(format!(
                     "shader `{}` failed to compile (line numbers include {} prelude lines):\n{error}",
                     shader.name,
@@ -201,32 +224,57 @@ impl Worker {
                 )),
             }
         }
-        let blit = if passes.iter().any(|(_, reads)| reads.previous) { self.blit() } else { None };
-        Compiled { chain, generation, passes, blit, errors }
+        let blit =
+            if passes.iter().any(|pass| pass.reads.previous) { self.shared(BLIT_KEY, "post blit", BLIT) } else { None };
+        let downsample = if passes.iter().any(|pass| pass.reads.blur) {
+            self.shared(DOWNSAMPLE_KEY, "post downsample", DOWNSAMPLE)
+        } else {
+            None
+        };
+        Compiled { chain, generation, passes, blit, downsample, errors }
     }
 
     fn pipeline(&mut self, shader: &PostShader) -> Result<wgpu::RenderPipeline, String> {
-        if let Some(cached) = self.pipelines.get(&shader.source) {
+        self.cached(shader.source.clone(), |worker| {
+            let source = format!("{PRELUDE}{}", shader.source);
+            worker.build(&shader.name, &source, "tron_vs", "tron_fs", &worker.layouts.pipeline)
+        })
+    }
+
+    /// The pipeline that draws a shader's `blur_source` into the first blurred level.
+    fn blur_source(&mut self, shader: &PostShader) -> Result<wgpu::RenderPipeline, String> {
+        self.cached(format!("\0blur source\0{}", shader.source), |worker| {
+            let source = format!("{PRELUDE}{}{BLUR_SOURCE}", shader.source);
+            worker.build(&shader.name, &source, "tron_vs", "tron_blur_source_fs", &worker.layouts.pipeline)
+        })
+    }
+
+    fn cached(
+        &mut self,
+        key: String,
+        build: impl FnOnce(&Self) -> Result<wgpu::RenderPipeline, String>,
+    ) -> Result<wgpu::RenderPipeline, String> {
+        if let Some(cached) = self.pipelines.get(&key) {
             return cached.clone();
         }
         if self.pipelines.len() >= MAX_CACHED {
             self.pipelines.clear();
         }
-        let source = format!("{PRELUDE}{}", shader.source);
-        let result = self.build(&shader.name, &source, "tron_vs", "tron_fs", &self.layouts.pipeline);
-        self.pipelines.insert(shader.source.clone(), result.clone());
+        let result = build(self);
+        self.pipelines.insert(key, result.clone());
         result
     }
 
-    fn blit(&mut self) -> Option<wgpu::RenderPipeline> {
-        if !self.pipelines.contains_key(BLIT_KEY) {
-            let result = self.build("post blit", BLIT, "vs", "fs", &self.layouts.blit_pipeline);
-            self.pipelines.insert(BLIT_KEY.to_owned(), result);
+    /// A pipeline of tron's own that reads one texture, shared by every chain.
+    fn shared(&mut self, key: &str, label: &str, source: &str) -> Option<wgpu::RenderPipeline> {
+        if !self.pipelines.contains_key(key) {
+            let result = self.build(label, source, "vs", "fs", &self.layouts.blit_pipeline);
+            self.pipelines.insert(key.to_owned(), result);
         }
-        match &self.pipelines[BLIT_KEY] {
+        match &self.pipelines[key] {
             Ok(pipeline) => Some(pipeline.clone()),
             Err(error) => {
-                log::error!("post blit failed to compile: {error}");
+                log::error!("{label} failed to compile: {error}");
                 None
             }
         }

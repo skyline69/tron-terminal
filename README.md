@@ -252,15 +252,21 @@ fn shade(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
 
 `terminal(uv)` samples the rendered terminal. `previous(uv)` samples the
 final image of the previous frame, for trails and afterglow effects.
+`terminal_blur(uv, radius)` samples the terminal blurred over about `radius`
+pixels from smaller copies, so glows need a few samples instead of a loop over
+the neighborhood. A shader that defines `fn blur_source(color: vec4<f32>) ->
+vec4<f32>` blurs what it returns for each pixel instead, such as only the bright
+parts for a bloom.
 
 Available inputs on the `tron` uniform: `resolution`, `time`, `frame`,
 `cursor` (x, y, width, height in pixels), `previous_cursor` and
 `cursor_change_time` (for cursor trails), `cell_size`, `focused` and
 `background`. Shaders that read `tron.time` or `tron.frame` redraw every
 frame, and with `[shader] pause_after` pause after that many seconds without
-input or output. Shaders that read `tron.cursor_change_time` redraw after the cursor
-moves for as long as they declare with `const TRON_CURSOR_DURATION: f32 = 0.2;`,
-or for a second without it. Examples: CRT, bloom, cursor glow, cursor trail and
+input or output. Shaders that read `tron.cursor_change_time` redraw after the
+cursor moves for as long as they declare with
+`const TRON_CURSOR_DURATION: f32 = 0.2;`, or for a second without it.
+Examples: CRT, bloom, cursor glow, cursor trail and
 afterglow in [`examples/shaders`](examples/shaders). Compiled pipelines are
 cached in `~/.cache/tron`.
 

@@ -40,6 +40,56 @@ fn fs(v: VertexOut) -> @location(0) vec4<f32> {
 }
 ";
 
+/// Halves a texture into its next mip level. Each of the five bilinear samples
+/// averages four texels, a dual filter blur that stays smooth over many levels.
+pub const DOWNSAMPLE: &str = r"
+@group(0) @binding(0) var source: texture_2d<f32>;
+@group(0) @binding(1) var source_sampler: sampler;
+
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) index: u32) -> VertexOut {
+    let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    var out: VertexOut;
+    out.position = vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@fragment
+fn fs(v: VertexOut) -> @location(0) vec4<f32> {
+    let texel = 1.0 / vec2<f32>(textureDimensions(source));
+    return (textureSampleLevel(source, source_sampler, v.uv, 0.0) * 4.0
+        + textureSampleLevel(source, source_sampler, v.uv + texel, 0.0)
+        + textureSampleLevel(source, source_sampler, v.uv - texel, 0.0)
+        + textureSampleLevel(source, source_sampler, v.uv + vec2<f32>(texel.x, -texel.y), 0.0)
+        + textureSampleLevel(source, source_sampler, v.uv + vec2<f32>(-texel.x, texel.y), 0.0)) / 8.0;
+}
+";
+
+/// Appended to shaders that define `blur_source`: the first blurred level, halved
+/// like [`DOWNSAMPLE`] from what `blur_source` makes of each sample.
+pub const BLUR_SOURCE: &str = r"
+
+@fragment
+fn tron_blur_source_fs(v: TronVertexOut) -> @location(0) vec4<f32> {
+    let texel = 1.0 / vec2<f32>(textureDimensions(terminal_texture));
+    return (blur_source(terminal(v.uv)) * 4.0
+        + blur_source(terminal(v.uv + texel))
+        + blur_source(terminal(v.uv - texel))
+        + blur_source(terminal(v.uv + vec2<f32>(texel.x, -texel.y)))
+        + blur_source(terminal(v.uv + vec2<f32>(-texel.x, texel.y)))) / 8.0;
+}
+";
+
+/// Mip levels of an input texture read by `terminal_blur`, the full size included.
+/// The smallest is 1/32 of the size, enough for blurs of a few dozen pixels.
+const BLUR_LEVELS: u32 = 6;
+
 /// How long cursor shaders animate when they do not declare `TRON_CURSOR_DURATION`.
 const DEFAULT_CURSOR_DURATION: f32 = 1.0;
 
@@ -136,7 +186,16 @@ impl Layouts {
 
 struct Target {
     _texture: wgpu::Texture,
+    /// Every mip level, for sampling.
     view: wgpu::TextureView,
+    /// One view per mip level, for rendering into it. The first is the full size.
+    levels: Vec<wgpu::TextureView>,
+}
+
+impl Target {
+    fn attachment(&self) -> &wgpu::TextureView {
+        &self.levels[0]
+    }
 }
 
 pub struct PostChain {
@@ -146,6 +205,10 @@ pub struct PostChain {
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
     passes: Vec<wgpu::RenderPipeline>,
+    /// For each pass, the pipeline drawing the first blurred level through its `blur_source`.
+    blur_sources: Vec<Option<wgpu::RenderPipeline>>,
+    /// Bind groups that read only the full size level of a target, for `blur_sources`.
+    blur_source_bind_groups: Vec<wgpu::BindGroup>,
     /// Intermediate render targets, the first one receives the terminal.
     targets: Vec<Target>,
     /// History textures, only when a shader reads the previous frame.
@@ -162,6 +225,12 @@ pub struct PostChain {
     uses_cursor_motion: bool,
     /// Seconds cursor shaders animate after the cursor moves.
     cursor_duration: f32,
+    /// For each pass, whether it reads `terminal_blur`: its input's mip levels are
+    /// filled before it runs.
+    blur_passes: Vec<bool>,
+    downsample: Option<wgpu::RenderPipeline>,
+    /// Bind groups that read a mip level, indexed by `[target][level - 1]`.
+    downsample_bind_groups: Vec<Vec<wgpu::BindGroup>>,
     /// Counts requests, so results of superseded ones are dropped.
     generation: u64,
     /// Counts replacements of the render targets. New targets start empty, so a
@@ -176,6 +245,8 @@ impl PostChain {
             label: Some("post"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            // `terminal_blur` blends two mip levels.
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
@@ -191,6 +262,8 @@ impl PostChain {
             sampler,
             uniforms,
             passes: Vec::new(),
+            blur_sources: Vec::new(),
+            blur_source_bind_groups: Vec::new(),
             targets: Vec::new(),
             history: Vec::new(),
             history_current: 0,
@@ -202,6 +275,9 @@ impl PostChain {
             uses_previous: false,
             uses_cursor_motion: false,
             cursor_duration: 0.0,
+            blur_passes: Vec::new(),
+            downsample: None,
+            downsample_bind_groups: Vec::new(),
             generation: 0,
             targets_revision: 0,
             animation: None,
@@ -257,8 +333,14 @@ impl PostChain {
         self.generation += 1;
         self.animation = animation;
         if shaders.is_empty() {
-            let empty =
-                Compiled { chain, generation: self.generation, passes: Vec::new(), blit: None, errors: Vec::new() };
+            let empty = Compiled {
+                chain,
+                generation: self.generation,
+                passes: Vec::new(),
+                blit: None,
+                downsample: None,
+                errors: Vec::new(),
+            };
             self.apply(device, empty);
         } else {
             compiler.compile(chain, self.generation, shaders.to_vec());
@@ -271,7 +353,7 @@ impl PostChain {
         if compiled.generation != self.generation {
             return None;
         }
-        let reads = compiled.passes.iter().map(|(_, reads)| *reads);
+        let reads = compiled.passes.iter().map(|pass| pass.reads);
         self.animated = self.animation.unwrap_or(reads.clone().any(|r| r.time));
         self.uses_cursor_motion = self.animation.is_none() && reads.clone().any(|r| r.cursor_motion);
         self.cursor_duration = reads
@@ -280,8 +362,11 @@ impl PostChain {
             .map(|r| r.cursor_duration.unwrap_or(DEFAULT_CURSOR_DURATION))
             .fold(0.0, f32::max);
         self.uses_previous = compiled.blit.is_some();
-        self.passes = compiled.passes.into_iter().map(|(pipeline, _)| pipeline).collect();
+        self.blur_passes = reads.clone().map(|r| r.blur && compiled.downsample.is_some()).collect();
+        (self.passes, self.blur_sources) =
+            compiled.passes.into_iter().map(|pass| (pass.pipeline, pass.blur_source)).unzip();
         self.blit = compiled.blit;
+        self.downsample = compiled.downsample;
         let size = self.size;
         self.size = (0, 0);
         self.resize(device, size.0, size.1);
@@ -298,6 +383,8 @@ impl PostChain {
             self.history.clear();
             self.bind_groups.clear();
             self.blit_bind_groups.clear();
+            self.downsample_bind_groups.clear();
+            self.blur_source_bind_groups.clear();
             self.size = size;
             return;
         }
@@ -306,11 +393,14 @@ impl PostChain {
         }
         self.size = size;
         self.targets_revision += 1;
-        let texture = |label| {
+        let largest = size.0.max(size.1);
+        let blur_levels =
+            if self.blur_passes.contains(&true) { BLUR_LEVELS.min(u32::BITS - largest.leading_zeros()) } else { 1 };
+        let texture = |label, mip_level_count| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
-                mip_level_count: 1,
+                mip_level_count,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: self.format,
@@ -318,13 +408,26 @@ impl PostChain {
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            Target { _texture: texture, view }
+            let levels = (0..mip_level_count)
+                .map(|level| {
+                    texture.create_view(&wgpu::TextureViewDescriptor {
+                        base_mip_level: level,
+                        mip_level_count: Some(1),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+            Target { _texture: texture, view, levels }
         };
         let count = if self.passes.len() > 1 { 2 } else { 1 };
-        self.targets = (0..count).map(|i| texture(if i == 0 { "post target a" } else { "post target b" })).collect();
+        self.targets =
+            (0..count).map(|i| texture(if i == 0 { "post target a" } else { "post target b" }, blur_levels)).collect();
         // New history textures start zeroed: the previous frame reads as transparent.
-        self.history =
-            if self.uses_previous { vec![texture("post history a"), texture("post history b")] } else { Vec::new() };
+        self.history = if self.uses_previous {
+            vec![texture("post history a", 1), texture("post history b", 1)]
+        } else {
+            Vec::new()
+        };
         self.history_current = 0;
 
         let bind_group = |input: &wgpu::TextureView, previous: &wgpu::TextureView| {
@@ -351,6 +454,34 @@ impl PostChain {
                 }
             })
             .collect();
+        // Rendering into the first blurred level, a pass may only read the full size one.
+        self.blur_source_bind_groups =
+            self.targets.iter().map(|target| bind_group(target.attachment(), target.attachment())).collect();
+        self.downsample_bind_groups = self
+            .targets
+            .iter()
+            .map(|target| {
+                target.levels[..target.levels.len() - 1]
+                    .iter()
+                    .map(|level| {
+                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("post downsample"),
+                            layout: &self.blit_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(level),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                                },
+                            ],
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
         self.blit_bind_groups = self
             .history
             .iter()
@@ -372,7 +503,7 @@ impl PostChain {
 
     /// Where the terminal is rendered when the chain is active.
     pub fn input_view(&self) -> Option<&wgpu::TextureView> {
-        self.targets.first().map(|t| &t.view)
+        self.targets.first().map(Target::attachment)
     }
 
     pub fn run(
@@ -392,10 +523,24 @@ impl PostChain {
         let last = self.passes.len() - 1;
         for (i, pipeline) in self.passes.iter().enumerate() {
             let input = i % self.targets.len();
+            if self.blur_passes[i]
+                && let Some(downsample) = &self.downsample
+            {
+                let target = &self.targets[input];
+                let mut levels = target.levels[1..].iter().zip(&self.downsample_bind_groups[input]);
+                if let Some(blur_source) = &self.blur_sources[i]
+                    && let Some((level, _)) = levels.next()
+                {
+                    draw(encoder, level, blur_source, &self.blur_source_bind_groups[input]);
+                }
+                for (level, bind_group) in levels {
+                    draw(encoder, level, downsample, bind_group);
+                }
+            }
             let view = match (i == last, with_history) {
-                (true, true) => &self.history[write].view,
+                (true, true) => self.history[write].attachment(),
                 (true, false) => output,
-                (false, _) => &self.targets[(i + 1) % self.targets.len()].view,
+                (false, _) => self.targets[(i + 1) % self.targets.len()].attachment(),
             };
             let bind_group = &self.bind_groups[input][if with_history { read } else { 0 }];
             draw(encoder, view, pipeline, bind_group);
