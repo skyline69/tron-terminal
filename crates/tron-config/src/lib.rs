@@ -426,6 +426,8 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("ctrl+shift+g", "select_command_output"),
     ("ctrl+shift+n", "new_window"),
     ("ctrl+shift+comma", "reload_config"),
+    // Ctrl+U: shells, readline and tmux delete the line before the cursor.
+    ("ctrl+shift+backspace", "text:\u{15}"),
 ];
 
 /// The Command key shortcuts of other macOS terminals.
@@ -452,6 +454,8 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("super+shift+up", "select_command_output"),
     ("super+n", "new_window"),
     ("super+comma", "reload_config"),
+    // Ctrl+U: shells, readline and tmux delete the line before the cursor.
+    ("super+backspace", "text:\u{15}"),
 ];
 
 #[cfg(not(target_os = "macos"))]
@@ -1057,9 +1061,10 @@ mod tests {
     #[test]
     fn keybindings_merge_with_defaults() {
         #[cfg(not(target_os = "macos"))]
-        let (copy, paste, previous_prompt) = ("ctrl+shift+c", "ctrl+shift+v", "ctrl+shift+z");
+        let (copy, paste, previous_prompt, delete_line) =
+            ("ctrl+shift+c", "ctrl+shift+v", "ctrl+shift+z", "ctrl+shift+backspace");
         #[cfg(target_os = "macos")]
-        let (copy, paste, previous_prompt) = ("super+c", "super+v", "super+up");
+        let (copy, paste, previous_prompt, delete_line) = ("super+c", "super+v", "super+up", "super+backspace");
         let config = Config::parse(&format!(
             r#"
             [keybindings]
@@ -1082,6 +1087,7 @@ mod tests {
         assert_eq!(find("ctrl+plus"), Some(Action::IncreaseFontSize));
         assert_eq!(find("super+k"), Some(Action::SendText("\u{15}".into())));
         assert_eq!(find(previous_prompt), Some(Action::ScrollToPreviousPrompt));
+        assert_eq!(find(delete_line), Some(Action::SendText("\u{15}".into())));
         assert_eq!(errors.len(), 1);
     }
 

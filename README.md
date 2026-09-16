@@ -148,13 +148,14 @@ The startup screen opens by itself the first time tron starts. Set
 | `Ctrl+Shift+G` | Select the output of the last command |
 | `Ctrl+Shift+N` | New window in the current directory |
 | `Ctrl+Shift+,` | Reload configuration |
+| `Ctrl+Shift+Backspace` | Delete the line before the cursor (sends `Ctrl+U`) |
 | `Ctrl+click` | Open a link |
 
 On macOS the defaults use Command instead: `Cmd+C` / `Cmd+V`, `Cmd+=` /
 `Cmd+-` / `Cmd+0`, `Cmd+F` search, `Cmd+K` clear scrollback, `Cmd+Up` /
 `Cmd+Down` previous / next prompt, `Cmd+Shift+Up` select command output,
-`Cmd+N` new window, `Cmd+,` reload configuration and `Cmd+click` to open a
-link. Option types special characters unless `option_as_alt` under `[window]`
+`Cmd+N` new window, `Cmd+,` reload configuration, `Cmd+Backspace` delete the
+line and `Cmd+click` to open a link. Option types special characters unless `option_as_alt` under `[window]`
 is `left`, `right` or `both`. The shell starts as a login shell, like in
 Terminal.app, and middle click pastes tron's own selection.
 
