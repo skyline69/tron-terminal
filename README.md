@@ -149,13 +149,15 @@ The startup screen opens by itself the first time tron starts. Set
 | `Ctrl+Shift+N` | New window in the current directory |
 | `Ctrl+Shift+,` | Reload configuration |
 | `Ctrl+Shift+Backspace` | Delete the line before the cursor (sends `Ctrl+U`) |
+| `Ctrl+Shift+Left` / `Ctrl+Shift+Right` | Go to the beginning / end of the line (sends Home / End) |
 | `Ctrl+click` | Open a link |
 
 On macOS the defaults use Command instead: `Cmd+C` / `Cmd+V`, `Cmd+=` /
 `Cmd+-` / `Cmd+0`, `Cmd+F` search, `Cmd+K` clear scrollback, `Cmd+Up` /
 `Cmd+Down` previous / next prompt, `Cmd+Shift+Up` select command output,
 `Cmd+N` new window, `Cmd+,` reload configuration, `Cmd+Backspace` delete the
-line and `Cmd+click` to open a link. Option types special characters unless `option_as_alt` under `[window]`
+line, `Cmd+Left` / `Cmd+Right` beginning / end of the line and `Cmd+click` to
+open a link. Option types special characters unless `option_as_alt` under `[window]`
 is `left`, `right` or `both`. The shell starts as a login shell, like in
 Terminal.app, and middle click pastes tron's own selection.
 
@@ -218,6 +220,7 @@ Key bindings override the defaults:
 "alt+enter" = "new_window"
 "ctrl+shift+k" = "clear_scrollback"
 "super+u" = "text:\u0015"    # send Ctrl+U to the application
+"alt+h" = "key:home"         # send the Home key to the application
 ```
 
 Actions: `copy`, `paste`, `paste_selection`, `increase_font_size`,
@@ -225,7 +228,8 @@ Actions: `copy`, `paste`, `paste_selection`, `increase_font_size`,
 `scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`,
 `clear_scrollback`, `scroll_to_previous_prompt`, `scroll_to_next_prompt`,
 `select_command_output`, `copy_command_output`, `search`, `new_window`,
-`reload_config`, `text:...`, `none`.
+`reload_config`, `text:...`, `key:...` (`home`, `end`, `left`, `enter`, ...),
+`none`.
 
 ### Shaders
 

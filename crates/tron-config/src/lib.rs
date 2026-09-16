@@ -428,6 +428,9 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("ctrl+shift+comma", "reload_config"),
     // Ctrl+U: shells, readline and tmux delete the line before the cursor.
     ("ctrl+shift+backspace", "text:\u{15}"),
+    // Home and End: to the beginning and end of the line being edited.
+    ("ctrl+shift+left", "key:home"),
+    ("ctrl+shift+right", "key:end"),
 ];
 
 /// The Command key shortcuts of other macOS terminals.
@@ -456,6 +459,9 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("super+comma", "reload_config"),
     // Ctrl+U: shells, readline and tmux delete the line before the cursor.
     ("super+backspace", "text:\u{15}"),
+    // Home and End: to the beginning and end of the line being edited.
+    ("super+left", "key:home"),
+    ("super+right", "key:end"),
 ];
 
 #[cfg(not(target_os = "macos"))]
@@ -593,6 +599,8 @@ pub enum Action {
     ReloadConfig,
     /// Sends text to the application, written as `text:...`.
     SendText(String),
+    /// Sends a key without modifiers to the application, written as `key:home`.
+    SendKey(BindKey),
     /// Removes a default binding.
     None,
 }
@@ -601,6 +609,9 @@ impl Action {
     pub fn parse(text: &str) -> Option<Self> {
         if let Some(rest) = text.strip_prefix("text:") {
             return Some(Self::SendText(rest.to_owned()));
+        }
+        if let Some(rest) = text.strip_prefix("key:") {
+            return BindKey::parse(&rest.to_ascii_lowercase()).map(Self::SendKey);
         }
         Some(match text {
             "copy" => Self::Copy,
@@ -1061,10 +1072,11 @@ mod tests {
     #[test]
     fn keybindings_merge_with_defaults() {
         #[cfg(not(target_os = "macos"))]
-        let (copy, paste, previous_prompt, delete_line) =
-            ("ctrl+shift+c", "ctrl+shift+v", "ctrl+shift+z", "ctrl+shift+backspace");
+        let (copy, paste, previous_prompt, delete_line, line_start) =
+            ("ctrl+shift+c", "ctrl+shift+v", "ctrl+shift+z", "ctrl+shift+backspace", "ctrl+shift+left");
         #[cfg(target_os = "macos")]
-        let (copy, paste, previous_prompt, delete_line) = ("super+c", "super+v", "super+up", "super+backspace");
+        let (copy, paste, previous_prompt, delete_line, line_start) =
+            ("super+c", "super+v", "super+up", "super+backspace", "super+left");
         let config = Config::parse(&format!(
             r#"
             [keybindings]
@@ -1073,6 +1085,7 @@ mod tests {
             "ctrl++" = "increase_font_size"
             "super+k" = "text:\u0015"
             "ctrl+bogus" = "copy"
+            "alt+h" = "key:nope"
             "#,
         ))
         .unwrap();
@@ -1088,7 +1101,8 @@ mod tests {
         assert_eq!(find("super+k"), Some(Action::SendText("\u{15}".into())));
         assert_eq!(find(previous_prompt), Some(Action::ScrollToPreviousPrompt));
         assert_eq!(find(delete_line), Some(Action::SendText("\u{15}".into())));
-        assert_eq!(errors.len(), 1);
+        assert_eq!(find(line_start), Some(Action::SendKey(BindKey::Named("home".into()))));
+        assert_eq!(errors.len(), 2);
     }
 
     #[test]

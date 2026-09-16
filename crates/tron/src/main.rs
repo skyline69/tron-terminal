@@ -32,7 +32,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ButtonSource, ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, DndAction, EventLoop, EventLoopProxy};
 use winit::icon::{Icon, RgbaIcon};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{
     ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, Theme as WindowTheme, UserAttentionType, Window,
     WindowAttributes, WindowId,
@@ -1124,14 +1124,7 @@ impl App {
                 } else if session.search.is_some() || session.palette.is_some() {
                     return;
                 }
-                let key_modes = {
-                    let term = session.shared.term.lock();
-                    input::KeyModes {
-                        app_cursor: term.modes().contains(Modes::APP_CURSOR),
-                        app_keypad: term.modes().contains(Modes::APP_KEYPAD),
-                        kitty_flags: term.keyboard_flags(),
-                    }
-                };
+                let key_modes = session.key_modes();
                 let mods = input::Mods::new(session.key_modifiers(&event), session.hyper, false);
                 if let Some(bytes) = input::encode(&event, mods, key_modes) {
                     if pressed {
@@ -1184,6 +1177,16 @@ impl App {
 impl Session {
     fn send(&self, bytes: Vec<u8>) {
         let _ = self.input.send(bytes);
+    }
+
+    /// The terminal modes that change how keys are encoded.
+    fn key_modes(&self) -> input::KeyModes {
+        let term = self.shared.term.lock();
+        input::KeyModes {
+            app_cursor: term.modes().contains(Modes::APP_CURSOR),
+            app_keypad: term.modes().contains(Modes::APP_KEYPAD),
+            kitty_flags: term.keyboard_flags(),
+        }
     }
 
     /// Modifiers for encoding keys.
@@ -1827,6 +1830,15 @@ impl Session {
             Action::SendText(text) => {
                 self.prepare_input();
                 self.send(text.into_bytes());
+            }
+            Action::SendKey(key) => {
+                let modes = self.key_modes();
+                if let Some(bytes) =
+                    unmodified_key(&key).and_then(|event| input::encode(&event, input::Mods::default(), modes))
+                {
+                    self.prepare_input();
+                    self.send(bytes);
+                }
             }
             Action::ScrollToPreviousPrompt | Action::ScrollToNextPrompt => {
                 self.shared.term.lock().scroll_to_prompt(action == Action::ScrollToPreviousPrompt);
@@ -2756,6 +2768,44 @@ fn spawn_reader(
     Ok(())
 }
 
+/// A press of `key` with no modifiers, as winit would report it, for bindings
+/// that send a key.
+fn unmodified_key(key: &BindKey) -> Option<KeyEvent> {
+    let (logical, physical, text) = match key {
+        BindKey::Char(c) => (Key::Character(c.to_string().into()), KeyCode::Space, Some(c.to_string())),
+        BindKey::Named(name) => {
+            let (named, code) = match name.as_str() {
+                "enter" => (NamedKey::Enter, KeyCode::Enter),
+                "tab" => (NamedKey::Tab, KeyCode::Tab),
+                "backspace" => (NamedKey::Backspace, KeyCode::Backspace),
+                "escape" => (NamedKey::Escape, KeyCode::Escape),
+                "insert" => (NamedKey::Insert, KeyCode::Insert),
+                "delete" => (NamedKey::Delete, KeyCode::Delete),
+                "home" => (NamedKey::Home, KeyCode::Home),
+                "end" => (NamedKey::End, KeyCode::End),
+                "page_up" => (NamedKey::PageUp, KeyCode::PageUp),
+                "page_down" => (NamedKey::PageDown, KeyCode::PageDown),
+                "up" => (NamedKey::ArrowUp, KeyCode::ArrowUp),
+                "down" => (NamedKey::ArrowDown, KeyCode::ArrowDown),
+                "left" => (NamedKey::ArrowLeft, KeyCode::ArrowLeft),
+                "right" => (NamedKey::ArrowRight, KeyCode::ArrowRight),
+                _ => return None,
+            };
+            (Key::Named(named), code, None)
+        }
+    };
+    Some(KeyEvent {
+        physical_key: PhysicalKey::Code(physical),
+        logical_key: logical.clone(),
+        text: text.as_deref().map(Into::into),
+        location: KeyLocation::Standard,
+        state: ElementState::Pressed,
+        repeat: false,
+        text_with_all_modifiers: text.as_deref().map(Into::into),
+        key_without_modifiers: logical,
+    })
+}
+
 fn bind_key(key: &Key) -> Option<BindKey> {
     match key {
         Key::Character(text) => {
@@ -3009,6 +3059,18 @@ fn window_icon() -> Option<Icon> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_bindings_send_unmodified_keys() {
+        let encode = |name: &str, modes| {
+            input::encode(&unmodified_key(&BindKey::Named(name.into())).unwrap(), input::Mods::default(), modes)
+        };
+        assert_eq!(encode("home", input::KeyModes::default()).as_deref(), Some(&b"\x1b[H"[..]));
+        assert_eq!(encode("end", input::KeyModes::default()).as_deref(), Some(&b"\x1b[F"[..]));
+        let app_cursor = input::KeyModes { app_cursor: true, ..input::KeyModes::default() };
+        assert_eq!(encode("home", app_cursor).as_deref(), Some(&b"\x1bOH"[..]));
+        assert!(unmodified_key(&BindKey::Named("f13".into())).is_none());
+    }
 
     #[test]
     fn window_icon_decodes() {
