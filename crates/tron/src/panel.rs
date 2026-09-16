@@ -1,5 +1,5 @@
-//! The search box and the command palette: small text interfaces drawn with
-//! ratatui over the top right corner of the terminal.
+//! The search box, the command palette and the update notice: small text
+//! interfaces drawn with ratatui over the corners of the terminal.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -13,6 +13,7 @@ use tron_core::Palette;
 use tron_render::Overlay;
 
 use crate::menu::Item;
+use crate::update;
 
 /// Widest the search box grows, in cells.
 const SEARCH_WIDTH: usize = 44;
@@ -255,6 +256,119 @@ pub fn palette_overlays(
     overlays(&buffer, top, left, &colors)
 }
 
+/// A button on the update notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeButton {
+    /// Opens the release page.
+    Open,
+    Close,
+    /// Stops telling about this release.
+    Skip,
+}
+
+impl NoticeButton {
+    const ALL: [Self; 3] = [Self::Open, Self::Close, Self::Skip];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::Close => "Close",
+            Self::Skip => "Don't show again",
+        }
+    }
+
+    /// Width of the button: its label with a space on each side.
+    fn width(self) -> usize {
+        self.label().len() + 2
+    }
+}
+
+/// What a viewport cell is on the update notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeHit {
+    Button(NoticeButton),
+    /// The notice's border or message.
+    Inside,
+    Outside,
+}
+
+/// Where the update notice is drawn, in viewport cells: a cell in from the
+/// bottom right corner, with the message above a row of buttons.
+struct NoticeLayout {
+    top: usize,
+    left: usize,
+    width: usize,
+}
+
+/// Rows of the update notice: borders, the message and the buttons.
+const NOTICE_HEIGHT: usize = 4;
+
+fn notice_message(version: &str) -> String {
+    format!("tron {version} is out. You have {}.", update::CURRENT)
+}
+
+fn notice_layout(version: &str, cols: usize, rows: usize) -> Option<NoticeLayout> {
+    let buttons: usize = NoticeButton::ALL.iter().map(|button| button.width() + 1).sum::<usize>() - 1;
+    // Borders and a space inside each.
+    let width = Span::raw(notice_message(version)).width().max(buttons) + 4;
+    if cols < width || rows < NOTICE_HEIGHT {
+        return None;
+    }
+    let top = rows - NOTICE_HEIGHT - usize::from(rows > NOTICE_HEIGHT);
+    Some(NoticeLayout { top, left: cols - width - usize::from(cols > width), width })
+}
+
+/// What the viewport cell at `row` and `col` is on the notice about `version`.
+pub fn notice_hit(version: &str, cols: usize, rows: usize, row: usize, col: usize) -> NoticeHit {
+    let Some(NoticeLayout { top, left, width }) = notice_layout(version, cols, rows) else {
+        return NoticeHit::Outside;
+    };
+    if !(top..top + NOTICE_HEIGHT).contains(&row) || !(left..left + width).contains(&col) {
+        return NoticeHit::Outside;
+    }
+    if row == top + 2 {
+        let mut start = left + 2;
+        for button in NoticeButton::ALL {
+            if (start..start + button.width()).contains(&col) {
+                return NoticeHit::Button(button);
+            }
+            start += button.width() + 1;
+        }
+    }
+    NoticeHit::Inside
+}
+
+/// The notice that tron `version` is out, with `hovered` highlighted.
+pub fn notice_overlays(
+    version: &str,
+    hovered: Option<NoticeButton>,
+    cols: usize,
+    rows: usize,
+    palette: &Palette,
+) -> Vec<Overlay> {
+    let colors = Colors::new(palette);
+    let Some(NoticeLayout { top, left, width }) = notice_layout(version, cols, rows) else { return Vec::new() };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, width as u16, NOTICE_HEIGHT as u16));
+    let block = frame(&colors, " Update ");
+    let inner = block.inner(buffer.area);
+    block.render(buffer.area, &mut buffer);
+    let mut buttons = vec![Span::raw(" ")];
+    for button in NoticeButton::ALL {
+        let style = if hovered == Some(button) {
+            Style::new().fg(color(colors.bg)).bg(color(colors.accent))
+        } else if button == NoticeButton::Skip {
+            Style::new().fg(color(colors.dim))
+        } else {
+            Style::new().fg(color(colors.accent))
+        };
+        buttons.push(Span::styled(format!(" {} ", button.label()), style));
+        buttons.push(Span::raw(" "));
+    }
+    let lines = vec![Line::raw(format!(" {}", notice_message(version))), Line::from(buttons)];
+    Paragraph::new(lines).render(inner, &mut buffer);
+    overlays(&buffer, top, left, &colors)
+}
+
 /// A rounded box in the theme's colors.
 fn frame<'a>(colors: &Colors, title: &'a str) -> Block<'a> {
     Block::bordered()
@@ -439,6 +553,31 @@ mod tests {
         let at_end = thumb_rows(&state);
         assert!(at_end.contains(&(4 + PALETTE_ROWS - 1)), "thumb at the end: {at_end:?}");
         assert!(thumb_rows(&palette_with("copy")).is_empty(), "short lists have none");
+    }
+
+    #[test]
+    fn update_notice_sits_at_the_bottom_right_with_buttons() {
+        let palette = Palette::default();
+        let version = "9.9.9";
+        let notice = notice_overlays(version, Some(NoticeButton::Close), 80, 24, &palette);
+        let bottom = notice.iter().map(|o| o.row).max().unwrap();
+        assert_eq!(bottom, 22);
+        let right = notice.iter().map(|o| o.col + Span::raw(&o.text).width()).max().unwrap();
+        assert_eq!(right, 79);
+        assert!(notice.iter().any(|o| o.text.contains("tron 9.9.9 is out")));
+        let close = notice.iter().find(|o| o.text == " Close ").expect("Close is highlighted on its own");
+        assert_eq!(close.bg, palette.cursor);
+
+        let hit = |row, col| notice_hit(version, 80, 24, row, col);
+        let row = close.row;
+        assert_eq!(hit(row, close.col), NoticeHit::Button(NoticeButton::Close));
+        assert_eq!(hit(row, close.col + 6), NoticeHit::Button(NoticeButton::Close));
+        assert_eq!(hit(row, close.col + 7), NoticeHit::Inside, "the gap between buttons");
+        assert_eq!(hit(row, close.col - 2), NoticeHit::Button(NoticeButton::Open));
+        assert_eq!(hit(row, close.col + 8), NoticeHit::Button(NoticeButton::Skip));
+        assert_eq!(hit(row - 1, close.col), NoticeHit::Inside, "the message");
+        assert_eq!(hit(row, 10), NoticeHit::Outside);
+        assert!(notice_overlays(version, None, 20, 24, &palette).is_empty(), "too narrow");
     }
 
     #[test]

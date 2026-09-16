@@ -286,6 +286,14 @@ printf '\e]777;notify;Build;finished\e\\'
 
 See `[notifications]` in the example config.
 
+## Updates
+
+Once a day at most, tron asks GitHub for the latest release, with `curl`.
+When a newer one is out, a notice in the bottom right corner of each window
+offers to open its release page, to close the notice until tron starts
+again, or to not show it again for that release. Set `check = false` under
+`[updates]` to never ask.
+
 ## Remote hosts
 
 tron sets `TERM=xterm-tron`. Remote hosts rarely have that terminfo entry,

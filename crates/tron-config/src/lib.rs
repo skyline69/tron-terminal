@@ -129,6 +129,7 @@ pub struct Config {
     pub links: LinkConfig,
     pub notifications: NotificationConfig,
     pub harness: HarnessConfig,
+    pub updates: UpdatesConfig,
     /// Show the startup screen (welcome, setup, tour) before the shell.
     /// Unset: only on the first launch.
     pub startup: Option<bool>,
@@ -702,6 +703,20 @@ pub struct NotificationConfig {
 impl Default for NotificationConfig {
     fn default() -> Self {
         Self { mode: NotifyMode::Unfocused, command: NOTIFY_COMMAND.into() }
+    }
+}
+
+/// `[updates]`: telling when a newer tron is released.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// Look for a newer release on GitHub, at most once a day.
+    pub check: bool,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self { check: true }
     }
 }
 

@@ -12,6 +12,7 @@ mod menu;
 mod mouse;
 mod panel;
 mod terminfo;
+mod update;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -128,6 +129,23 @@ fn main() -> anyhow::Result<()> {
 
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     let proxy = event_loop.create_proxy();
+    let update_found = Arc::new(Mutex::new(None));
+    if config.updates.check
+        && std::env::var_os("TRON_SCREENSHOT").is_none()
+        && let Some(data_dir) = paths.as_ref().map(|paths| paths.data_dir.clone())
+    {
+        let (found, proxy) = (update_found.clone(), proxy.clone());
+        let spawned = thread::Builder::new().name("update-check".into()).spawn(move || {
+            if let Some(version) = update::newer_release(&data_dir) {
+                log::info!("tron {version} is out");
+                *found.lock() = Some(version);
+                proxy.wake_up();
+            }
+        });
+        if let Err(error) = spawned {
+            log::warn!("cannot check for updates: {error}");
+        }
+    }
     let config_dirty = Arc::new(AtomicBool::new(false));
     let watcher = paths.as_ref().and_then(|paths| {
         let dirty = config_dirty.clone();
@@ -156,6 +174,8 @@ fn main() -> anyhow::Result<()> {
         sessions: HashMap::new(),
         active: None,
         max_fps: None,
+        update_found,
+        update_notice: None,
     })?;
     Ok(())
 }
@@ -183,6 +203,8 @@ struct Launch {
 enum AppRequest {
     ReloadConfig,
     OpenSettings,
+    /// A button on the update notice was clicked.
+    Update(panel::NoticeButton),
 }
 
 /// A window's shell, set aside while another program such as Settings… runs in its place.
@@ -256,6 +278,10 @@ struct App {
     active: Option<WindowId>,
     /// Highest refresh rate of the connected monitors, for the startup screen's frame rate choices.
     max_fps: Option<u32>,
+    /// A newer release, once the update check found one.
+    update_found: Arc<Mutex<Option<String>>>,
+    /// The newer release every window tells about, until the notice is dismissed.
+    update_notice: Option<String>,
 }
 
 /// Config values the event handlers need.
@@ -460,6 +486,10 @@ struct Session {
     palette: Option<panel::PaletteState>,
     /// Something only the `App` can do, asked for from the command palette.
     app_request: Option<AppRequest>,
+    /// The newer release the update notice tells about, while it shows.
+    update_notice: Option<String>,
+    /// The update notice's button under the pointer.
+    notice_hover: Option<panel::NoticeButton>,
     /// Uncommitted IME text.
     preedit: Option<String>,
     hovered_link: Option<LinkMatch>,
@@ -654,6 +684,8 @@ impl App {
             search: None,
             palette: None,
             app_request: None,
+            update_notice: None,
+            notice_hover: None,
             preedit: None,
             hovered_link: None,
             blink_epoch: Instant::now(),
@@ -803,6 +835,9 @@ impl App {
                 for session in self.sessions.values_mut() {
                     session.apply_config(previewed.as_ref().unwrap_or(&self.config), self.paths.as_ref());
                 }
+                if !self.config.updates.check {
+                    self.set_update_notice(None);
+                }
             }
             Err(error) => {
                 log::error!("{error}");
@@ -922,6 +957,10 @@ impl ApplicationHandler for App {
         if self.config_dirty.swap(false, Ordering::AcqRel) {
             self.reload_config();
         }
+        let found = self.update_found.lock().take();
+        if let Some(version) = found {
+            self.set_update_notice(Some(version));
+        }
         #[cfg(target_os = "macos")]
         for command in menu::take_commands() {
             self.run_menu_command(command);
@@ -983,6 +1022,9 @@ impl App {
                 let id = session.window.id();
                 self.active = Some(id);
                 self.sessions.insert(id, session);
+                if let Some(session) = self.sessions.get_mut(&id) {
+                    session.set_update_notice(self.update_notice.clone());
+                }
             }
             Err(error) => {
                 log::error!("{error:#}");
@@ -1021,8 +1063,37 @@ impl App {
                     self.active = Some(id);
                     self.open_settings();
                 }
+                AppRequest::Update(button) => self.answer_update_notice(id, button),
             }
         }
+    }
+
+    /// Shows the notice about a newer release in every window, or hides it.
+    fn set_update_notice(&mut self, version: Option<String>) {
+        for session in self.sessions.values_mut() {
+            session.set_update_notice(version.clone());
+        }
+        self.update_notice = version;
+    }
+
+    /// Carries out the update notice button clicked in window `id`. Every button
+    /// closes the notice in all windows until tron starts again.
+    fn answer_update_notice(&mut self, id: WindowId, button: panel::NoticeButton) {
+        let Some(version) = self.update_notice.clone() else { return };
+        match button {
+            panel::NoticeButton::Open => {
+                if let Some(session) = self.sessions.get(&id) {
+                    session.open_link(&update::release_url(&version));
+                }
+            }
+            panel::NoticeButton::Close => {}
+            panel::NoticeButton::Skip => {
+                if let Some(paths) = &self.paths {
+                    update::skip(&paths.data_dir, &version);
+                }
+            }
+        }
+        self.set_update_notice(None);
     }
 
     fn session_event(&mut self, event_loop: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -1751,7 +1822,7 @@ impl Session {
             log::warn!("failed to resize pty: {error}");
         }
         // The Find box and the command palette sit at the right edge, which moved.
-        if changed && (self.search.is_some() || self.palette.is_some()) {
+        if changed && (self.search.is_some() || self.palette.is_some() || self.update_notice.is_some()) {
             self.update_overlays();
         }
         self.window.request_redraw();
@@ -1925,6 +1996,24 @@ impl Session {
         self.window.request_redraw();
     }
 
+    fn set_update_notice(&mut self, version: Option<String>) {
+        if version == self.update_notice {
+            return;
+        }
+        self.update_notice = version;
+        self.notice_hover = None;
+        self.update_overlays();
+        self.window.request_redraw();
+    }
+
+    /// What the pointer is over on the update notice, or `None` while it is hidden.
+    fn notice_hit(&self) -> Option<panel::NoticeHit> {
+        let version = self.update_notice.as_deref()?;
+        let (row, col) = self.renderer.cell_at(self.mouse.position.0, self.mouse.position.1);
+        let (cols, rows) = self.renderer.grid_size();
+        Some(panel::notice_hit(version, cols, rows, row, col)).filter(|&hit| hit != panel::NoticeHit::Outside)
+    }
+
     /// What the pointer is over on the command palette, or `None` while it is closed.
     fn palette_hit(&self) -> Option<panel::PaletteHit> {
         let palette = self.palette.as_ref()?;
@@ -1990,6 +2079,9 @@ impl Session {
                 (None, false) => " no matches ",
             };
             overlays.extend(panel::search_overlays(&search.query, status, cols, rows, &palette));
+        }
+        if let Some(version) = &self.update_notice {
+            overlays.extend(panel::notice_overlays(version, self.notice_hover, cols, rows, &palette));
         }
         if let Some(state) = &self.palette {
             overlays.extend(panel::palette_overlays(state, &self.bindings, cols, rows, &palette));
@@ -2292,7 +2384,11 @@ impl Session {
             self.app_pointer = None;
         }
         let over_palette = self.palette_hit().is_some_and(|hit| hit != panel::PaletteHit::Outside);
-        let icon = if self.in_title_bar(self.mouse.position.1) || self.scrollbar.hovered || over_palette {
+        let notice = self.notice_hit();
+        let icon = if matches!(notice, Some(panel::NoticeHit::Button(_))) && !over_palette {
+            CursorIcon::Pointer
+        } else if self.in_title_bar(self.mouse.position.1) || self.scrollbar.hovered || over_palette || notice.is_some()
+        {
             CursorIcon::Default
         } else if self.hovered_link.is_some() {
             CursorIcon::Pointer
@@ -2353,6 +2449,16 @@ impl Session {
                 }
                 panel::PaletteHit::Outside if pressed => self.close_palette(),
                 _ => {}
+            }
+            return;
+        }
+        // The update notice takes clicks on it too. Its buttons act on release.
+        if let Some(hit) = self.notice_hit() {
+            if let panel::NoticeHit::Button(clicked) = hit
+                && !pressed
+                && button == MouseButton::Left
+            {
+                self.app_request = Some(AppRequest::Update(clicked));
             }
             return;
         }
@@ -2478,6 +2584,24 @@ impl Session {
             let modes = self.shared.term.lock().modes();
             self.update_pointer_icon(modes);
             if hit != panel::PaletteHit::Outside {
+                return;
+            }
+        }
+        // Over the update notice, the pointer highlights the button under it.
+        if self.update_notice.is_some() {
+            let hit = self.notice_hit();
+            let hover = match hit {
+                Some(panel::NoticeHit::Button(button)) => Some(button),
+                _ => None,
+            };
+            if hover != self.notice_hover {
+                self.notice_hover = hover;
+                self.update_overlays();
+                self.window.request_redraw();
+            }
+            let modes = self.shared.term.lock().modes();
+            self.update_pointer_icon(modes);
+            if hit.is_some() {
                 return;
             }
         }

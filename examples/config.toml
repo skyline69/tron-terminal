@@ -134,6 +134,11 @@ mode = "unfocused"
 # osascript on macOS, which shows the notification itself.
 # command = "notify-send"
 
+[updates]
+# Look on GitHub for a newer tron at most once a day and show a notice in the
+# window when one is out.
+check = true
+
 [harness]
 # A glowing line grows from the center of the top edge while a coding agent
 # harness runs in the window, also inside tmux, in the color of its brand:
