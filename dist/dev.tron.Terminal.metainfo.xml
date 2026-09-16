@@ -53,6 +53,7 @@
   </branding>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-09-16"/>
     <release version="0.1.0" date="2026-09-15"/>
   </releases>
 </component>
