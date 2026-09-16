@@ -3856,7 +3856,7 @@ dependencies = [
 
 [[package]]
 name = "tron"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3887,7 +3887,7 @@ dependencies = [
 
 [[package]]
 name = "tron-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "etcetera",
  "log",
@@ -3899,7 +3899,7 @@ dependencies = [
 
 [[package]]
 name = "tron-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "bitflags 2.13.2",
@@ -3916,7 +3916,7 @@ dependencies = [
 
 [[package]]
 name = "tron-font"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "foldhash",
  "fontique",
@@ -3930,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "tron-pty"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "log",
  "rustix",
@@ -3940,7 +3940,7 @@ dependencies = [
 
 [[package]]
 name = "tron-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "foldhash",
@@ -3958,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "tron-startup"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "log",
