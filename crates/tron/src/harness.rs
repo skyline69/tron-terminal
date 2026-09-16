@@ -14,6 +14,11 @@ use winit::event_loop::EventLoopProxy;
 /// How often the watcher looks at what runs in the window.
 const POLL: Duration = Duration::from_millis(500);
 
+/// How long ago a harness may have started to count as starting when the watcher
+/// finds it. Older ones were already running: brought back to the foreground,
+/// or shown by switching tmux panes or windows.
+const STARTING: Duration = Duration::from_secs(5);
+
 /// Harnesses tron knows, by command name, with the color of their brand.
 const KNOWN: &[(&str, [u8; 3])] = &[
     // Claude Code: Anthropic's Claude orange.
@@ -93,11 +98,22 @@ pub fn identify(args: &[String], names: &[String]) -> Option<String> {
     known(program)
 }
 
+/// A harness running in the foreground of a window's terminal or tmux pane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Harness {
+    /// Its command name.
+    pub name: String,
+    /// Its process group.
+    pub group: u32,
+    /// Whether it had just started when the watcher found it.
+    pub starting: bool,
+}
+
 /// What a window's terminal runs: the harness found last, and the names to look for.
 #[derive(Default)]
 pub struct Watch {
     names: Mutex<Vec<String>>,
-    found: Mutex<Option<String>>,
+    found: Mutex<Option<Harness>>,
 }
 
 impl Watch {
@@ -105,8 +121,8 @@ impl Watch {
         *self.names.lock() = names;
     }
 
-    /// The harness running now, by command name.
-    pub fn found(&self) -> Option<String> {
+    /// The harness running now.
+    pub fn found(&self) -> Option<Harness> {
         self.found.lock().clone()
     }
 }
@@ -123,8 +139,13 @@ pub fn spawn(tty: PathBuf, shell: u32, watch: &Arc<Watch>, proxy: EventLoopProxy
             let names = watch.names.lock().clone();
             let found = find(&tty, shell, &names);
             let mut current = watch.found.lock();
-            if *current != found {
-                *current = found;
+            let key = |harness: &Harness| (harness.name.clone(), harness.group);
+            if current.as_ref().map(key) != found {
+                *current = found.map(|(name, group)| Harness {
+                    starting: tron_pty::process_age(group).is_some_and(|age| age < STARTING),
+                    name,
+                    group,
+                });
                 drop(current);
                 proxy.wake_up();
             }
@@ -136,8 +157,9 @@ pub fn spawn(tty: PathBuf, shell: u32, watch: &Arc<Watch>, proxy: EventLoopProxy
 }
 
 /// The harness in the foreground of the terminal of `shell`, whose device is
-/// `tty`, or in tmux's active pane when the foreground is a tmux client.
-fn find(tty: &Path, shell: u32, names: &[String]) -> Option<String> {
+/// `tty`, or in tmux's active pane when the foreground is a tmux client, with its
+/// process group.
+fn find(tty: &Path, shell: u32, names: &[String]) -> Option<(String, u32)> {
     let group = tron_pty::terminal_foreground(shell)?;
     let args = tron_pty::process_args(group)?;
     if command_name(args.first()?) == "tmux" {
@@ -145,11 +167,11 @@ fn find(tty: &Path, shell: u32, names: &[String]) -> Option<String> {
         log::debug!("harness watch: tmux client {group} {args:?}: {found:?}");
         return found;
     }
-    identify(&args, names)
+    identify(&args, names).map(|name| (name, group))
 }
 
 /// The harness in the active pane of the tmux client `client`, attached to `tty`.
-fn in_tmux(client: u32, args: &[String], tty: &Path, names: &[String]) -> Option<String> {
+fn in_tmux(client: u32, args: &[String], tty: &Path, names: &[String]) -> Option<(String, u32)> {
     let program = tron_pty::process_path(client).unwrap_or_else(|| PathBuf::from("tmux"));
     let mut command = Command::new(program);
     // The client's server socket, when its command line still shows it.
@@ -184,7 +206,7 @@ fn in_tmux(client: u32, args: &[String], tty: &Path, names: &[String]) -> Option
     let group = tron_pty::terminal_foreground(pane_shell)?;
     let pane_args = tron_pty::process_args(group)?;
     log::debug!("harness watch: tmux pane shell {pane_shell}, foreground {group} {pane_args:?}");
-    identify(&pane_args, names)
+    identify(&pane_args, names).map(|name| (name, group))
 }
 
 #[cfg(test)]

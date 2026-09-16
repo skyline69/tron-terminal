@@ -9,6 +9,7 @@ use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::Duration;
 
 use rustix::fs::{Mode, OFlags};
 use rustix::pty::OpenptFlags;
@@ -282,6 +283,23 @@ pub fn terminal_foreground(pid: u32) -> Option<u32> {
     stat_terminal_foreground(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
 }
 
+/// How long ago process `pid` started: the system's uptime less the process's
+/// start time, both counted from boot.
+#[cfg(target_os = "linux")]
+pub fn process_age(pid: u32) -> Option<Duration> {
+    let started = stat_start_ticks(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)?;
+    let uptime: f64 = std::fs::read_to_string("/proc/uptime").ok()?.split_whitespace().next()?.parse().ok()?;
+    let started = started as f64 / rustix::param::clock_ticks_per_second() as f64;
+    Some(Duration::from_secs_f64((uptime - started).max(0.0)))
+}
+
+/// `starttime` from `/proc/<pid>/stat`, in clock ticks since boot: the twentieth
+/// field after the command name.
+#[cfg(any(target_os = "linux", test))]
+fn stat_start_ticks(stat: &str) -> Option<u64> {
+    stat[stat.rfind(')')? + 1..].split_whitespace().nth(19)?.parse().ok()
+}
+
 /// `tpgid` from `/proc/<pid>/stat`: the sixth field after the command name, which
 /// is in parentheses and may itself contain spaces and parentheses.
 #[cfg(any(target_os = "linux", test))]
@@ -300,6 +318,30 @@ fn stat_terminal_foreground(stat: &str) -> Option<u32> {
 /// from `proc_bsdinfo.e_tpgid`.
 #[cfg(target_os = "macos")]
 pub fn terminal_foreground(pid: u32) -> Option<u32> {
+    const E_TPGID: usize = 112;
+    let info = bsd_info(pid)?;
+    let group = u32::from_ne_bytes(info[E_TPGID..E_TPGID + 4].try_into().ok()?);
+    (group > 0).then_some(group)
+}
+
+/// How long ago process `pid` started, from `proc_bsdinfo.pbi_start_tvsec` and
+/// `pbi_start_tvusec`.
+#[cfg(target_os = "macos")]
+pub fn process_age(pid: u32) -> Option<Duration> {
+    const START_TVSEC: usize = 120;
+    const START_TVUSEC: usize = 128;
+    let info = bsd_info(pid)?;
+    let seconds = u64::from_ne_bytes(info[START_TVSEC..START_TVSEC + 8].try_into().ok()?);
+    let micros = u64::from_ne_bytes(info[START_TVUSEC..START_TVUSEC + 8].try_into().ok()?);
+    let started = std::time::UNIX_EPOCH + Duration::from_secs(seconds) + Duration::from_micros(micros);
+    Some(std::time::SystemTime::now().duration_since(started).unwrap_or_default())
+}
+
+/// `struct proc_bsdinfo` of process `pid`: twelve 32-bit fields, 16 and 32 byte
+/// names, five more 32-bit fields ending with `e_tpgid`, then the nice value and
+/// the two 64-bit halves of the start time.
+#[cfg(target_os = "macos")]
+fn bsd_info(pid: u32) -> Option<[u8; 136]> {
     use std::ffi::{c_int, c_void};
 
     unsafe extern "C" {
@@ -307,20 +349,13 @@ pub fn terminal_foreground(pid: u32) -> Option<u32> {
         fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *mut c_void, size: c_int) -> c_int;
     }
     const PROC_PIDTBSDINFO: c_int = 3;
-    /// `struct proc_bsdinfo`: twelve 32-bit fields, 16 and 32 byte names, five more
-    /// 32-bit fields ending with `e_tpgid`, then the nice value and two 64-bit times.
     const SIZE: usize = 136;
-    const E_TPGID: usize = 112;
     let mut info = [0u8; SIZE];
     // SAFETY: the buffer is writable and as large as the size passed.
     let written = unsafe {
         proc_pidinfo(c_int::try_from(pid).ok()?, PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), SIZE as c_int)
     };
-    if written != SIZE as c_int {
-        return None;
-    }
-    let group = u32::from_ne_bytes(info[E_TPGID..E_TPGID + 4].try_into().ok()?);
-    (group > 0).then_some(group)
+    (written == SIZE as c_int).then_some(info)
 }
 
 /// A process's command line.
@@ -636,6 +671,7 @@ mod tests {
         assert_eq!(group, pty.child_id());
         assert_eq!(process_args(group).unwrap(), ["sleep", "5"]);
         assert!(process_path(group).unwrap().ends_with("sleep"));
+        assert!(process_age(group).unwrap() < Duration::from_secs(4), "sleep just started");
     }
 
     #[test]
@@ -643,6 +679,8 @@ mod tests {
         let stat = "4242 (my (odd) prog) S 4200 4242 4242 34817 4300 4194560 120 0 0 0";
         assert_eq!(stat_terminal_foreground(stat), Some(4300));
         assert_eq!(stat_terminal_foreground("1 (init) S 0 1 1 0 -1 4194560"), None, "no terminal");
+        let stat = "4242 (my (odd) prog) S 4200 4242 4242 34817 4300 4194560 120 0 0 0 5 3 0 0 20 0 1 0 98765 1000";
+        assert_eq!(stat_start_ticks(stat), Some(98765));
     }
 
     #[test]

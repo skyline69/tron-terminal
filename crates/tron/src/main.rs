@@ -384,8 +384,8 @@ const HARNESS_SWEEP: Duration = Duration::from_millis(1100);
 /// The glowing line that sweeps from the center of the top edge to both sides
 /// when a coding agent harness starts.
 struct HarnessLine {
-    /// The running harness, by command name.
-    name: Option<String>,
+    /// The running harness.
+    harness: Option<harness::Harness>,
     color: [u8; 3],
     /// When the sweep started, while it runs.
     started_at: Option<Instant>,
@@ -393,7 +393,7 @@ struct HarnessLine {
 
 impl HarnessLine {
     fn new() -> Self {
-        Self { name: None, color: [0; 3], started_at: None }
+        Self { harness: None, color: [0; 3], started_at: None }
     }
 }
 
@@ -1230,8 +1230,8 @@ impl Session {
         self.animation_fps = config.shader.fps;
         self.harness_watch.set_names(harness::names(&config.harness));
         self.harness_config = config.harness.clone();
-        if let Some(name) = &self.harness_line.name {
-            self.harness_line.color = harness::color(name, &config.harness).unwrap_or(self.harness_line.color);
+        if let Some(found) = &self.harness_line.harness {
+            self.harness_line.color = harness::color(&found.name, &config.harness).unwrap_or(self.harness_line.color);
         }
         let mut problems = Vec::new();
         let (bindings, errors) = config.bindings();
@@ -2641,18 +2641,22 @@ impl Session {
         wake
     }
 
-    /// Starts the harness line's sweep when a coding agent harness starts.
+    /// Starts the harness line's sweep when a coding agent harness starts, but not
+    /// when one already running comes to the foreground, such as in another tmux pane.
     fn update_harness(&mut self) {
         let found = self.harness_watch.found();
-        if found == self.harness_line.name {
+        if found == self.harness_line.harness {
             return;
         }
-        if let Some(color) = found.as_deref().and_then(|name| harness::color(name, &self.harness_config)) {
+        if let Some(found) = &found
+            && found.starting
+            && let Some(color) = harness::color(&found.name, &self.harness_config)
+        {
             self.harness_line.color = color;
             self.harness_line.started_at = Some(Instant::now());
             self.window.request_redraw();
         }
-        self.harness_line.name = found;
+        self.harness_line.harness = found;
     }
 
     /// Draws the harness line's sweep. Returns when the next frame is due while it runs.

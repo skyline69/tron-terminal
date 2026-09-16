@@ -75,7 +75,7 @@ png = "0.18.1"
 ratatui = "0.30.2"
 tachyonfx = { version = "0.25.2", default-features = false, features = ["std", "std-duration"] }
 pollster = "1.0.1"
-rustix = { version = "1.1.4", features = ["pty", "termios", "process", "fs", "stdio", "shm", "mm"] }
+rustix = { version = "1.1.4", features = ["pty", "termios", "process", "fs", "stdio", "shm", "mm", "param"] }
 smithay-clipboard = "0.7.3"
 serde = { version = "1.0.229", features = ["derive"] }
 swash = "0.2.10"
