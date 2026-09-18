@@ -729,6 +729,11 @@ impl CellPipeline {
                 self.build_row(row, snapshot.overscan_line(), None, &colors, fonts, queue, &mut instances);
             }
             self.overscan = instances;
+        } else {
+            // Nothing above the viewport: drop what the last smooth scroll built, it
+            // would otherwise hang unclipped into the padding above the first row.
+            self.overscan.background.clear();
+            self.overscan.foreground.clear();
         }
 
         // Row instances are relative to the row top; place them now.
@@ -753,7 +758,9 @@ impl CellPipeline {
         // Only the first and the last row can hang over an edge.
         let clipped = |y: usize| scroll > 0.0 && y + 1 == rows;
         self.frame.clear();
-        place(&mut self.frame, &self.overscan.background, row_offset(0) - cell_h, scroll > 0.0);
+        if scroll > 0.0 {
+            place(&mut self.frame, &self.overscan.background, row_offset(0) - cell_h, true);
+        }
         for (y, row) in self.rows.iter().enumerate() {
             place(&mut self.frame, &row.background, row_offset(y), clipped(y));
         }
@@ -763,7 +770,9 @@ impl CellPipeline {
             clip_range(&mut self.frame, cursor_start, top, bottom);
         }
         self.split = self.frame.len();
-        place(&mut self.frame, &self.overscan.foreground, row_offset(0) - cell_h, scroll > 0.0);
+        if scroll > 0.0 {
+            place(&mut self.frame, &self.overscan.foreground, row_offset(0) - cell_h, true);
+        }
         for (y, row) in self.rows.iter().enumerate() {
             place(&mut self.frame, &row.foreground, row_offset(y), clipped(y));
         }
