@@ -426,6 +426,7 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("ctrl+shift+x", "scroll_to_next_prompt"),
     ("ctrl+shift+g", "select_command_output"),
     ("ctrl+shift+n", "new_window"),
+    ("ctrl+shift+i", "inspector"),
     ("ctrl+shift+comma", "reload_config"),
     // Ctrl+U: shells, readline and tmux delete the line before the cursor.
     ("ctrl+shift+backspace", "text:\u{15}"),
@@ -457,6 +458,7 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("super+down", "scroll_to_next_prompt"),
     ("super+shift+up", "select_command_output"),
     ("super+n", "new_window"),
+    ("super+alt+i", "inspector"),
     ("super+comma", "reload_config"),
     // Ctrl+U: shells, readline and tmux delete the line before the cursor.
     ("super+backspace", "text:\u{15}"),
@@ -598,6 +600,8 @@ pub enum Action {
     CommandPalette,
     NewWindow,
     ReloadConfig,
+    /// Opens the inspector window, or closes it when it is open.
+    Inspector,
     /// Sends text to the application, written as `text:...`.
     SendText(String),
     /// Sends a key without modifiers to the application, written as `key:home`.
@@ -636,6 +640,7 @@ impl Action {
             "command_palette" => Self::CommandPalette,
             "new_window" => Self::NewWindow,
             "reload_config" => Self::ReloadConfig,
+            "inspector" => Self::Inspector,
             "none" => Self::None,
             _ => return None,
         })
@@ -1057,6 +1062,18 @@ mod tests {
         std::fs::create_dir_all(dir.join("themes")).unwrap();
         std::fs::create_dir_all(dir.join("shaders")).unwrap();
         Paths::with_dirs(dir.clone(), dir.join("data"))
+    }
+
+    #[test]
+    fn the_inspector_has_a_default_binding() {
+        let bindings = Config::default().bindings().0;
+        let binding = bindings.iter().find(|binding| binding.action == Action::Inspector);
+        let combo = &binding.expect("the inspector is bound by default").combo;
+        let expected = match cfg!(target_os = "macos") {
+            true => KeyCombo::parse("super+alt+i"),
+            false => KeyCombo::parse("ctrl+shift+i"),
+        };
+        assert_eq!(Some(combo), expected.as_ref());
     }
 
     #[test]

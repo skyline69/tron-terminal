@@ -156,12 +156,13 @@ The startup screen opens by itself the first time tron starts. Set
 | `Ctrl+Shift+,` | Reload configuration |
 | `Ctrl+Shift+Backspace` | Delete the line before the cursor (sends `Ctrl+U`) |
 | `Ctrl+Shift+Left` / `Ctrl+Shift+Right` | Go to the beginning / end of the line (sends Home / End) |
+| `Ctrl+Shift+I` | Open the [inspector](#inspector) |
 | `Ctrl+click` | Open a link |
 
 On macOS the defaults use Command instead: `Cmd+C` / `Cmd+V`, `Cmd+=` /
 `Cmd+-` / `Cmd+0`, `Cmd+F` search, `Cmd+K` clear scrollback, `Cmd+Up` /
 `Cmd+Down` previous / next prompt, `Cmd+Shift+Up` select command output,
-`Cmd+N` new window, `Cmd+,` reload configuration, `Cmd+Backspace` delete the
+`Cmd+N` new window, `Cmd+Option+I` inspector, `Cmd+,` reload configuration, `Cmd+Backspace` delete the
 line, `Cmd+Left` / `Cmd+Right` beginning / end of the line and `Cmd+click` to
 open a link. Option types special characters unless `option_as_alt` under `[window]`
 is `left`, `right` or `both`. The shell starts as a login shell, like in
@@ -243,8 +244,24 @@ Actions: `copy`, `paste`, `paste_selection`, `increase_font_size`,
 `scroll_page_up`, `scroll_page_down`, `scroll_to_top`, `scroll_to_bottom`,
 `clear_scrollback`, `scroll_to_previous_prompt`, `scroll_to_next_prompt`,
 `select_command_output`, `copy_command_output`, `search`, `new_window`,
-`reload_config`, `text:...`, `key:...` (`home`, `end`, `left`, `enter`, ...),
-`none`.
+`reload_config`, `inspector`, `text:...`, `key:...` (`home`, `end`, `left`,
+`enter`, ...), `none`.
+
+### Inspector
+
+`Ctrl+Shift+I` (`Cmd+Option+I` on macOS) opens the inspector: a second window
+that reads the terminal it belongs to, with five tabs.
+
+| Tab | What it shows |
+| --- | --- |
+| Terminal | Grid and cell size, history and viewport, cursor, the selection, the shell and its directory, and every mode applications have set |
+| Renderer | Frame times, the GPU and surface, the quads of a frame, the glyph atlases and caches, and the shader chain |
+| I/O | Bytes between the shell and the window with a throughput graph, what the parser made of them, and the sequences tron ignores |
+| Input | Keys with the bytes or the action they ran, modifiers, the pointer's cell and mouse reporting |
+| Theme | The palette, the named colors, the font and its metrics |
+
+`PAUSE` freezes the readings, `Esc` closes the window. While it is open the
+terminal keeps the sequences it ignores, which it otherwise only counts.
 
 ### Shaders
 

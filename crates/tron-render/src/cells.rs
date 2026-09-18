@@ -1273,6 +1273,21 @@ impl CellPipeline {
         true
     }
 
+    /// Quads in the prepared frame, and how many of them are backgrounds and cursor.
+    pub fn instances(&self) -> (usize, usize) {
+        (self.frame.len(), self.split)
+    }
+
+    /// Size and rows taken of the mask and the color atlas.
+    pub fn atlases(&self) -> [(u32, u32); 2] {
+        [(self.mask_atlas.size(), self.mask_atlas.used_rows()), (self.color_atlas.size(), self.color_atlas.used_rows())]
+    }
+
+    /// Rasterized glyphs, cached shaped runs and cached rows.
+    pub fn caches(&self) -> (usize, usize, usize) {
+        (self.glyphs.len(), self.shape_cache_len, self.row_cache.len())
+    }
+
     /// Instance range of backgrounds and cursor, then of text and decorations.
     pub fn ranges(&self) -> (Range<u32>, Range<u32>) {
         (0..self.split as u32, self.split as u32..self.frame.len() as u32)

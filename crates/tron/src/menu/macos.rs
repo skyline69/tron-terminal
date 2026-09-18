@@ -199,7 +199,7 @@ pub fn install(proxy: EventLoopProxy, bindings: &[Binding]) {
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     builder.items(&menu, &[Item::PreviousPrompt, Item::NextPrompt, Item::ScrollToTop, Item::ScrollToBottom]);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    builder.item(&menu, Item::ReloadConfig);
+    builder.items(&menu, &[Item::Inspector, Item::ReloadConfig]);
 
     let menu = builder.submenu(&bar, "Window");
     builder.standard(&menu, "Minimize", sel!(performMiniaturize:), "m", command);

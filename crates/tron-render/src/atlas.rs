@@ -38,6 +38,11 @@ impl Atlas {
         self.size
     }
 
+    /// Rows of the texture the shelves have taken.
+    pub fn used_rows(&self) -> u32 {
+        self.next_y
+    }
+
     /// Replaces the texture with an empty one of `size`.
     pub fn reset(&mut self, device: &wgpu::Device, size: u32) {
         *self = Self::new(device, self.label, self.format, size);

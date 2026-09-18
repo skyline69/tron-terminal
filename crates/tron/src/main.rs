@@ -14,12 +14,12 @@ mod panel;
 mod terminfo;
 mod update;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -47,6 +47,7 @@ use tron_core::{
     TermEvent, Terminal,
 };
 use tron_font::{CellMetrics, FontSystem};
+use tron_inspect::Inspector;
 use tron_pty::{Pty, SpawnOptions, WindowSize};
 use tron_render::{GlowLine, Gpu, LinkHighlight, Overlay, PostShader, Renderer, Scrollbar, Theme};
 
@@ -186,6 +187,9 @@ struct Shared {
     /// Set by the reader when it woke the event loop and the wake is unhandled.
     wake_pending: AtomicBool,
     exited: AtomicBool,
+    /// Bytes read from and written to the shell, for the inspector.
+    read_bytes: AtomicU64,
+    written_bytes: AtomicU64,
 }
 
 /// What a new window runs.
@@ -203,6 +207,8 @@ struct Launch {
 enum AppRequest {
     ReloadConfig,
     OpenSettings,
+    /// Open the inspector window for this window, or close the open one.
+    ToggleInspector,
     /// A button on the update notice was clicked.
     Update(panel::NoticeButton),
 }
@@ -288,6 +294,10 @@ struct App {
 #[derive(Clone)]
 struct Settings {
     title: String,
+    /// Name of the theme in the configuration, for the inspector.
+    theme: String,
+    ligatures: bool,
+    bidi: bool,
     padding: (u16, u16),
     font_size: f32,
     scroll_multiplier: f32,
@@ -312,6 +322,9 @@ impl Settings {
     fn new(config: &Config) -> Self {
         Self {
             title: config.window.title.clone(),
+            theme: config.theme.clone().unwrap_or_else(|| "tron".to_owned()),
+            ligatures: config.font.ligatures,
+            bidi: config.font.bidi,
             padding: (config.window.padding_x, config.window.padding_y),
             font_size: config.font.size,
             scroll_multiplier: config.scrollback.multiplier,
@@ -568,6 +581,20 @@ struct Session {
     screenshot: Option<(std::path::PathBuf, Instant)>,
     scroll_accumulator: f32,
     smooth: SmoothScroll,
+    /// The inspector window following this one, while it is open.
+    inspector: Option<Inspector>,
+    /// When the inspector's next frame is due.
+    inspector_wake: Option<Instant>,
+    /// Milliseconds the last frames took, for the inspector's graph.
+    frame_times: VecDeque<f32>,
+    /// Bytes read per inspector frame, and the counters the last sample was
+    /// measured against.
+    read_samples: VecDeque<f32>,
+    io_mark: (u64, u64, Instant),
+    /// Recent key presses, kept while the inspector is open.
+    keys: VecDeque<tron_inspect::KeyRecord>,
+    /// When the window opened, shown by the inspector.
+    opened_at: Instant,
 }
 
 impl App {
@@ -620,8 +647,10 @@ impl App {
             term: Mutex::new(term),
             wake_pending: AtomicBool::new(false),
             exited: AtomicBool::new(false),
+            read_bytes: AtomicU64::new(0),
+            written_bytes: AtomicU64::new(0),
         });
-        let input = spawn_writer(pty.writer()?)?;
+        let input = spawn_writer(pty.writer()?, shared.clone())?;
         spawn_reader(pty.reader()?, shared.clone(), self.proxy.clone(), input.clone())?;
         // In a Flatpak the shell's processes are on the host, out of sight.
         let harness_watch = Arc::new(harness::Watch::default());
@@ -750,6 +779,13 @@ impl App {
             font_size: config.font.size,
             scroll_accumulator: 0.0,
             smooth: SmoothScroll::default(),
+            inspector: None,
+            inspector_wake: None,
+            frame_times: VecDeque::new(),
+            read_samples: VecDeque::new(),
+            io_mark: (0, 0, Instant::now()),
+            keys: VecDeque::new(),
+            opened_at: Instant::now(),
             config_errors: Vec::new(),
             config_errors_until: None,
             startup_token: Some(
@@ -980,13 +1016,19 @@ impl ApplicationHandler for App {
                     session.wake_at = None;
                     session.window.request_redraw();
                 }
+                if session.inspector_wake.is_some_and(|at| at <= now)
+                    && let Some(inspector) = &session.inspector
+                {
+                    session.inspector_wake = None;
+                    inspector.window().request_redraw();
+                }
             }
         }
     }
 
     /// Sleeps until the earliest window needs to wake.
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
-        let next = self.sessions.values().filter_map(|session| session.wake_at).min();
+        let next = self.sessions.values().flat_map(|session| [session.wake_at, session.inspector_wake]).flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -1043,6 +1085,9 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.inspector_event(id, &event) {
+            return;
+        }
         self.session_event(event_loop, id, event);
         self.open_requested_windows(event_loop);
     }
@@ -1103,9 +1148,64 @@ impl App {
                     self.active = Some(id);
                     self.open_settings();
                 }
+                AppRequest::ToggleInspector => self.toggle_inspector(event_loop, id),
                 AppRequest::Update(button) => self.answer_update_notice(id, button),
             }
         }
+    }
+
+    /// Opens the inspector for window `id`, or closes the one it has open.
+    fn toggle_inspector(&mut self, event_loop: &dyn ActiveEventLoop, id: WindowId) {
+        let Some(session) = self.sessions.get_mut(&id) else { return };
+        if session.inspector.take().is_some() {
+            session.inspector_wake = None;
+            session.shared.term.lock().set_inspecting(false);
+            return;
+        }
+        let attributes = WindowAttributes::default()
+            .with_title("tron inspector")
+            .with_surface_size(LogicalSize::new(INSPECTOR_SIZE.0, INSPECTOR_SIZE.1))
+            .with_window_icon(window_icon());
+        #[cfg(not(target_os = "macos"))]
+        let attributes = with_app_id(attributes, event_loop);
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::<dyn Window>::from(window),
+            Err(error) => return log::error!("inspector window: {error}"),
+        };
+        match Inspector::new(&session.renderer.gpu(), window) {
+            Ok(inspector) => {
+                inspector.window().focus_window();
+                session.shared.term.lock().set_inspecting(true);
+                session.keys.clear();
+                session.inspector = Some(inspector);
+                session.draw_inspector();
+            }
+            Err(error) => log::error!("{error}"),
+        }
+    }
+
+    /// Gives a window event to the inspector it belongs to. Returns whether one took it.
+    fn inspector_event(&mut self, id: WindowId, event: &WindowEvent) -> bool {
+        let owner = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.inspector.as_ref().is_some_and(|inspector| inspector.id() == id))
+            .map(|(&owner, _)| owner);
+        let Some(session) = owner.and_then(|owner| self.sessions.get_mut(&owner)) else { return false };
+        let Some(inspector) = &mut session.inspector else { return false };
+        let outcome = inspector.window_event(event);
+        if outcome.close {
+            session.inspector = None;
+            session.inspector_wake = None;
+            session.shared.term.lock().set_inspecting(false);
+            return true;
+        }
+        match event {
+            WindowEvent::RedrawRequested => session.draw_inspector(),
+            _ if outcome.redraw => inspector.window().request_redraw(),
+            _ => {}
+        }
+        true
     }
 
     /// Shows the notice about a newer release in every window, or hides it.
@@ -1241,6 +1341,7 @@ impl App {
                         return;
                     }
                     if let Some(action) = action {
+                        session.note_key(&event, Some(action.clone()), None);
                         session.run_action(action);
                         return;
                     }
@@ -1252,6 +1353,7 @@ impl App {
                 if let Some(bytes) = input::encode(&event, mods, key_modes) {
                     if pressed {
                         session.prepare_input();
+                        session.note_key(&event, None, Some(&bytes));
                     }
                     session.send(bytes);
                 }
@@ -1811,7 +1913,13 @@ impl Session {
         if !presented {
             wake_at(now + GPU_BUSY_POLL);
         }
-        self.last_frame = Instant::now();
+        let drawn = Instant::now();
+        // Gaps while the window rests are not frame times; they would dwarf the graph.
+        let interval = drawn.duration_since(self.last_frame).as_secs_f32() * 1000.0;
+        if self.inspector.is_some() && interval < IDLE_FRAME_MS {
+            push_sample(&mut self.frame_times, interval);
+        }
+        self.last_frame = drawn;
         // The next frame is due one interval after this one was, so timer slop does
         // not add up to a lower frame rate. Early or late frames restart the cadence.
         self.next_frame = match now.checked_duration_since(self.next_frame) {
@@ -1978,6 +2086,7 @@ impl Session {
                 self.window.request_redraw();
             }
             Action::NewWindow => self.new_window(),
+            Action::Inspector => self.app_request = Some(AppRequest::ToggleInspector),
             Action::SendText(text) => {
                 self.prepare_input();
                 self.send(text.into_bytes());
@@ -2232,8 +2341,10 @@ impl Session {
             term: Mutex::new(term),
             wake_pending: AtomicBool::new(false),
             exited: AtomicBool::new(false),
+            read_bytes: AtomicU64::new(0),
+            written_bytes: AtomicU64::new(0),
         });
-        let input = spawn_writer(pty.writer()?)?;
+        let input = spawn_writer(pty.writer()?, shared.clone())?;
         spawn_reader(pty.reader()?, shared.clone(), proxy.clone(), input.clone())?;
         self.suspended = Some(Suspended {
             pty: std::mem::replace(&mut self.pty, pty),
@@ -2925,6 +3036,187 @@ impl Session {
         head.map(|_| now + self.frame_interval)
     }
 
+    /// Draws the inspector window, with fresh readings unless it is paused.
+    fn draw_inspector(&mut self) {
+        let wanted = self.inspector.as_ref().is_some_and(Inspector::wants_report);
+        let report = wanted.then(|| self.inspect_report());
+        let Some(inspector) = &mut self.inspector else { return };
+        self.inspector_wake = Some(inspector.draw(report));
+        if let Some(text) = inspector.take_copied() {
+            self.clipboard.store(false, text);
+        }
+    }
+
+    /// Everything the inspector shows, read once per its frames.
+    fn inspect_report(&mut self) -> tron_inspect::Report {
+        use tron_inspect as inspect;
+
+        let now = Instant::now();
+        let (read, written) =
+            (self.shared.read_bytes.load(Ordering::Relaxed), self.shared.written_bytes.load(Ordering::Relaxed));
+        let (last_read, last_written, marked) = self.io_mark;
+        let elapsed = now.duration_since(marked).as_secs_f64().max(1e-3);
+        push_sample(&mut self.read_samples, (read - last_read) as f32);
+        let io = inspect::Io {
+            read,
+            written,
+            read_rate: (read - last_read) as f64 / elapsed,
+            write_rate: (written - last_written) as f64 / elapsed,
+            read_history: self.read_samples.iter().copied().collect(),
+        };
+        self.io_mark = (read, written, now);
+
+        let metrics = self.fonts.metrics();
+        let (cols, rows) = self.renderer.grid_size();
+        let [pad_x, pad_y] = padding(self.settings.padding, self.scale_factor);
+        let term = self.shared.term.lock();
+        let modes = term.modes();
+        let cursor = term.cursor();
+        let grid = term.grid();
+        let (scrollback, offset) = (grid.scrollback_len(), grid.display_offset());
+        let selection = term.selection_range().map(|range| {
+            format!(
+                "line {} col {} to line {} col {}",
+                range.start.line, range.start.col, range.end.line, range.end.col
+            )
+        });
+        let report = inspect::Report {
+            session: inspect::SessionInfo {
+                title: self.settings.title.clone(),
+                program_title: self.program_title.clone(),
+                shell: foreground_command(&self.pty),
+                pid: Some(self.pty.child_id()),
+                tty: self.pty.tty_path().map(|path| path.display().to_string()),
+                working_directory: term.cwd().map(str::to_owned),
+                harness: self.harness_line.harness.as_ref().map(|found| found.name.clone()),
+                uptime: now.duration_since(self.opened_at),
+                exited: self.exited,
+            },
+            grid: inspect::GridInfo {
+                cols,
+                rows,
+                cell: (metrics.width, metrics.height),
+                surface: self.renderer.size(),
+                scale: self.scale_factor,
+                padding: (pad_x, pad_y),
+                scrollback,
+                scrollback_limit: grid.max_scrollback(),
+                top_line: grid.viewport_line(0),
+                bottom_line: grid.viewport_line(rows.saturating_sub(1)),
+                offset: match self.settings.smooth_scroll {
+                    true => self.smooth.position,
+                    false => offset as f32,
+                },
+                alt_screen: term.is_alt_screen(),
+                selection,
+                marks: term.command_marks().count(),
+                images: self.snapshot.placements.len(),
+                mouse: inspect::Mouse {
+                    position: self.mouse.position,
+                    cell: self.renderer.cell_at(self.mouse.position.0, self.mouse.position.1),
+                    reporting: mouse_reporting_name(modes),
+                    hovered_link: self.hovered_link.as_ref().map(|link| link.uri.clone()),
+                },
+            },
+            cursor: inspect::CursorInfo {
+                row: cursor.row,
+                col: cursor.col,
+                shape: match cursor.shape {
+                    CursorShape::Block => "block",
+                    CursorShape::Beam => "beam",
+                    CursorShape::Underline => "underline",
+                },
+                visible: cursor.visible,
+                blinking: cursor.blinking,
+                keyboard_flags: term.keyboard_flags(),
+            },
+            modes: modes_report(modes),
+            parser: term.stats().clone(),
+            io,
+            render: self.renderer.stats(),
+            frames: inspect::Frames {
+                // Long gaps between frames are the window resting, not slow drawing:
+                // the rate comes from the frames that followed each other closely.
+                fps: match self.frame_times.iter().sum::<f32>() {
+                    total if total > 0.0 => Some(self.frame_times.len() as f32 * 1000.0 / total),
+                    _ => None,
+                },
+                last_ms: self.frame_times.back().copied().unwrap_or(0.0),
+                since_last: now.duration_since(self.last_frame).as_secs_f32(),
+                target_ms: self.frame_interval.as_secs_f32() * 1000.0,
+                history: self.frame_times.iter().copied().collect(),
+                animated: self.renderer.is_animated(),
+                animations_paused: self.animations_paused(now),
+                occluded: self.occluded,
+                focused: self.focused,
+            },
+            keys: self.keys.iter().cloned().collect(),
+            input: inspect::InputState {
+                modifiers: held_modifiers(self.modifiers, self.hyper),
+                preedit: self.preedit.clone(),
+                bindings: self.bindings.len(),
+                search_open: self.search.is_some(),
+                palette_open: self.palette.is_some(),
+            },
+            cursor_rect: self.renderer.cursor_rect(),
+            font: inspect::FontInfo {
+                family: self.font_family.clone(),
+                size: self.font_size,
+                cell: (metrics.width, metrics.height),
+                baseline: metrics.baseline,
+                ligatures: self.settings.ligatures,
+                bidi: self.settings.bidi,
+            },
+            colors: {
+                let palette = term.palette();
+                let theme = self.renderer.theme();
+                let mut ansi = [[0u8; 3]; 16];
+                ansi.copy_from_slice(&palette.colors[..16]);
+                inspect::Colors {
+                    theme: self.settings.theme.clone(),
+                    background: palette.background,
+                    foreground: palette.foreground,
+                    cursor: palette.cursor,
+                    cursor_text: theme.cursor_text.unwrap_or(palette.background),
+                    selection: theme.selection_background,
+                    ansi,
+                    opacity: theme.opacity,
+                }
+            },
+            shaders: self
+                .applied_shaders
+                .as_ref()
+                .map(|(chain, _)| {
+                    let animated = self.renderer.has_ambient_animation();
+                    chain.iter().map(|(name, _)| inspect::ShaderInfo { name: name.clone(), animated }).collect()
+                })
+                .unwrap_or_default(),
+        };
+        drop(term);
+        report
+    }
+
+    /// Keeps a key press for the inspector's list, while one is open.
+    fn note_key(&mut self, event: &KeyEvent, action: Option<Action>, bytes: Option<&[u8]>) {
+        if self.inspector.is_none() {
+            return;
+        }
+        let key = match &event.logical_key {
+            Key::Named(named) => format!("{named:?}"),
+            Key::Character(text) => text.to_string(),
+            other => format!("{other:?}"),
+        };
+        push_key(
+            &mut self.keys,
+            tron_inspect::KeyRecord {
+                key,
+                mods: held_modifiers(self.modifiers, self.hyper),
+                bytes: bytes.map(escape_bytes).unwrap_or_default(),
+                action: action.map(|action| format!("{action:?}")),
+            },
+        );
+    }
+
     /// Scrolls so the dragged scrollbar thumb follows the pointer.
     fn drag_scrollbar(&mut self, y: f64) {
         let (Some(grab), Some((_, height))) = (self.scrollbar.grab, self.scrollbar.thumb) else { return };
@@ -3009,10 +3301,11 @@ impl Session {
     }
 }
 
-fn spawn_writer(mut writer: File) -> io::Result<mpsc::Sender<Vec<u8>>> {
+fn spawn_writer(mut writer: File, shared: Arc<Shared>) -> io::Result<mpsc::Sender<Vec<u8>>> {
     let (sender, receiver) = mpsc::channel::<Vec<u8>>();
     thread::Builder::new().name("pty-writer".into()).spawn(move || {
         for bytes in receiver {
+            shared.written_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
             if let Err(error) = writer.write_all(&bytes) {
                 log::warn!("pty write failed: {error}");
                 break;
@@ -3043,6 +3336,7 @@ fn spawn_reader(
                     break;
                 }
             };
+            shared.read_bytes.fetch_add(n as u64, Ordering::Relaxed);
             let reply = {
                 let mut term = shared.term.lock();
                 parser.advance(&mut *term, &buffer[..n]);
@@ -3305,6 +3599,104 @@ fn ease_step(elapsed: f32, settle: f32) -> f32 {
         return 1.0;
     }
     (1.0 - (-elapsed * 5.0 / settle).exp()).clamp(0.0, 1.0)
+}
+
+/// Default size of the inspector window in logical pixels.
+const INSPECTOR_SIZE: (u32, u32) = (1000, 720);
+
+/// How many frame and throughput samples the inspector graphs keep.
+const INSPECT_SAMPLES: usize = tron_inspect::HISTORY;
+
+/// How many key presses the inspector lists.
+const INSPECT_KEYS: usize = 24;
+
+/// Longer than this between frames is the window resting, not a slow frame.
+const IDLE_FRAME_MS: f32 = 250.0;
+
+fn push_sample(samples: &mut VecDeque<f32>, value: f32) {
+    if samples.len() == INSPECT_SAMPLES {
+        samples.pop_front();
+    }
+    samples.push_back(value);
+}
+
+fn push_key(keys: &mut VecDeque<tron_inspect::KeyRecord>, key: tron_inspect::KeyRecord) {
+    if keys.len() == INSPECT_KEYS {
+        keys.pop_front();
+    }
+    keys.push_back(key);
+}
+
+/// Modifier keys held, as a binding would be written.
+fn held_modifiers(modifiers: ModifiersState, hyper: bool) -> String {
+    let held = [
+        (modifiers.control_key(), "ctrl"),
+        (modifiers.alt_key(), "alt"),
+        (modifiers.shift_key(), "shift"),
+        (modifiers.meta_key(), "super"),
+        (hyper, "hyper"),
+    ];
+    held.iter().filter(|(held, _)| *held).map(|(_, name)| *name).collect::<Vec<_>>().join("+")
+}
+
+/// Bytes as they would be written in a configuration file.
+fn escape_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&byte| match byte {
+            0x1b => "\\e".to_owned(),
+            b'\r' => "\\r".to_owned(),
+            b'\n' => "\\n".to_owned(),
+            b'\t' => "\\t".to_owned(),
+            0x20..=0x7e => (byte as char).to_string(),
+            _ => format!("\\x{byte:02x}"),
+        })
+        .collect()
+}
+
+/// What the application reads of the mouse.
+fn mouse_reporting_name(modes: Modes) -> &'static str {
+    match modes {
+        _ if modes.contains(Modes::MOUSE_ANY) => "any event",
+        _ if modes.contains(Modes::MOUSE_BUTTON) => "buttons and drags",
+        _ if modes.contains(Modes::MOUSE_NORMAL) => "buttons",
+        _ if modes.contains(Modes::MOUSE_X10) => "presses (X10)",
+        _ => "off",
+    }
+}
+
+/// The modes the inspector lists, with what each one does.
+fn modes_report(modes: Modes) -> Vec<tron_inspect::Mode> {
+    const LISTED: &[(Modes, &str, &str)] = &[
+        (Modes::AUTOWRAP, "autowrap", "Text continues on the next line at the right edge (DECAWM)"),
+        (Modes::ORIGIN, "origin", "Cursor addressing is relative to the scroll region (DECOM)"),
+        (Modes::INSERT, "insert", "Printed characters push the rest of the line right (IRM)"),
+        (Modes::LINEFEED_NEWLINE, "newline", "A line feed also returns to column one (LNM)"),
+        (Modes::CURSOR_VISIBLE, "cursor", "The cursor is shown (DECTCEM)"),
+        (Modes::CURSOR_BLINK, "cursor blink", "The application asked the cursor to blink"),
+        (Modes::APP_CURSOR, "app cursor", "Arrow keys send application sequences (DECCKM)"),
+        (Modes::APP_KEYPAD, "app keypad", "The keypad sends application sequences (DECNKM)"),
+        (Modes::BRACKETED_PASTE, "bracketed paste", "Pasted text is wrapped in markers"),
+        (Modes::FOCUS_EVENTS, "focus events", "Focus and blur are reported to the application"),
+        (Modes::ALTERNATE_SCROLL, "alternate scroll", "The wheel sends arrow keys on the alternate screen"),
+        (Modes::MOUSE_SGR, "mouse SGR", "Mouse reports use the SGR encoding (1006)"),
+        (Modes::MOUSE_SGR_PIXELS, "mouse pixels", "Mouse reports carry pixels instead of cells (1016)"),
+        (Modes::SYNC_OUTPUT, "synchronized", "Output is held until the application ends the update (2026)"),
+        (Modes::REVERSE_VIDEO, "reverse video", "Foreground and background are swapped (DECSCNM)"),
+        (Modes::GRAPHEME_CLUSTERS, "grapheme clusters", "Width is measured per cluster (2027)"),
+        (Modes::COLOR_SCHEME_UPDATES, "color scheme", "Light and dark changes are reported (2031)"),
+        (Modes::ALLOW_COLUMN_SWITCH, "column switch", "DECCOLM may change the column count (40)"),
+    ];
+    LISTED.iter().map(|&(flag, name, help)| tron_inspect::Mode { name, help, on: modes.contains(flag) }).collect()
+}
+
+/// The command running in the window, the shell itself when nothing else runs.
+fn foreground_command(pty: &Pty) -> String {
+    let pid = tron_pty::terminal_foreground(pty.child_id()).unwrap_or_else(|| pty.child_id());
+    tron_pty::process_args(pid)
+        .filter(|args| !args.is_empty())
+        .map(|args| args.join(" "))
+        .unwrap_or_else(|| "shell".to_owned())
 }
 
 fn scrollbar_thumb(

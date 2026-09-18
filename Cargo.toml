@@ -20,6 +20,7 @@ tron-font = { path = "crates/tron-font" }
 tron-render = { path = "crates/tron-render" }
 tron-config = { path = "crates/tron-config" }
 tron-startup = { path = "crates/tron-startup" }
+tron-inspect = { path = "crates/tron-inspect" }
 
 accesskit = "0.25.0"
 accesskit_macos = "0.27.0"
@@ -37,6 +38,8 @@ fontique = "0.11.1"
 harfrust = "0.13.3"
 log = "0.4.34"
 env_logger = "0.11.11"
+egui = "0.36.2"
+egui-wgpu = { version = "0.36.2", default-features = false }
 etcetera = "0.11.0"
 memchr = "2.8.3"
 miniz_oxide = "0.9.1"

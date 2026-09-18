@@ -22,5 +22,7 @@ pub use palette::Palette;
 pub use parser::{Params, Parser, Perform};
 pub use selection::{Point, Selection, SelectionKind, SelectionRange};
 pub use snapshot::Snapshot;
-pub use term::{CommandMark, CursorShape, CursorState, Hyperlink, LinkMatch, Modes, NotifyWhen, TermEvent, Terminal};
+pub use term::{
+    CommandMark, CursorShape, CursorState, Hyperlink, LinkMatch, Modes, NotifyWhen, Stats, TermEvent, Terminal,
+};
 pub use text::SearchMatch;

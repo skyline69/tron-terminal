@@ -350,6 +350,11 @@ impl ImagePipeline {
         self.instances.is_empty()
     }
 
+    /// Image quads in the prepared frame.
+    pub fn instances(&self) -> usize {
+        self.instances.len()
+    }
+
     pub fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, viewport: [f32; 2]) {
         if self.instances.is_empty() {
             return;

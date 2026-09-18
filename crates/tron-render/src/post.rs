@@ -301,6 +301,11 @@ impl PostChain {
     }
 
     /// Whether the chain must redraw every frame.
+    /// Number of shader passes in the chain.
+    pub fn passes(&self) -> usize {
+        self.passes.len()
+    }
+
     pub fn is_animated(&self) -> bool {
         self.is_active() && self.animated
     }

@@ -227,6 +227,11 @@ impl Drop for PipelineCacheFile {
 }
 
 impl Gpu {
+    /// The handles another pipeline, such as the inspector's, draws with.
+    pub fn handles(&self) -> (&wgpu::Instance, &wgpu::Adapter, &wgpu::Device, &wgpu::Queue) {
+        (&self.instance, &self.adapter, &self.device, &self.queue)
+    }
+
     /// Opens the GPU. This is the slowest part of startup, so it can run on a
     /// background thread before the window exists.
     pub async fn new() -> Result<Self, RenderError> {
@@ -265,6 +270,31 @@ impl Gpu {
         };
         Ok(Self { instance, adapter, device, queue, pipeline_cache, device_lost: None })
     }
+}
+
+/// What the inspector shows about the renderer and the GPU.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RenderStats {
+    pub backend: String,
+    pub adapter: String,
+    pub driver: String,
+    pub format: String,
+    pub present_mode: String,
+    pub alpha_mode: String,
+    pub surface: (u32, u32),
+    /// Quads in the frame, and how many of them are backgrounds and the cursor.
+    pub quads: (usize, usize),
+    pub image_quads: usize,
+    /// Size in pixels and rows taken of the mask and the color glyph atlas.
+    pub atlases: [(u32, u32); 2],
+    pub glyphs: usize,
+    pub shaped_runs: usize,
+    pub cached_rows: usize,
+    /// Shader passes of the user's chain, and of the startup screen's.
+    pub post_passes: usize,
+    pub startup_passes: usize,
+    pub animated: bool,
+    pub device_lost: bool,
 }
 
 pub struct Renderer {
@@ -534,6 +564,33 @@ impl Renderer {
         }
     }
 
+    /// A reading of the renderer and the GPU for the inspector.
+    pub fn stats(&self) -> RenderStats {
+        let info = self.adapter.get_info();
+        RenderStats {
+            backend: info.backend.to_string(),
+            adapter: info.name.clone(),
+            driver: match info.driver_info.is_empty() {
+                true => info.driver.clone(),
+                false => format!("{} ({})", info.driver, info.driver_info),
+            },
+            format: format!("{:?}", self.config.format),
+            present_mode: format!("{:?}", self.config.present_mode),
+            alpha_mode: format!("{:?}", self.config.alpha_mode),
+            surface: (self.config.width, self.config.height),
+            quads: self.cells.instances(),
+            image_quads: self.images.instances(),
+            atlases: self.cells.atlases(),
+            glyphs: self.cells.caches().0,
+            shaped_runs: self.cells.caches().1,
+            cached_rows: self.cells.caches().2,
+            post_passes: self.post.passes(),
+            startup_passes: self.startup.passes(),
+            animated: self.is_animated(),
+            device_lost: self.is_device_lost(),
+        }
+    }
+
     pub fn is_device_lost(&self) -> bool {
         self.device_lost.load(Ordering::Acquire)
     }
@@ -653,6 +710,11 @@ impl Renderer {
     pub fn set_metrics(&mut self, metrics: CellMetrics, padding: [f32; 2]) {
         self.cells.set_metrics(&self.device, metrics, [padding[0], padding[1] + self.top_inset]);
         self.resized_at = self.started.elapsed().as_secs_f32();
+    }
+
+    /// Colors and opacity the renderer draws with.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
     }
 
     pub fn set_theme(&mut self, theme: Theme) {

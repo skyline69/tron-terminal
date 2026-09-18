@@ -50,13 +50,14 @@ pub enum Item {
     ScrollToTop,
     ScrollToBottom,
     ReloadConfig,
+    Inspector,
     Documentation,
     ReportIssue,
 }
 
 impl Item {
     /// Every item, in declaration order, so that `ALL[i]` has the tag `i + 1`.
-    pub const ALL: [Item; 20] = [
+    pub const ALL: [Item; 21] = [
         Item::Settings,
         Item::NewWindow,
         Item::Copy,
@@ -75,6 +76,7 @@ impl Item {
         Item::ScrollToTop,
         Item::ScrollToBottom,
         Item::ReloadConfig,
+        Item::Inspector,
         Item::Documentation,
         Item::ReportIssue,
     ];
@@ -110,6 +112,7 @@ impl Item {
             Item::ScrollToTop => "Scroll to Top",
             Item::ScrollToBottom => "Scroll to Bottom",
             Item::ReloadConfig => "Reload Configuration",
+            Item::Inspector => "Inspector",
             Item::Documentation => "tron Documentation",
             Item::ReportIssue => "Report an Issue",
         }
@@ -137,6 +140,7 @@ impl Item {
             Item::ScrollToTop => Action::ScrollToTop,
             Item::ScrollToBottom => Action::ScrollToBottom,
             Item::ReloadConfig => Action::ReloadConfig,
+            Item::Inspector => Action::Inspector,
         };
         MenuCommand::Action(action)
     }

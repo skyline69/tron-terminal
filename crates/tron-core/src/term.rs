@@ -203,6 +203,25 @@ struct SavedCursor {
 const PRIMARY: usize = 0;
 const ALTERNATE: usize = 1;
 
+/// What the parser saw, for the inspector. Counting costs an increment per
+/// sequence; the unhandled list is only filled while a window inspects.
+#[derive(Clone, Debug, Default)]
+pub struct Stats {
+    pub printed: u64,
+    pub controls: u64,
+    pub csi: u64,
+    pub esc: u64,
+    pub osc: u64,
+    pub dcs: u64,
+    pub apc: u64,
+    pub unhandled: u64,
+    /// Sequences the terminal ignores, newest last, with how often each arrived.
+    pub unhandled_recent: VecDeque<(String, u64)>,
+}
+
+/// Unhandled sequences kept for the inspector.
+const UNHANDLED_KEPT: usize = 32;
+
 pub struct Terminal {
     grids: [Grid; 2],
     active: usize,
@@ -251,6 +270,9 @@ pub struct Terminal {
     link_ids: std::collections::HashMap<(Option<String>, String), u16>,
     title_stack: Vec<String>,
     extended: ExtendedTable,
+    stats: Stats,
+    /// A window shows the inspector: sequences it ignores are kept by name.
+    inspecting: bool,
 }
 
 impl Terminal {
@@ -298,6 +320,8 @@ impl Terminal {
             link_ids: std::collections::HashMap::new(),
             title_stack: Vec::new(),
             extended: ExtendedTable::new(),
+            stats: Stats::default(),
+            inspecting: false,
         }
     }
 
@@ -347,6 +371,40 @@ impl Terminal {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// What the parser saw since this terminal started.
+    pub fn stats(&self) -> &Stats {
+        &self.stats
+    }
+
+    /// Keeps the sequences the terminal ignores by name, for the inspector.
+    pub fn set_inspecting(&mut self, inspecting: bool) {
+        self.inspecting = inspecting;
+        if !inspecting {
+            self.stats.unhandled_recent.clear();
+        }
+    }
+
+    /// Counts a sequence the terminal does not carry out, and keeps its name
+    /// while a window inspects.
+    fn unhandled(&mut self, sequence: std::fmt::Arguments<'_>) {
+        self.stats.unhandled += 1;
+        log::debug!("unhandled {sequence}");
+        if !self.inspecting {
+            return;
+        }
+        let text = format!("{sequence}");
+        let recent = &mut self.stats.unhandled_recent;
+        if let Some(position) = recent.iter().position(|(seen, _)| *seen == text) {
+            let (text, count) = recent.remove(position).unwrap_or((text, 0));
+            recent.push_back((text, count + 1));
+            return;
+        }
+        if recent.len() == UNHANDLED_KEPT {
+            recent.pop_front();
+        }
+        recent.push_back((text, 1));
     }
 
     /// Returns the title if it changed since the last call.
@@ -1629,7 +1687,7 @@ impl Terminal {
         match mode {
             4 => self.modes.set(Modes::INSERT, on),
             20 => self.modes.set(Modes::LINEFEED_NEWLINE, on),
-            _ => log::debug!("unhandled ANSI mode {mode}"),
+            _ => self.unhandled(format_args!("ANSI mode {mode}")),
         }
     }
 
@@ -1701,7 +1759,7 @@ impl Terminal {
                 self.modes.set(Modes::SYNC_OUTPUT, on);
                 self.sync_started = on.then(Instant::now);
             }
-            _ => log::debug!("unhandled DEC mode {mode}"),
+            _ => self.unhandled(format_args!("DEC mode ?{mode}")),
         }
     }
 
@@ -1737,6 +1795,7 @@ impl Terminal {
         let plain = self.cursor.link_extended;
         let mut underline_color = self.cursor.underline_color;
         let mut extended_changed = false;
+        let mut unhandled: Vec<u16> = Vec::new();
         let pen = &mut self.cursor.pen;
         if params.is_empty() {
             *pen = Cell { extended: plain, ..Cell::BLANK };
@@ -1804,8 +1863,11 @@ impl Terminal {
                 }
                 n @ 90..=97 => pen.fg = Color::indexed((n - 90 + 8) as u8),
                 n @ 100..=107 => pen.bg = Color::indexed((n - 100 + 8) as u8),
-                n => log::debug!("unhandled SGR {n}"),
+                n => unhandled.push(n),
             }
+        }
+        for n in unhandled {
+            self.unhandled(format_args!("SGR {n}"));
         }
         if extended_changed {
             self.cursor.underline_color = underline_color;
@@ -1961,6 +2023,7 @@ fn is_regional_indicator(c: char) -> bool {
 
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
+        self.stats.printed += 1;
         let c = self.translate(c);
         let Some(width) = char_width(c) else { return };
         if width == 0 || self.joins_cluster(c) {
@@ -2004,6 +2067,7 @@ impl Perform for Terminal {
                 head
             };
             let n = chunk.len();
+            self.stats.printed += n as u64;
             let end = col + n;
             if self.multicell {
                 self.clear_multicells(row, col, n);
@@ -2078,6 +2142,7 @@ impl Perform for Terminal {
                 }
                 if let Some((c, cluster_col)) = last {
                     line.touch(start, col);
+                    self.stats.printed += (col - start) as u64;
                     self.erase_images(row..row + 1, start..col);
                     self.last_cluster = Some((row, cluster_col));
                     self.last_char = Some(c);
@@ -2113,6 +2178,7 @@ impl Perform for Terminal {
     }
 
     fn execute(&mut self, byte: u8) {
+        self.stats.controls += 1;
         self.last_cluster = None;
         self.last_was_zwj = false;
         match byte {
@@ -2136,6 +2202,7 @@ impl Perform for Terminal {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: u8) {
+        self.stats.csi += 1;
         self.last_cluster = None;
         self.last_was_zwj = false;
         if ignore {
@@ -2334,11 +2401,12 @@ impl Perform for Terminal {
                 };
                 self.respond(format!("\x1b[?{m};{state}$y").as_bytes());
             }
-            _ => log::debug!("unhandled CSI {:?} {}", String::from_utf8_lossy(intermediates), action as char),
+            _ => self.unhandled(format_args!("CSI {} {}", String::from_utf8_lossy(intermediates), action as char)),
         }
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+        self.stats.esc += 1;
         self.last_cluster = None;
         self.last_was_zwj = false;
         if ignore {
@@ -2383,11 +2451,12 @@ impl Perform for Terminal {
                 self.charsets[usize::from(*slot == b')')] = charset;
             }
             ([], b'\\') => {}
-            _ => log::debug!("unhandled ESC {:?} {}", String::from_utf8_lossy(intermediates), byte as char),
+            _ => self.unhandled(format_args!("ESC {} {}", String::from_utf8_lossy(intermediates), byte as char)),
         }
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        self.stats.osc += 1;
         let terminator = if bell_terminated { "\x07" } else { "\x1b\\" };
         match params {
             [b"0" | b"2", title @ ..] => {
@@ -2499,12 +2568,13 @@ impl Perform for Terminal {
                     .unwrap_or_else(|| uri.into_owned());
                 self.cwd = Some(path);
             }
-            [kind, ..] => log::debug!("unhandled OSC {}", String::from_utf8_lossy(kind)),
+            [kind, ..] => self.unhandled(format_args!("OSC {}", String::from_utf8_lossy(kind))),
             [] => {}
         }
     }
 
     fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: u8) {
+        self.stats.dcs += 1;
         self.dcs = match (intermediates, action, ignore) {
             ([b'$'], b'q', false) => Some(DcsRequest::Decrqss(Vec::new())),
             ([b'+'], b'q', false) => Some(DcsRequest::Xtgettcap(Vec::new())),
@@ -2544,6 +2614,7 @@ impl Perform for Terminal {
     }
 
     fn apc_dispatch(&mut self, data: &[u8]) {
+        self.stats.apc += 1;
         let Some(payload) = data.strip_prefix(b"G") else { return };
         let ctx = self.graphics_context();
         let outcome = self.graphics.handle(payload, &ctx);
