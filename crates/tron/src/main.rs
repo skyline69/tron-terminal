@@ -3344,6 +3344,12 @@ impl Session {
             self.smooth.position += moved;
             self.smooth.target += moved;
             self.smooth.applied = offset;
+            // Back at the prompt, which sits on whole lines: drop the part of a line
+            // the view rested between, it would leave a sliver of history on top.
+            if offset == 0 {
+                self.smooth.position = 0.0;
+                self.smooth.target = 0.0;
+            }
         }
         let max = term.grid().scrollback_len() as f32;
         self.smooth.target = self.smooth.target.clamp(0.0, max);
