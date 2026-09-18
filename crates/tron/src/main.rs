@@ -585,8 +585,18 @@ struct Session {
     inspector: Option<Inspector>,
     /// When the inspector's next frame is due.
     inspector_wake: Option<Instant>,
-    /// Milliseconds the last frames took, for the inspector's graph.
-    frame_times: VecDeque<f32>,
+    /// When the last frames were drawn and how long each took, in milliseconds.
+    frame_times: VecDeque<(Instant, f32)>,
+    /// Milliseconds between the last frames, to learn the display's rate from.
+    frame_gaps: VecDeque<f32>,
+    /// The last frame asked for the next one at once, so the gap to it is the
+    /// display's pace and not a timer's.
+    paced_by_display: bool,
+    /// One frame of the fastest monitor, which the learned rate starts from again
+    /// every so often in case the window was moved to a faster display.
+    fastest_frame: Duration,
+    /// When the rate was last learned from the fastest monitor's frame again.
+    probed_at: Instant,
     /// Bytes read per inspector frame, and the counters the last sample was
     /// measured against.
     read_samples: VecDeque<f32>,
@@ -720,11 +730,12 @@ impl App {
             font_family: config.font.family.clone(),
             font_size: config.font.size,
         })));
+        let fastest_frame = frame_interval(window.as_ref(), self.max_fps);
         let mut session = Session {
             clipboard: Clipboard::new(window.as_ref()),
             accessibility,
             drop: None,
-            frame_interval: frame_interval(window.as_ref()),
+            frame_interval: frame_interval(window.as_ref(), self.max_fps),
             last_frame: Instant::now() - Duration::from_secs(1),
             snapshot: Snapshot::default(),
             screenshot: None,
@@ -782,6 +793,10 @@ impl App {
             inspector: None,
             inspector_wake: None,
             frame_times: VecDeque::new(),
+            frame_gaps: VecDeque::new(),
+            paced_by_display: false,
+            fastest_frame,
+            probed_at: Instant::now(),
             read_samples: VecDeque::new(),
             io_mark: (0, 0, Instant::now()),
             keys: VecDeque::new(),
@@ -1273,7 +1288,8 @@ impl App {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 session.scale_factor = scale_factor;
-                session.frame_interval = frame_interval(session.window.as_ref());
+                session.frame_interval = frame_interval(session.window.as_ref(), self.max_fps);
+                session.frame_gaps.clear();
                 session.update_top_inset();
                 session.set_font_size(session.font_size);
             }
@@ -1794,6 +1810,7 @@ impl Session {
     /// batched into the next frame instead of rendering every chunk.
     fn schedule_redraw(&mut self) {
         if Instant::now() >= self.next_frame {
+            self.paced_by_display = true;
             self.window.request_redraw();
         } else {
             self.wake_at = Some(self.wake_at.map_or(self.next_frame, |at| at.min(self.next_frame)));
@@ -1801,12 +1818,18 @@ impl Session {
     }
 
     fn redraw(&mut self, event_loop: &dyn ActiveEventLoop) {
+        // Mouse motion, hover and other input can ask for frames faster than the
+        // display shows them. One that comes clearly early waits for its turn.
+        let now = Instant::now();
+        if too_early(now, self.next_frame, self.frame_interval) {
+            self.wake_at = Some(self.wake_at.map_or(self.next_frame, |at| at.min(self.next_frame)));
+            return;
+        }
         #[cfg(target_os = "macos")]
         {
             self.update_represented_directory();
             self.update_look_up();
         }
-        let now = Instant::now();
         // Moves the viewport before the snapshot is taken, so the frame shows where
         // the animation arrived.
         let scroll_wake = self.step_smooth_scroll(now);
@@ -1917,7 +1940,15 @@ impl Session {
         // Gaps while the window rests are not frame times; they would dwarf the graph.
         let interval = drawn.duration_since(self.last_frame).as_secs_f32() * 1000.0;
         if self.inspector.is_some() && interval < IDLE_FRAME_MS {
-            push_sample(&mut self.frame_times, interval);
+            if self.frame_times.len() == INSPECT_SAMPLES {
+                self.frame_times.pop_front();
+            }
+            self.frame_times.push_back((drawn, interval));
+        }
+        // Only frames the display paced say anything about its rate; a frame a timer
+        // asked for, such as an animation held to `[shader] fps`, says nothing.
+        if presented && std::mem::take(&mut self.paced_by_display) {
+            self.learn_frame_interval(interval);
         }
         self.last_frame = drawn;
         // The next frame is due one interval after this one was, so timer slop does
@@ -1962,10 +1993,16 @@ impl Session {
         // Animations stop while nobody can see them. Cursor effects and the startup
         // screen keep the display's rate; backgrounds run at `[shader] fps`.
         if !self.occluded {
-            if self.renderer.has_smooth_animation() {
-                wake_at(self.next_frame);
-            } else if self.renderer.has_ambient_animation() && !self.animations_paused(now) {
-                wake_at(self.last_frame + animation_interval(self.animation_fps, self.focused, self.frame_interval));
+            let ambient = self.renderer.has_ambient_animation() && !self.animations_paused(now);
+            let ambient_interval = animation_interval(self.animation_fps, self.focused, self.frame_interval);
+            if self.renderer.has_smooth_animation() || (ambient && ambient_interval <= self.frame_interval) {
+                // The next frame is asked for now, not on a timer: the compositor
+                // hands it over when the display is ready, and a timer that fires
+                // just after it would wait for the one after that.
+                self.paced_by_display = true;
+                self.window.request_redraw();
+            } else if ambient {
+                wake_at(self.last_frame + ambient_interval);
             }
         }
         self.wake_at = next_wake;
@@ -2778,7 +2815,7 @@ impl Session {
             {
                 palette.selected = index;
                 self.update_overlays();
-                self.window.request_redraw();
+                self.schedule_redraw();
             }
             let modes = self.shared.term.lock().modes();
             self.update_pointer_icon(modes);
@@ -2796,7 +2833,7 @@ impl Session {
             if hover != self.notice_hover {
                 self.notice_hover = hover;
                 self.update_overlays();
-                self.window.request_redraw();
+                self.schedule_redraw();
             }
             let modes = self.shared.term.lock().modes();
             self.update_pointer_icon(modes);
@@ -2811,7 +2848,7 @@ impl Session {
                 // Fades out after the pointer leaves, as after scrolling.
                 self.scrollbar.shown_at = Some(Instant::now());
             }
-            self.window.request_redraw();
+            self.schedule_redraw();
         }
         if hovered {
             let modes = self.shared.term.lock().modes();
@@ -2864,7 +2901,7 @@ impl Session {
             term.update_selection(point);
         }
         drop(term);
-        self.window.request_redraw();
+        self.schedule_redraw();
     }
 
     /// Wheel input: reports to the application, sends arrows on the alternate
@@ -3036,6 +3073,36 @@ impl Session {
         head.map(|_| now + self.frame_interval)
     }
 
+    /// Takes the gap to the previous frame, and follows the display's rate once
+    /// enough frames have been drawn one after another.
+    fn learn_frame_interval(&mut self, gap_ms: f32) {
+        // A window moved to a faster display would never see a shorter gap while
+        // the learned rate caps it, so the fastest monitor's frame is tried again
+        // now and then and kept only if the frames that follow are that quick.
+        if self.probed_at.elapsed() > FRAME_PROBE && self.frame_interval > self.fastest_frame {
+            self.probed_at = Instant::now();
+            self.frame_interval = self.fastest_frame;
+            self.frame_gaps.clear();
+            return;
+        }
+        if self.frame_gaps.len() == FRAME_GAPS {
+            self.frame_gaps.pop_front();
+        }
+        self.frame_gaps.push_back(gap_ms);
+        let Some(measured) = learned_frame_interval(&self.frame_gaps) else { return };
+        // No display here is quicker than the quickest monitor, whatever a pair of
+        // frames delivered together suggests, and the window's own pacing can only
+        // make the gaps longer. So the measurement is read as "which display", not
+        // as a rate of its own, and it has to differ clearly to be believed.
+        let measured = measured.max(self.fastest_frame);
+        let changed = measured > self.frame_interval.mul_f32(SLOWER_DISPLAY)
+            || measured.mul_f32(SLOWER_DISPLAY) < self.frame_interval;
+        if changed {
+            log::debug!("display draws a frame every {:.2} ms", measured.as_secs_f32() * 1000.0);
+            self.frame_interval = measured;
+        }
+    }
+
     /// Draws the inspector window, with fresh readings unless it is paused.
     fn draw_inspector(&mut self) {
         let wanted = self.inspector.as_ref().is_some_and(Inspector::wants_report);
@@ -3135,16 +3202,13 @@ impl Session {
             io,
             render: self.renderer.stats(),
             frames: inspect::Frames {
-                // Long gaps between frames are the window resting, not slow drawing:
-                // the rate comes from the frames that followed each other closely.
-                fps: match self.frame_times.iter().sum::<f32>() {
-                    total if total > 0.0 => Some(self.frame_times.len() as f32 * 1000.0 / total),
-                    _ => None,
-                },
-                last_ms: self.frame_times.back().copied().unwrap_or(0.0),
+                // The rate of the last second only: a window that drew quickly a
+                // minute ago is not drawing quickly now.
+                fps: frame_rate(&self.frame_times, now),
+                last_ms: self.frame_times.back().map_or(0.0, |&(_, ms)| ms),
                 since_last: now.duration_since(self.last_frame).as_secs_f32(),
                 target_ms: self.frame_interval.as_secs_f32() * 1000.0,
-                history: self.frame_times.iter().copied().collect(),
+                history: self.frame_times.iter().map(|&(_, ms)| ms).collect(),
                 animated: self.renderer.is_animated(),
                 animations_paused: self.animations_paused(now),
                 occluded: self.occluded,
@@ -3725,12 +3789,87 @@ fn max_refresh_rate(event_loop: &dyn ActiveEventLoop) -> Option<u32> {
         .max()
 }
 
-fn frame_interval(window: &dyn Window) -> Duration {
-    window
+/// One frame of the display the window is on. Wayland does not tell a surface
+/// which output it is on until it is mapped, and winit reports none, so the
+/// fastest connected monitor stands in: too fast only costs frames the
+/// compositor drops, while too slow caps the window below its display.
+/// [`Session::learn_frame_interval`] corrects it from the frames that follow.
+fn frame_interval(window: &dyn Window, fastest: Option<u32>) -> Duration {
+    let from_monitor = window
         .current_monitor()
         .and_then(|monitor| monitor.current_video_mode())
         .and_then(|mode| mode.refresh_rate_millihertz())
-        .map_or(Duration::from_micros(16_667), |mhz| Duration::from_secs_f64(1000.0 / f64::from(mhz.get())))
+        .map(|mhz| Duration::from_secs_f64(1000.0 / f64::from(mhz.get())));
+    let from_fastest = fastest.filter(|hertz| *hertz > 0).map(|hertz| Duration::from_secs_f64(1.0 / f64::from(hertz)));
+    from_monitor.or(from_fastest).unwrap_or(Duration::from_micros(16_667))
+}
+
+/// Milliseconds between frames, from the shortest to the longest a display is
+/// likely to have: 240 Hz to 24 Hz.
+const FRAME_GAP_RANGE: std::ops::Range<f32> = 4.0..42.0;
+
+/// Whether a frame asked for now would be drawn before the display can show it.
+/// Half a frame of slack keeps the jitter of compositor-paced redraws from pushing
+/// every other frame to the next display refresh, while a mouse reporting a
+/// thousand times a second still waits its turn.
+fn too_early(now: Instant, next_frame: Instant, interval: Duration) -> bool {
+    next_frame.saturating_duration_since(now) > interval / 2
+}
+
+/// How far back the frame rate is measured: the frames of the last second.
+const FRAME_RATE_WINDOW: Duration = Duration::from_secs(1);
+
+/// The rate the window is drawing at, from the middle frame of the last second.
+/// None while it drew nothing in that second.
+///
+/// The middle one, not the average: a window that wakes for one frame after
+/// resting carries a gap far longer than the others, and an average of it drifts
+/// down frame by frame as the quicker ones age out of the second.
+fn frame_rate(frames: &VecDeque<(Instant, f32)>, now: Instant) -> Option<f32> {
+    let mut recent: Vec<f32> = frames
+        .iter()
+        .filter(|(at, _)| now.saturating_duration_since(*at) <= FRAME_RATE_WINDOW)
+        .map(|&(_, ms)| ms)
+        .filter(|ms| *ms > 0.0)
+        .collect();
+    if recent.is_empty() {
+        return None;
+    }
+    recent.sort_by(f32::total_cmp);
+    Some(1000.0 / recent[recent.len() / 2])
+}
+
+/// How far the frames must differ before the window believes it was moved to
+/// another display: 144 Hz to 120 Hz is 1.2, and jitter never reaches it.
+const SLOWER_DISPLAY: f32 = 1.2;
+
+/// How long the learned rate holds before the fastest monitor's is tried again.
+/// A window that did not move is drawn a little ahead of its display for the
+/// frames that takes, so this is rare.
+const FRAME_PROBE: Duration = Duration::from_secs(30);
+
+/// Gaps kept to learn the display's rate from, about a second of drawing.
+const FRAME_GAPS: usize = 60;
+
+/// The rate the window is really drawn at, from the quickest of the gaps between
+/// its frames. Returns none until enough of them arrived.
+///
+/// Wayland delivers a redraw when the compositor is ready for the next frame, so
+/// the gaps between frames drawn one after another are the display's, whichever
+/// monitor the window was moved to. Gaps outside [`FRAME_GAP_RANGE`] are a window
+/// that rested or a display slower than any of these, and are left out.
+///
+/// The tenth quickest, not the middle one: a window is never drawn faster than
+/// the rate it learned, so every gap carries the slack of the frame before it.
+/// Learning from the middle would add that slack to the rate each time and creep
+/// toward drawing once a second.
+fn learned_frame_interval(gaps: &VecDeque<f32>) -> Option<Duration> {
+    let mut drawn: Vec<f32> = gaps.iter().copied().filter(|gap| FRAME_GAP_RANGE.contains(gap)).collect();
+    if drawn.len() < FRAME_GAPS / 2 {
+        return None;
+    }
+    drawn.sort_by(f32::total_cmp);
+    Some(Duration::from_secs_f32(drawn[drawn.len() / 10] / 1000.0))
 }
 
 fn window_size(cols: usize, rows: usize, metrics: CellMetrics) -> WindowSize {
@@ -3808,6 +3947,119 @@ mod tests {
         // Two half frames cover as much as one whole one.
         let (half, whole) = (ease_step(0.008, 0.08), ease_step(0.016, 0.08));
         assert!(((1.0 - (1.0 - half) * (1.0 - half)) - whole).abs() < 1e-6);
+    }
+
+    #[test]
+    fn frames_asked_for_faster_than_the_display_wait() {
+        let interval = Duration::from_micros(6944);
+        let now = Instant::now();
+        // A mouse that reports a thousand times a second asks for frames between two.
+        assert!(too_early(now, now + interval, interval), "a frame one interval early waits");
+        assert!(too_early(now, now + interval * 3 / 4, interval));
+        // Jitter around a compositor-paced redraw still draws.
+        assert!(!too_early(now, now + interval / 4, interval));
+        assert!(!too_early(now, now, interval));
+        assert!(!too_early(now + interval, now, interval), "a late frame draws at once");
+    }
+
+    #[test]
+    fn the_frame_rate_is_of_the_last_second_only() {
+        let now = Instant::now();
+        let frames = |samples: &[(f32, f32)]| {
+            samples
+                .iter()
+                .map(|&(seconds_ago, ms)| (now - Duration::from_secs_f32(seconds_ago), ms))
+                .collect::<VecDeque<(Instant, f32)>>()
+        };
+        // Frames drawn quickly a minute ago say nothing about now.
+        let stale = frames(&[(60.0, 6.9), (59.9, 6.9), (0.5, 100.0)]);
+        let rate = frame_rate(&stale, now).expect("one frame in the last second");
+        assert!((rate - 10.0).abs() < 0.1, "{rate} frames a second");
+        assert_eq!(frame_rate(&frames(&[(30.0, 6.9)]), now), None, "a window that has not drawn");
+        let steady = frames(&[(0.3, 6.94), (0.2, 6.94), (0.1, 6.94)]);
+        assert!((frame_rate(&steady, now).unwrap() - 144.0).abs() < 1.0);
+    }
+
+    /// The rate held steady while the window drew, whatever it did before.
+    #[test]
+    fn waking_after_a_rest_does_not_drag_the_frame_rate_down() {
+        let now = Instant::now();
+        let frames = |samples: &[(f32, f32)]| {
+            samples
+                .iter()
+                .map(|&(seconds_ago, ms)| (now - Duration::from_secs_f32(seconds_ago), ms))
+                .collect::<VecDeque<(Instant, f32)>>()
+        };
+        // The first frame after a rest waited 240 ms; the ones after it did not.
+        let mut samples = vec![(0.9, 240.0)];
+        samples.extend((1..40).map(|frame| (0.9 - frame as f32 * 0.00694, 6.94)));
+        let woken = frame_rate(&frames(&samples), now).expect("frames in the last second");
+        assert!((woken - 144.0).abs() < 1.0, "{woken} frames a second");
+        // And as the quick frames age out of the second, it does not drift.
+        let later = frame_rate(&frames(&samples[..8]), now).expect("frames in the last second");
+        assert!((later - 144.0).abs() < 1.0, "{later} frames a second");
+    }
+
+    /// What [`Session::learn_frame_interval`] does with a measurement.
+    fn believed(measured: Duration, current: Duration, fastest: Duration) -> Duration {
+        let measured = measured.max(fastest);
+        let changed = measured > current.mul_f32(SLOWER_DISPLAY) || measured.mul_f32(SLOWER_DISPLAY) < current;
+        match changed {
+            true => measured,
+            false => current,
+        }
+    }
+
+    #[test]
+    fn the_rate_follows_the_display_the_window_was_moved_to() {
+        let (fast, slow) = (Duration::from_micros(6944), Duration::from_micros(16667));
+        // Frames of the 60 Hz display it was moved to.
+        assert_eq!(believed(slow, fast, fast), slow);
+        // And back again.
+        assert_eq!(believed(fast, slow, fast), fast);
+        // Two frames delivered together do not make the display quicker than it is.
+        assert_eq!(believed(Duration::from_micros(4000), fast, fast), fast);
+        // Nor does the slack of a frame make it slower.
+        assert_eq!(believed(Duration::from_micros(7400), fast, fast), fast);
+    }
+
+    /// The rate a window is capped at must not creep upward from its own slack.
+    #[test]
+    fn the_learned_rate_does_not_drift_away_from_the_display() {
+        // Frames drawn at 144 Hz, each a little late, as a compositor delivers them.
+        let jittery: VecDeque<f32> = (0..FRAME_GAPS).map(|frame| 6.94 + (frame % 7) as f32 * 0.12).collect();
+        let learned = learned_frame_interval(&jittery).expect("enough frames").as_secs_f32() * 1000.0;
+        assert!(learned < 7.2, "learned {learned:.2} ms from frames of 6.94 ms and slack");
+
+        // Learning again from the frames that rate produces must not raise it.
+        let again: VecDeque<f32> = (0..FRAME_GAPS).map(|frame| learned + (frame % 7) as f32 * 0.12).collect();
+        let twice = learned_frame_interval(&again).expect("enough frames").as_secs_f32() * 1000.0;
+        assert!(twice - learned < 0.2, "{learned:.2} ms became {twice:.2} ms");
+    }
+
+    #[test]
+    fn the_frame_rate_is_learned_from_the_gaps_between_frames() {
+        let gaps = |values: &[f32]| values.iter().copied().collect::<VecDeque<f32>>();
+        assert_eq!(learned_frame_interval(&gaps(&[6.9; 10])), None, "too few frames to tell");
+        let fast = learned_frame_interval(&gaps(&[6.94; FRAME_GAPS])).expect("a display of 144 Hz");
+        assert!((fast.as_secs_f32() * 1000.0 - 6.94).abs() < 0.01);
+        // Frames the window rested between say nothing about the display.
+        let mut mixed = vec![16.6; 40];
+        mixed.extend([400.0, 900.0, 3000.0]);
+        let slow = learned_frame_interval(&gaps(&mixed)).expect("a display of 60 Hz");
+        assert!((slow.as_secs_f32() * 1000.0 - 16.6).abs() < 0.01);
+        assert_eq!(learned_frame_interval(&gaps(&[500.0; FRAME_GAPS])), None, "a window that only rested");
+    }
+
+    #[test]
+    fn the_fastest_monitor_stands_in_when_the_window_has_no_monitor() {
+        // Only the fallback is testable without a window; see `frame_interval`.
+        let from_fastest = |hertz: Option<u32>| {
+            hertz.filter(|hertz| *hertz > 0).map(|hertz| Duration::from_secs_f64(1.0 / f64::from(hertz)))
+        };
+        assert_eq!(from_fastest(Some(144)), Some(Duration::from_secs_f64(1.0 / 144.0)));
+        assert_eq!(from_fastest(Some(0)), None);
+        assert_eq!(from_fastest(None), None);
     }
 
     #[test]
