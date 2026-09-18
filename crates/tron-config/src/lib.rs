@@ -372,6 +372,9 @@ pub struct WindowConfig {
     /// Blur what is behind a translucent window, where the compositor supports it (KDE).
     pub blur: bool,
     pub decorations: bool,
+    /// Wait for the display's refresh when presenting a frame. Off by default:
+    /// tron paces frames itself, so presenting never blocks on the display.
+    pub vsync: bool,
     pub columns: u16,
     pub rows: u16,
     /// Close the window when the shell exits.
@@ -399,6 +402,7 @@ impl Default for WindowConfig {
             opacity: 1.0,
             blur: false,
             decorations: true,
+            vsync: false,
             columns: 100,
             rows: 30,
             close_on_exit: true,

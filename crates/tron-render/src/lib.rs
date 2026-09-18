@@ -342,6 +342,10 @@ pub struct Renderer {
     device_lost: Arc<AtomicBool>,
     /// Alpha modes the surface supports.
     alpha_modes: Vec<wgpu::CompositeAlphaMode>,
+    /// Present modes the surface supports.
+    present_modes: Vec<wgpu::PresentMode>,
+    /// `[window] vsync`: wait for the display's refresh when presenting.
+    vsync: bool,
     compiler: Compiler,
     /// The GPU has not finished the last submitted frame.
     gpu_busy: Arc<AtomicBool>,
@@ -388,7 +392,7 @@ const KEEPS_PRESENTED_FRAME: bool = cfg!(target_os = "macos");
 
 /// Mailbox where available: frames are paced by tron, never blocking on vsync.
 #[cfg(not(target_os = "macos"))]
-fn present_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+fn unsynced_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     if modes.contains(&wgpu::PresentMode::Mailbox) { wgpu::PresentMode::Mailbox } else { wgpu::PresentMode::Fifo }
 }
 
@@ -397,8 +401,18 @@ fn present_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
 /// by up to a frame. Immediate turns display sync off; windows still go through
 /// the compositor, so frames do not tear, and tron paces them to the display.
 #[cfg(target_os = "macos")]
-fn present_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+fn unsynced_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     if modes.contains(&wgpu::PresentMode::Immediate) { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::Fifo }
+}
+
+/// `vsync`: Fifo, which every surface supports. Presenting then waits for the
+/// display's next refresh, which caps the frame rate to it and never tears, at
+/// the cost of blocking the main thread while it waits.
+fn present_mode(modes: &[wgpu::PresentMode], vsync: bool) -> wgpu::PresentMode {
+    match vsync {
+        true if modes.contains(&wgpu::PresentMode::Fifo) => wgpu::PresentMode::Fifo,
+        _ => unsynced_mode(modes),
+    }
 }
 
 /// Premultiplied output whenever possible, so opacity can change at runtime.
@@ -479,7 +493,7 @@ impl Renderer {
             surface.get_default_config(&adapter, width.max(1), height.max(1)).ok_or(RenderError::Unsupported)?;
         config.format = format;
         config.view_formats.clear();
-        config.present_mode = present_mode(&caps.present_modes);
+        config.present_mode = present_mode(&caps.present_modes, false);
         config.alpha_mode = alpha_mode(&caps.alpha_modes, theme.opacity);
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
@@ -538,6 +552,8 @@ impl Renderer {
             capture: None,
             device_lost,
             alpha_modes: caps.alpha_modes,
+            present_modes: caps.present_modes,
+            vsync: false,
             compiler,
             gpu_busy: Arc::new(AtomicBool::new(false)),
             startup_enabled: false,
@@ -715,6 +731,21 @@ impl Renderer {
     /// Colors and opacity the renderer draws with.
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// Turns display sync on or off. Off, tron paces frames itself and presenting
+    /// never blocks; on, the surface waits for the display's next refresh.
+    pub fn set_vsync(&mut self, vsync: bool) {
+        if vsync == self.vsync {
+            return;
+        }
+        self.vsync = vsync;
+        let mode = present_mode(&self.present_modes, vsync);
+        if mode != self.config.present_mode {
+            self.config.present_mode = mode;
+            self.configure_surface();
+            log::debug!("present mode {mode:?}");
+        }
     }
 
     pub fn set_theme(&mut self, theme: Theme) {

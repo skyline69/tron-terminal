@@ -95,6 +95,13 @@ pub fn list(fonts: &[String], max_fps: Option<u32>) -> Vec<Setting> {
             Kind::Bool,
         ),
         setting(
+            "window.vsync",
+            "Display sync",
+            "Wait for the display's refresh when presenting. Off, tron paces frames itself \
+             and input never waits on the display.",
+            Kind::Bool,
+        ),
+        setting(
             "window.padding_x",
             "Padding left and right",
             "Space between the window edge and the text, in pixels.",
@@ -204,6 +211,7 @@ pub fn read(config: &Config) -> BTreeMap<&'static str, toml::Value> {
         ("font.bidi", Boolean(config.font.bidi)),
         ("window.opacity", Float((f64::from(config.window.opacity) * 100.0).round() / 100.0)),
         ("window.blur", Boolean(config.window.blur)),
+        ("window.vsync", Boolean(config.window.vsync)),
         ("window.padding_x", Integer(i64::from(config.window.padding_x))),
         ("window.padding_y", Integer(i64::from(config.window.padding_y))),
         ("shader.animation", name(config.shader.animation)),

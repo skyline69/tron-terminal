@@ -1500,6 +1500,7 @@ impl Session {
             self.apply_font_config(config, &mut problems);
         }
         self.renderer.set_bidi(config.font.bidi);
+        self.renderer.set_vsync(config.window.vsync);
 
         match config.colors(paths) {
             Ok(colors) => {

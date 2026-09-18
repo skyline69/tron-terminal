@@ -48,6 +48,10 @@ opacity = 1.0
 # Blur what is behind a translucent window (KDE Plasma).
 blur = false
 decorations = true
+# Wait for the display's refresh when presenting a frame. Off, tron paces frames
+# itself and input never waits on the display; on, the frame rate is capped to
+# the refresh rate.
+vsync = false
 columns = 100
 rows = 30
 # Close the window when the shell exits. false keeps it open until a key press.
