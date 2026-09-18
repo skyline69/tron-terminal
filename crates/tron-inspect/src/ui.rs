@@ -678,7 +678,7 @@ fn renderer_tab(ui: &mut egui::Ui, report: &Report, skin: Skin) {
 fn io_tab(ui: &mut egui::Ui, report: &Report, skin: Skin) {
     let io = &report.io;
     section(ui, skin, "THROUGHPUT", |ui| {
-        graph(ui, skin, &io.read_history, 58.0, "bytes read per frame", |value| bytes(value as u64));
+        graph(ui, skin, &io.read_history, 58.0, "bytes read per second", |value| rate(value as f64));
         columns(
             ui,
             |ui| {

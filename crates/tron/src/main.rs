@@ -3123,15 +3123,20 @@ impl Session {
             (self.shared.read_bytes.load(Ordering::Relaxed), self.shared.written_bytes.load(Ordering::Relaxed));
         let (last_read, last_written, marked) = self.io_mark;
         let elapsed = now.duration_since(marked).as_secs_f64().max(1e-3);
-        push_sample(&mut self.read_samples, (read - last_read) as f32);
+        let (read_rate, write_rate) = ((read - last_read) as f64 / elapsed, (written - last_written) as f64 / elapsed);
+        // Input can draw the window faster than the readings move, so samples are
+        // taken on a cadence of their own: one bar is one span of time, not one frame.
+        if now.duration_since(marked) >= INSPECT_SAMPLE {
+            push_sample(&mut self.read_samples, read_rate as f32);
+            self.io_mark = (read, written, now);
+        }
         let io = inspect::Io {
             read,
             written,
-            read_rate: (read - last_read) as f64 / elapsed,
-            write_rate: (written - last_written) as f64 / elapsed,
+            read_rate,
+            write_rate,
             read_history: self.read_samples.iter().copied().collect(),
         };
-        self.io_mark = (read, written, now);
 
         let metrics = self.fonts.metrics();
         let (cols, rows) = self.renderer.grid_size();
@@ -3670,6 +3675,9 @@ const INSPECTOR_SIZE: (u32, u32) = (1000, 720);
 
 /// How many frame and throughput samples the inspector graphs keep.
 const INSPECT_SAMPLES: usize = tron_inspect::HISTORY;
+
+/// How long one throughput sample covers, whatever rate the window draws at.
+const INSPECT_SAMPLE: Duration = Duration::from_millis(100);
 
 /// How many key presses the inspector lists.
 const INSPECT_KEYS: usize = 24;

@@ -105,7 +105,7 @@ pub struct Io {
     /// Bytes a second, from the last samples.
     pub read_rate: f64,
     pub write_rate: f64,
-    /// Bytes read per sample, oldest first.
+    /// Bytes a second over each sample, oldest first.
     pub read_history: Vec<f32>,
 }
 
