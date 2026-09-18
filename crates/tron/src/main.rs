@@ -291,6 +291,10 @@ struct Settings {
     padding: (u16, u16),
     font_size: f32,
     scroll_multiplier: f32,
+    /// `[scrollback] smooth`: scroll by pixels instead of whole lines.
+    smooth_scroll: bool,
+    /// `[scrollback] smooth_ms`: how long a smooth scroll takes to settle.
+    scroll_settle: Duration,
     copy_on_select: bool,
     osc52: Osc52,
     close_on_exit: bool,
@@ -311,6 +315,8 @@ impl Settings {
             padding: (config.window.padding_x, config.window.padding_y),
             font_size: config.font.size,
             scroll_multiplier: config.scrollback.multiplier,
+            smooth_scroll: config.scrollback.smooth,
+            scroll_settle: Duration::from_millis(config.scrollback.smooth_ms),
             copy_on_select: config.selection.copy_on_select,
             osc52: config.clipboard.osc52,
             close_on_exit: config.window.close_on_exit,
@@ -401,6 +407,28 @@ impl ScrollbarState {
             offset: 0,
             visible: false,
         }
+    }
+}
+
+/// Pixel-precise scrolling: the viewport eases toward where the input asked for
+/// instead of jumping a whole line at a time. Off unless `[scrollback] smooth` is set.
+#[derive(Default)]
+struct SmoothScroll {
+    /// Where the viewport is, in lines of history above the bottom.
+    position: f32,
+    /// Where it is heading.
+    target: f32,
+    /// The whole-line offset this animation last gave the grid, so scrolling the
+    /// terminal does itself (output, search, prompt jumps) is told apart from it.
+    applied: usize,
+    /// When the animation last advanced.
+    stepped_at: Option<Instant>,
+}
+
+impl SmoothScroll {
+    /// Whether the viewport has not arrived yet.
+    fn animating(&self) -> bool {
+        self.position != self.target
     }
 }
 
@@ -539,6 +567,7 @@ struct Session {
     /// Debug aid: `TRON_SCREENSHOT=path` saves a frame after `TRON_SCREENSHOT_DELAY_MS` and exits.
     screenshot: Option<(std::path::PathBuf, Instant)>,
     scroll_accumulator: f32,
+    smooth: SmoothScroll,
 }
 
 impl App {
@@ -720,6 +749,7 @@ impl App {
             scale_factor,
             font_size: config.font.size,
             scroll_accumulator: 0.0,
+            smooth: SmoothScroll::default(),
             config_errors: Vec::new(),
             config_errors_until: None,
             startup_token: Some(
@@ -1323,6 +1353,10 @@ impl Session {
 
     fn apply_config(&mut self, config: &Config, paths: Option<&Paths>) {
         self.settings = Settings::new(config);
+        // Smooth scrolling starts from wherever the viewport stands now.
+        let offset = self.shared.term.lock().grid().display_offset();
+        self.smooth =
+            SmoothScroll { position: offset as f32, target: offset as f32, applied: offset, stepped_at: None };
         self.animation_fps = config.shader.fps;
         self.pause_after = pause_after(config.shader.pause_after);
         self.note_activity();
@@ -1670,6 +1704,10 @@ impl Session {
             self.update_represented_directory();
             self.update_look_up();
         }
+        let now = Instant::now();
+        // Moves the viewport before the snapshot is taken, so the frame shows where
+        // the animation arrived.
+        let scroll_wake = self.step_smooth_scroll(now);
         {
             let mut term = self.shared.term.lock();
             if term.sync_blocked() {
@@ -1706,9 +1744,11 @@ impl Session {
                 self.preview_request = Some(PreviewRequest::Restore);
             }
         }
-        let now = Instant::now();
         let mut next_wake: Option<Instant> = None;
         let mut wake_at = |at: Instant| next_wake = Some(next_wake.map_or(at, |n| n.min(at)));
+        if let Some(due) = scroll_wake {
+            wake_at(due);
+        }
 
         // Cursor blinking.
         let blinking = self.focused
@@ -1789,13 +1829,14 @@ impl Session {
             self.pending_key = None;
         }
         self.update_ime_area();
+        let scroll_offset = self.renderer_scroll_offset();
         if let Some(accessibility) = &mut self.accessibility {
             let metrics = self.fonts.metrics();
             let [pad_x, pad_y] = padding(self.settings.padding, self.scale_factor);
             let layout = accessibility::Layout {
                 cell_width: f64::from(metrics.width),
                 cell_height: f64::from(metrics.height),
-                padding: [f64::from(pad_x), f64::from(pad_y + self.top_inset)],
+                padding: [f64::from(pad_x), f64::from(pad_y + self.top_inset) + f64::from(scroll_offset)],
             };
             if let Some(due) = accessibility.update(&self.snapshot, layout) {
                 wake_at(due);
@@ -1915,6 +1956,7 @@ impl Session {
                 self.scroll_history(if action == Action::ScrollPageUp { page } else { -page });
             }
             Action::ScrollToTop => self.scroll_history(f32::from(u16::MAX) * 1000.0),
+            Action::ScrollToBottom if self.settings.smooth_scroll => self.scroll_smooth(-self.smooth.target),
             Action::ScrollToBottom => {
                 self.shared.term.lock().grid_mut().reset_display_offset();
                 self.window.request_redraw();
@@ -2717,6 +2759,22 @@ impl Session {
     /// Wheel input: reports to the application, sends arrows on the alternate
     /// screen, or scrolls history.
     fn scroll(&mut self, lines: f32) {
+        let over_palette = self.palette_hit().is_some_and(|hit| hit != panel::PaletteHit::Outside);
+        let term = self.shared.term.lock();
+        let modes = term.modes();
+        let alt_screen = term.is_alt_screen();
+        drop(term);
+        let reporting = self.mouse_reporting(modes);
+
+        // History scrolls by pixels when smooth scrolling is on; the list of the
+        // command palette, wheel reports and the alternate screen step by lines.
+        if self.settings.smooth_scroll && !over_palette && !reporting && !alt_screen {
+            self.scroll_accumulator = 0.0;
+            self.show_scrollbar();
+            self.scroll_smooth(lines);
+            return;
+        }
+
         self.scroll_accumulator += lines;
         let whole = self.scroll_accumulator.trunc();
         self.scroll_accumulator -= whole;
@@ -2724,7 +2782,7 @@ impl Session {
             return;
         }
         // The wheel over the command palette scrolls its list.
-        if self.palette_hit().is_some_and(|hit| hit != panel::PaletteHit::Outside) {
+        if over_palette {
             let rows = self.renderer.grid_size().1;
             if let Some(palette) = &mut self.palette {
                 palette.scroll(-(whole as isize), rows);
@@ -2734,12 +2792,8 @@ impl Session {
             return;
         }
         let count = whole.abs() as usize;
-        let term = self.shared.term.lock();
-        let modes = term.modes();
-        let alt_screen = term.is_alt_screen();
-        drop(term);
 
-        if self.mouse_reporting(modes) {
+        if reporting {
             let (row, col) = self.renderer.cell_at(self.mouse.position.0, self.mouse.position.1);
             let code = if whole > 0.0 { mouse::WHEEL_UP } else { mouse::WHEEL_DOWN };
             if let Some(bytes) = self.mouse_report(modes, code, true, false, row, col) {
@@ -2785,7 +2839,11 @@ impl Session {
         let (width, height) = self.renderer.size();
         let margin = 3.0 * scale;
         let track = (self.top_inset + margin, height as f32 - margin);
-        let thumb = scrollbar_thumb(track, rows, self.scrollbar.scrollback, self.scrollbar.offset, 24.0 * scale);
+        let offset = match self.settings.smooth_scroll {
+            true => self.smooth.position,
+            false => self.scrollbar.offset as f32,
+        };
+        let thumb = scrollbar_thumb(track, rows, self.scrollbar.scrollback, offset, 24.0 * scale);
         let active = self.scrollbar.hovered || self.scrollbar.grab.is_some();
         let (alpha, wake) = match self.scrollbar.shown_at {
             _ if active => (1.0, None),
@@ -2882,8 +2940,72 @@ impl Session {
     }
 
     fn scroll_history(&mut self, lines: f32) {
+        if self.settings.smooth_scroll {
+            self.scroll_smooth(lines);
+            return;
+        }
         self.shared.term.lock().scroll_display(lines as isize);
         self.window.request_redraw();
+    }
+
+    /// How far down the grid is drawn while the viewport sits between two lines.
+    fn renderer_scroll_offset(&self) -> f32 {
+        match self.settings.smooth_scroll {
+            true => self.smooth.position.fract() * self.renderer.cell_height(),
+            false => 0.0,
+        }
+    }
+
+    /// Sends the viewport `lines` further into history, easing it into place.
+    fn scroll_smooth(&mut self, lines: f32) {
+        let max = self.shared.term.lock().grid().scrollback_len() as f32;
+        self.smooth.target = (self.smooth.target + lines).clamp(0.0, max);
+        self.window.request_redraw();
+    }
+
+    /// Advances smooth scrolling and moves the grid under it, leaving the part of a
+    /// line the viewport sits between to the renderer. Returns when the next frame
+    /// is due while it runs.
+    fn step_smooth_scroll(&mut self, now: Instant) -> Option<Instant> {
+        let elapsed = self.smooth.stepped_at.map_or(0.0, |at| now.saturating_duration_since(at).as_secs_f32());
+        self.smooth.stepped_at = Some(now);
+        if !self.settings.smooth_scroll {
+            self.snapshot.want_overscan = false;
+            self.renderer.set_scroll_offset(0.0);
+            return None;
+        }
+        let mut term = self.shared.term.lock();
+        let offset = term.grid().display_offset();
+        // The terminal scrolled on its own: output under a scrolled view, a search
+        // jump, a prompt jump or the scrollbar. Follow it without easing.
+        if offset != self.smooth.applied {
+            let moved = offset as f32 - self.smooth.applied as f32;
+            self.smooth.position += moved;
+            self.smooth.target += moved;
+            self.smooth.applied = offset;
+        }
+        let max = term.grid().scrollback_len() as f32;
+        self.smooth.target = self.smooth.target.clamp(0.0, max);
+        self.smooth.position = self.smooth.position.clamp(0.0, max);
+
+        let cell_height = self.renderer.cell_height().max(1.0);
+        let step = ease_step(elapsed, self.settings.scroll_settle.as_secs_f32());
+        self.smooth.position += (self.smooth.target - self.smooth.position) * step;
+        // Less than a tenth of a pixel left is not worth another frame.
+        if (self.smooth.target - self.smooth.position).abs() * cell_height < 0.1 {
+            self.smooth.position = self.smooth.target;
+        }
+
+        let whole = self.smooth.position.floor();
+        if whole as usize != self.smooth.applied {
+            term.scroll_display(whole as isize - self.smooth.applied as isize);
+            self.smooth.applied = term.grid().display_offset();
+        }
+        drop(term);
+        let fraction = self.smooth.position - whole;
+        self.snapshot.want_overscan = fraction > 0.0;
+        self.renderer.set_scroll_offset(fraction * cell_height);
+        self.smooth.animating().then(|| now + self.frame_interval)
     }
 }
 
@@ -3174,11 +3296,22 @@ fn window_title(program: Option<&str>, directory: Option<&Path>, home: Option<&P
     }
 }
 
+/// How much of the distance left a smooth scroll covers in `elapsed` seconds, when
+/// it settles in `settle`. The same share of what is left every second, so the ease
+/// looks the same at any frame rate; five time constants land within a percent of
+/// the target. A settle time of zero follows the input without easing.
+fn ease_step(elapsed: f32, settle: f32) -> f32 {
+    if settle <= 0.0 || elapsed <= 0.0 {
+        return 1.0;
+    }
+    (1.0 - (-elapsed * 5.0 / settle).exp()).clamp(0.0, 1.0)
+}
+
 fn scrollbar_thumb(
     track: (f32, f32),
     rows: usize,
     scrollback: usize,
-    offset: usize,
+    offset: f32,
     min_height: f32,
 ) -> Option<(f32, f32)> {
     if scrollback == 0 {
@@ -3186,7 +3319,7 @@ fn scrollbar_thumb(
     }
     let length = (track.1 - track.0).max(0.0);
     let height = (length * rows as f32 / (rows + scrollback) as f32).max(min_height).min(length);
-    let position = 1.0 - offset.min(scrollback) as f32 / scrollback as f32;
+    let position = 1.0 - offset.clamp(0.0, scrollback as f32) / scrollback as f32;
     Some((track.0 + (length - height) * position, height))
 }
 
@@ -3276,12 +3409,22 @@ mod tests {
     }
 
     #[test]
+    fn a_smooth_scroll_eases_the_same_way_at_any_frame_rate() {
+        assert_eq!(ease_step(0.016, 0.0), 1.0, "no settle time, no easing");
+        assert_eq!(ease_step(0.0, 0.08), 1.0, "no time passed on the first frame");
+        assert!(ease_step(0.08, 0.08) > 0.99, "settled after the settle time");
+        // Two half frames cover as much as one whole one.
+        let (half, whole) = (ease_step(0.008, 0.08), ease_step(0.016, 0.08));
+        assert!(((1.0 - (1.0 - half) * (1.0 - half)) - whole).abs() < 1e-6);
+    }
+
+    #[test]
     fn scrollbar_thumb_follows_the_view() {
-        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 0, 0, 5.0), None, "no history, no scrollbar");
-        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 90, 0, 5.0), Some((90.0, 10.0)), "newest lines at the bottom");
-        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 90, 90, 5.0), Some((0.0, 10.0)), "oldest lines at the top");
-        assert_eq!(scrollbar_thumb((20.0, 120.0), 10, 90, 45, 5.0), Some((65.0, 10.0)));
-        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 100_000, 0, 20.0).map(|(_, height)| height), Some(20.0));
+        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 0, 0.0, 5.0), None, "no history, no scrollbar");
+        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 90, 0.0, 5.0), Some((90.0, 10.0)), "newest lines at the bottom");
+        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 90, 90.0, 5.0), Some((0.0, 10.0)), "oldest lines at the top");
+        assert_eq!(scrollbar_thumb((20.0, 120.0), 10, 90, 45.0, 5.0), Some((65.0, 10.0)));
+        assert_eq!(scrollbar_thumb((0.0, 100.0), 10, 100_000, 0.0, 20.0).map(|(_, height)| height), Some(20.0));
     }
 
     #[test]

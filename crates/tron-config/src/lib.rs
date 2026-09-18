@@ -777,11 +777,17 @@ pub struct ScrollbackConfig {
     pub lines: usize,
     /// Lines scrolled per mouse wheel step.
     pub multiplier: f32,
+    /// Scroll by pixels instead of whole lines, easing the viewport to where the
+    /// input asked for. Off by default.
+    pub smooth: bool,
+    /// How long the viewport takes to settle after a smooth scroll, in milliseconds.
+    /// 0 follows the input without easing.
+    pub smooth_ms: u64,
 }
 
 impl Default for ScrollbackConfig {
     fn default() -> Self {
-        Self { lines: 10_000, multiplier: 3.0 }
+        Self { lines: 10_000, multiplier: 3.0, smooth: false, smooth_ms: 80 }
     }
 }
 

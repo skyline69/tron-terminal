@@ -218,6 +218,15 @@ name in `shaders/` takes precedence. The startup screen's Credits tab and
 [`examples/shaders/README.md`](examples/shaders/README.md) list their authors
 and licenses.
 
+Scrolling steps by whole lines. Turn on smooth scrolling for pixel-precise
+scrolling that eases the view into place:
+
+```toml
+[scrollback]
+smooth = true
+smooth_ms = 80    # 0 follows the input without easing
+```
+
 Key bindings override the defaults:
 
 ```toml

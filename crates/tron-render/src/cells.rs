@@ -203,6 +203,19 @@ fn clip_vertical(instance: Instance, top: f32, bottom: f32) -> Option<Instance> 
     Some(clipped)
 }
 
+/// Cuts the quads from `start` on to the band between `top` and `bottom`, dropping
+/// those outside it.
+fn clip_range(frame: &mut Vec<Instance>, start: usize, top: f32, bottom: f32) {
+    let mut index = start;
+    for position in start..frame.len() {
+        if let Some(clipped) = clip_vertical(frame[position], top, bottom) {
+            frame[index] = clipped;
+            index += 1;
+        }
+    }
+    frame.truncate(index);
+}
+
 /// Whether the other cells of a scaled text block starting at `x` are still in place on this row.
 fn multicell_intact(row: &Row, x: usize, size: &TextSize, colors: &ColorContext<'_>) -> bool {
     (1..size.cells().0).all(|dx| {
@@ -324,6 +337,12 @@ pub struct CellPipeline {
     shape_cache: HashMap<u32, HashMap<String, Vec<ShapedGlyph>>>,
     shape_cache_len: usize,
     rows: Vec<RowInstances>,
+    /// Instances of the row above the viewport, drawn while the grid is scrolled
+    /// by part of a line.
+    overscan: RowInstances,
+    /// How far down the grid is drawn, in pixels, between none and one cell:
+    /// smooth scrolling sits the viewport between two lines.
+    scroll_offset: f32,
     frame: Vec<Instance>,
     /// The frame and uniforms last written to the GPU.
     uploaded: Vec<Instance>,
@@ -450,6 +469,8 @@ impl CellPipeline {
             shape_cache: HashMap::default(),
             shape_cache_len: 0,
             rows: Vec::new(),
+            overscan: RowInstances::default(),
+            scroll_offset: 0.0,
             frame: Vec::new(),
             uploaded: Vec::new(),
             uploaded_uniforms: Uniforms::zeroed(),
@@ -498,6 +519,16 @@ impl CellPipeline {
     /// Cursor rectangle of the last frame in pixels: x, y, width, height.
     pub fn cursor_rect(&self) -> [f32; 4] {
         self.cursor_rect
+    }
+
+    /// Draws the grid `pixels` lower, between none and one cell down, for a
+    /// viewport scrolled by part of a line.
+    pub fn set_scroll_offset(&mut self, pixels: f32) {
+        self.scroll_offset = pixels.clamp(0.0, self.metrics.height as f32);
+    }
+
+    pub fn scroll_offset(&self) -> f32 {
+        self.scroll_offset
     }
 
     pub fn set_metrics(&mut self, device: &wgpu::Device, metrics: CellMetrics, padding: [f32; 2]) {
@@ -684,23 +715,57 @@ impl CellPipeline {
         self.full_rebuild = false;
         self.last_cursor = cursor_cell;
 
+        // The row above the viewport shows through while the grid sits between two lines.
+        let scroll = if snapshot.overscan.is_some() { self.scroll_offset } else { 0.0 };
+        if let Some(row) = &snapshot.overscan {
+            let mut instances = std::mem::take(&mut self.overscan);
+            let key = row_key(row, None);
+            if let Some(cached) = self.row_cache.get(&key) {
+                instances.background.clone_from(&cached.background);
+                instances.foreground.clone_from(&cached.foreground);
+            } else {
+                instances.background.clear();
+                instances.foreground.clear();
+                self.build_row(row, snapshot.overscan_line(), None, &colors, fonts, queue, &mut instances);
+            }
+            self.overscan = instances;
+        }
+
         // Row instances are relative to the row top; place them now.
         let cell_h = self.metrics.height as f32;
         let padding_top = self.padding[1];
+        // Rows hanging over the top or the bottom of the grid are cut at its edges.
+        let (top, bottom) = (padding_top, padding_top + rows as f32 * cell_h);
         let shifted = |instance: &Instance, offset: f32| Instance {
             pos: [instance.pos[0], instance.pos[1] + offset],
             ..*instance
         };
+        let place = |frame: &mut Vec<Instance>, instances: &[Instance], offset: f32, clip: bool| {
+            for instance in instances {
+                let moved = shifted(instance, offset);
+                match clip {
+                    true => frame.extend(clip_vertical(moved, top, bottom)),
+                    false => frame.push(moved),
+                }
+            }
+        };
+        let row_offset = |y: usize| padding_top + (y as f32 * cell_h) + scroll;
+        // Only the first and the last row can hang over an edge.
+        let clipped = |y: usize| scroll > 0.0 && y + 1 == rows;
         self.frame.clear();
+        place(&mut self.frame, &self.overscan.background, row_offset(0) - cell_h, scroll > 0.0);
         for (y, row) in self.rows.iter().enumerate() {
-            let offset = padding_top + y as f32 * cell_h;
-            self.frame.extend(row.background.iter().map(|i| shifted(i, offset)));
+            place(&mut self.frame, &row.background, row_offset(y), clipped(y));
         }
+        let cursor_start = self.frame.len();
         let cursor_rect = self.push_cursor(snapshot, &colors, focused);
+        if scroll > 0.0 {
+            clip_range(&mut self.frame, cursor_start, top, bottom);
+        }
         self.split = self.frame.len();
+        place(&mut self.frame, &self.overscan.foreground, row_offset(0) - cell_h, scroll > 0.0);
         for (y, row) in self.rows.iter().enumerate() {
-            let offset = padding_top + y as f32 * cell_h;
-            self.frame.extend(row.foreground.iter().map(|i| shifted(i, offset)));
+            place(&mut self.frame, &row.foreground, row_offset(y), clipped(y));
         }
 
         // Overlays (search bar, IME preedit) are drawn above the terminal text.
@@ -715,7 +780,7 @@ impl CellPipeline {
                 instances.foreground.clear();
                 let row = overlay_row(overlay, snapshot.cols);
                 self.build_row(&row, i64::MIN, None, &colors, fonts, queue, &mut instances);
-                let offset = padding_top + overlay.row as f32 * cell_h;
+                let offset = row_offset(overlay.row);
                 self.frame.extend(instances.background.iter().chain(&instances.foreground).map(|i| shifted(i, offset)));
             }
             self.overlay_instances = instances;
@@ -1106,7 +1171,7 @@ impl CellPipeline {
         let wide = row.cells.get(col).is_some_and(|c| c.flags.contains(Flags::WIDE));
         let width = if wide { 2.0 } else { 1.0 } * layout.cell_width;
         let x = layout.left(col);
-        let y = self.padding[1] + cursor.row as f32 * cell_h;
+        let y = self.padding[1] + cursor.row as f32 * cell_h + self.scroll_offset;
         self.cursor_rect = [x, y, width, cell_h];
         // An overlay such as the command palette covers the cursor's cell: the cursor
         // would paint over it and recolor its text.
@@ -1325,6 +1390,20 @@ mod tests {
             cell.ch = ch;
         }
         row
+    }
+
+    #[test]
+    fn rows_hanging_over_the_grid_are_cut_at_its_edges() {
+        let color = [1.0; 4];
+        let mut frame = vec![
+            solid(0.0, 5.0, 10.0, 20.0, color),   // crosses the top
+            solid(0.0, 30.0, 10.0, 20.0, color),  // inside
+            solid(0.0, 90.0, 10.0, 20.0, color),  // crosses the bottom
+            solid(0.0, 120.0, 10.0, 20.0, color), // past the bottom
+        ];
+        clip_range(&mut frame, 0, 10.0, 100.0);
+        let bands: Vec<(f32, f32)> = frame.iter().map(|i| (i.pos[1], i.size[1])).collect();
+        assert_eq!(bands, [(10.0, 15.0), (30.0, 20.0), (90.0, 10.0)]);
     }
 
     #[test]

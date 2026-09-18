@@ -634,8 +634,19 @@ impl Renderer {
         let padding = self.cells.padding();
         let (cols, rows) = self.grid_size();
         let col = ((x as f32 - padding[0]) / m.width as f32).max(0.0) as usize;
-        let row = ((y as f32 - padding[1]) / m.height as f32).max(0.0) as usize;
+        let row = ((y as f32 - padding[1] - self.cells.scroll_offset()) / m.height as f32).max(0.0) as usize;
         (row.min(rows - 1), col.min(cols - 1))
+    }
+
+    /// Draws the grid `pixels` lower, between none and one cell down, so the
+    /// viewport can sit between two lines. The snapshot then needs its overscan row.
+    pub fn set_scroll_offset(&mut self, pixels: f32) {
+        self.cells.set_scroll_offset(pixels);
+    }
+
+    /// Height of one cell in physical pixels.
+    pub fn cell_height(&self) -> f32 {
+        self.cells.metrics().height as f32
     }
 
     /// Call after the font size, font or scale factor changed.
@@ -757,12 +768,13 @@ impl Renderer {
             self.srgb_output,
             viewport,
         );
+        let padding = self.cells.padding();
         self.images.prepare(
             &self.device,
             &self.queue,
             snapshot,
             self.cells.metrics(),
-            self.cells.padding(),
+            [padding[0], padding[1] + self.cells.scroll_offset()],
             self.srgb_output,
         );
     }

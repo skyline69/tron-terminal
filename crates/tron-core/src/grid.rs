@@ -358,6 +358,13 @@ impl Grid {
         &self.lines[self.base() - self.display_offset + row]
     }
 
+    /// Row just above the viewport, if history still holds one. Smooth scrolling
+    /// draws part of it while the viewport sits between two lines.
+    pub fn overscan_row(&self) -> Option<&Row> {
+        let index = (self.base() - self.display_offset).checked_sub(1)?;
+        self.lines.get(index)
+    }
+
     /// Absolute line number of viewport row `row`.
     pub fn viewport_line(&self, row: usize) -> i64 {
         self.history - self.display_offset as i64 + row as i64

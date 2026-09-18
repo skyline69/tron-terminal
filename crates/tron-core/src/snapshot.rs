@@ -23,6 +23,12 @@ pub struct Snapshot {
     /// Absolute line number of the top viewport row.
     pub top_line: i64,
     pub display_offset: usize,
+    /// Asks for the row above the viewport in the next snapshot. Smooth scrolling
+    /// sets it while the viewport sits between two lines.
+    pub want_overscan: bool,
+    /// Row above the top viewport row, copied when `want_overscan` is set and
+    /// history holds one.
+    pub overscan: Option<Row>,
     pub cursor: Option<CursorState>,
     pub modes: Option<Modes>,
     pub alt_screen: bool,
@@ -46,6 +52,11 @@ impl Snapshot {
     /// Absolute line number of viewport row `row`.
     pub fn line(&self, row: usize) -> i64 {
         self.top_line + row as i64
+    }
+
+    /// Absolute line number of the overscan row.
+    pub fn overscan_line(&self) -> i64 {
+        self.top_line - 1
     }
 
     /// Extended attributes of a cell.

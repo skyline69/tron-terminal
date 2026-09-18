@@ -145,6 +145,12 @@ pub fn list(fonts: &[String], max_fps: Option<u32>) -> Vec<Setting> {
             Kind::Integer { min: 0, max: 200_000, step: 1000 },
         ),
         setting(
+            "scrollback.smooth",
+            "Smooth scrolling",
+            "Scroll by pixels instead of whole lines, easing the view into place.",
+            Kind::Bool,
+        ),
+        setting(
             "selection.copy_on_select",
             "Copy on select",
             "Selected text goes to the primary selection, pasted with a middle click.",
@@ -209,6 +215,7 @@ pub fn read(config: &Config) -> BTreeMap<&'static str, toml::Value> {
         ("cursor.shape", name(config.cursor.shape)),
         ("cursor.blinking", name(config.cursor.blinking)),
         ("scrollback.lines", Integer(config.scrollback.lines as i64)),
+        ("scrollback.smooth", Boolean(config.scrollback.smooth)),
         ("selection.copy_on_select", Boolean(config.selection.copy_on_select)),
         ("bell.mode", name(config.bell.mode)),
         ("notifications.mode", name(config.notifications.mode)),

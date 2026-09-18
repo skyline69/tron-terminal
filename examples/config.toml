@@ -80,6 +80,12 @@ blink_interval_ms = 530
 lines = 10000
 # Lines per mouse wheel step.
 multiplier = 3.0
+# Scroll by pixels instead of whole lines, easing the view to where the input
+# asked for. Off by default.
+smooth = false
+# How long the view takes to settle after a smooth scroll. 0 follows the input
+# without easing.
+smooth_ms = 80
 
 [shell]
 # program = "/usr/bin/fish"

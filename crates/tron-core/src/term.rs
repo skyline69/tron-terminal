@@ -375,6 +375,14 @@ impl Terminal {
                 snapshot.rows[y].copy_from(grid.visible_row(y));
             }
         }
+        match grid.overscan_row().filter(|_| snapshot.want_overscan) {
+            Some(row) => {
+                let mut overscan = snapshot.overscan.take().unwrap_or_else(|| crate::grid::Row::new(0));
+                overscan.copy_from(row);
+                snapshot.overscan = Some(overscan);
+            }
+            None => snapshot.overscan = None,
+        }
         snapshot.cols = grid.cols();
         snapshot.top_line = grid.viewport_line(0);
         snapshot.display_offset = grid.display_offset();
@@ -2754,6 +2762,26 @@ mod tests {
         let p = &t.graphics().placements()[0];
         assert_eq!((p.line, p.col), (1, 2));
         assert_eq!(t.cursor().col, 3);
+    }
+
+    #[test]
+    fn the_overscan_row_is_copied_only_when_it_is_wanted() {
+        let mut t = term(4, 2, b"a\r\nb\r\nc\r\nd");
+        let mut snapshot = crate::Snapshot::default();
+        t.snapshot(&mut snapshot);
+        assert!(snapshot.overscan.is_none(), "not wanted, not copied");
+
+        snapshot.want_overscan = true;
+        t.snapshot(&mut snapshot);
+        let overscan = snapshot.overscan.as_ref().expect("the newest scrollback line sits above the viewport");
+        assert_eq!(overscan.cells[0].ch, 'b');
+
+        t.scroll_display(1);
+        t.snapshot(&mut snapshot);
+        let overscan = snapshot.overscan.as_ref().expect("history holds a row above the viewport");
+        assert_eq!(snapshot.rows[0].cells[0].ch, 'b', "the viewport moved one line up");
+        assert_eq!(overscan.cells[0].ch, 'a', "the row above it");
+        assert_eq!(snapshot.overscan_line(), snapshot.top_line - 1);
     }
 
     #[test]
