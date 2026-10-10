@@ -31,7 +31,7 @@ use winit::cursor::CursorIcon;
 use winit::data_transfer::{DataTransferId, TypeHint, TypedData};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ButtonSource, ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, DndAction, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, AsyncRequestSerial, ControlFlow, DndAction, EventLoop, EventLoopProxy};
 use winit::icon::{Icon, RgbaIcon};
 use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{
@@ -472,9 +472,17 @@ fn sweep_head(elapsed: Duration, half: f32, tail: f32) -> Option<f32> {
     (t < 1.0).then(|| (1.0 - (1.0 - t).powi(2)) * (half + tail))
 }
 
+#[derive(Clone, Copy)]
+enum ClipboardTarget {
+    Paste,
+    Osc52(&'static str),
+}
+
 struct Session {
     // Declared before `window`: it must be dropped before the Wayland display.
     clipboard: Clipboard,
+    clipboard_requests: VecDeque<ClipboardTarget>,
+    clipboard_pending: Option<(AsyncRequestSerial, ClipboardTarget)>,
     accessibility: Option<accessibility::Accessibility>,
     drop: Option<DropState>,
     window: Arc<dyn Window>,
@@ -733,6 +741,8 @@ impl App {
         let fastest_frame = frame_interval(window.as_ref(), self.max_fps);
         let mut session = Session {
             clipboard: Clipboard::new(window.as_ref()),
+            clipboard_requests: VecDeque::new(),
+            clipboard_pending: None,
             accessibility,
             drop: None,
             frame_interval: frame_interval(window.as_ref(), self.max_fps),
@@ -1149,6 +1159,9 @@ impl App {
     /// Carries out what windows asked the `App` for: windows opened with New
     /// Window, and commands from their command palettes.
     fn open_requested_windows(&mut self, event_loop: &dyn ActiveEventLoop) {
+        for session in self.sessions.values_mut() {
+            session.start_clipboard_read(event_loop);
+        }
         let requests: Vec<Launch> =
             self.sessions.values_mut().filter_map(|session| session.window_request.take()).collect();
         let app_requests: Vec<(WindowId, AppRequest)> =
@@ -1405,7 +1418,11 @@ impl App {
             }
             WindowEvent::DragDropped { id, .. } => session.drag_dropped(id),
             WindowEvent::DragLeft { id } => session.drag_left(id),
-            WindowEvent::DataTransferReceived { id, value, .. } => session.drag_data(id, value.as_ref()),
+            WindowEvent::DataTransferReceived { id, serial, value } => {
+                if !session.clipboard_data(serial, value.as_ref()) {
+                    session.drag_data(id, value.as_ref());
+                }
+            }
             WindowEvent::PointerButton { state, position, button: ButtonSource::Mouse(button), .. } => {
                 session.mouse.position = (position.x, position.y);
                 session.pointer_button(state == ElementState::Pressed, button);
@@ -1767,6 +1784,10 @@ impl Session {
                 }
                 TermEvent::ClipboardLoad { primary, terminator } => {
                     if self.settings.osc52 == Osc52::CopyPaste {
+                        if self.clipboard.needs_event_loop(primary) {
+                            self.clipboard_requests.push_back(ClipboardTarget::Osc52(terminator));
+                            continue;
+                        }
                         let text = self.clipboard.load(primary).unwrap_or_default();
                         let reply = {
                             let mut term = self.shared.term.lock();
@@ -2384,6 +2405,9 @@ impl Session {
         });
         let input = spawn_writer(pty.writer()?, shared.clone())?;
         spawn_reader(pty.reader()?, shared.clone(), proxy.clone(), input.clone())?;
+        // A delayed clipboard result belongs to the terminal that requested it.
+        self.clipboard_requests.clear();
+        self.clipboard_pending = None;
         self.suspended = Some(Suspended {
             pty: std::mem::replace(&mut self.pty, pty),
             shared: std::mem::replace(&mut self.shared, shared),
@@ -2401,6 +2425,8 @@ impl Session {
     /// changed there applied to that program's terminal, so the shell's gets them now.
     fn restore_shell(&mut self, config: &Config, paths: Option<&Paths>) {
         let Some(shell) = self.suspended.take() else { return };
+        self.clipboard_requests.clear();
+        self.clipboard_pending = None;
         self.pty = shell.pty;
         self.shared = shell.shared;
         self.input = shell.input;
@@ -2533,8 +2559,58 @@ impl Session {
     }
 
     fn paste_from(&mut self, primary: bool) {
+        if self.clipboard.needs_event_loop(primary) {
+            self.clipboard_requests.push_back(ClipboardTarget::Paste);
+            return;
+        }
         if let Some(text) = self.clipboard.load(primary) {
             self.paste(&text);
+        }
+    }
+
+    /// Keep reads ordered, including repeated paste keys and OSC 52 queries.
+    fn start_clipboard_read(&mut self, event_loop: &dyn ActiveEventLoop) {
+        while self.clipboard_pending.is_none() {
+            let Some(target) = self.clipboard_requests.pop_front() else { break };
+            match clipboard::request_text(event_loop) {
+                Ok(serial) => self.clipboard_pending = Some((serial, target)),
+                Err(error) => {
+                    log::debug!("clipboard read failed: {error}");
+                    self.finish_clipboard_read(target, None);
+                }
+            }
+        }
+    }
+
+    fn clipboard_data(&mut self, serial: AsyncRequestSerial, value: &dyn TypedData) -> bool {
+        let Some((pending, target)) = self.clipboard_pending else { return false };
+        if serial != pending {
+            return false;
+        }
+        self.clipboard_pending = None;
+        let text = value.try_as_string().map_err(|error| log::debug!("clipboard read failed: {error}")).ok();
+        self.finish_clipboard_read(target, text);
+        true
+    }
+
+    fn finish_clipboard_read(&mut self, target: ClipboardTarget, text: Option<String>) {
+        match target {
+            ClipboardTarget::Paste => {
+                if let Some(text) = text {
+                    self.paste(&text);
+                }
+            }
+            ClipboardTarget::Osc52(terminator) if self.settings.osc52 == Osc52::CopyPaste => {
+                let reply = {
+                    let mut term = self.shared.term.lock();
+                    term.clipboard_reply(false, text.as_deref().unwrap_or_default(), terminator);
+                    term.take_responses()
+                };
+                if let Some(reply) = reply {
+                    self.send(reply);
+                }
+            }
+            ClipboardTarget::Osc52(_) => {}
         }
     }
 
@@ -3522,13 +3598,20 @@ fn bind_key(key: &Key) -> Option<BindKey> {
 fn dropped_text(value: &dyn TypedData) -> Option<String> {
     match value.type_().hint() {
         Some(TypeHint::UriList) => {
-            let items: Vec<String> = match value.try_as_file_paths() {
-                Ok(paths) if !paths.is_empty() => paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
-                _ => value.try_as_uris().ok()?,
-            };
+            let items: Vec<String> = value.try_as_uris().ok()?.iter().map(|uri| file_uri_to_path(uri)).collect();
             Some(items.iter().map(|item| shell_quote(item)).collect::<Vec<_>>().join(" "))
         }
         _ => value.try_as_string().ok(),
+    }
+}
+
+/// A `file://` URI for the local machine as a percent-decoded path; other URIs
+/// are returned unchanged.
+fn file_uri_to_path(uri: &str) -> String {
+    let Some(rest) = uri.strip_prefix("file://") else { return uri.to_owned() };
+    match rest.split_once('/') {
+        Some(("", path)) | Some(("localhost", path)) => percent_decode(&format!("/{path}")),
+        _ => uri.to_owned(),
     }
 }
 

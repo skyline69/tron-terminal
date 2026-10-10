@@ -11,6 +11,10 @@ pub struct Clipboard {
 }
 
 impl Clipboard {
+    pub fn needs_event_loop(&self, _primary: bool) -> bool {
+        false
+    }
+
     pub fn new(_window: &dyn Window) -> Self {
         let pasteboard = arboard::Clipboard::new()
             .map_err(|error| log::warn!("pasteboard unavailable: {error}"))

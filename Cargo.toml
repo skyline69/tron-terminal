@@ -91,6 +91,14 @@ wgpu = "30.0.1"
 winit = "0.31.0-beta.3"
 zune-jpeg = "0.5.15"
 
+[patch.crates-io]
+# Winit PR #4658: clipboard data transfer API. Pinned to the PR head commit.
+winit = { git = "https://github.com/timon-schelling/winit", rev = "2a00d7ff8a8037e2199c8e87a47110db12e0afe5" }
+winit-core = { git = "https://github.com/timon-schelling/winit", rev = "2a00d7ff8a8037e2199c8e87a47110db12e0afe5" }
+winit-common = { git = "https://github.com/timon-schelling/winit", rev = "2a00d7ff8a8037e2199c8e87a47110db12e0afe5" }
+winit-wayland = { git = "https://github.com/timon-schelling/winit", rev = "2a00d7ff8a8037e2199c8e87a47110db12e0afe5" }
+winit-x11 = { git = "https://github.com/timon-schelling/winit", rev = "2a00d7ff8a8037e2199c8e87a47110db12e0afe5" }
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"

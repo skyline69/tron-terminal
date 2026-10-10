@@ -17,6 +17,12 @@ pub struct Clipboard {
 }
 
 impl Clipboard {
+    /// Regular Wayland reads use Winit's device, which receives the selection
+    /// offer even on compositors that only notify the first device per client.
+    pub fn needs_event_loop(&self, primary: bool) -> bool {
+        !primary && matches!(self.inner, Some(Backend::Wayland(_)))
+    }
+
     pub fn new(window: &dyn Window) -> Self {
         let raw = window.display_handle().ok().map(|handle| handle.as_raw());
         let inner = match raw {
