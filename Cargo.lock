@@ -4146,7 +4146,7 @@ dependencies = [
 
 [[package]]
 name = "tron"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -4178,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "tron-config"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "etcetera",
  "log",
@@ -4190,7 +4190,7 @@ dependencies = [
 
 [[package]]
 name = "tron-core"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "base64 0.23.1",
  "bitflags 2.13.2",
@@ -4207,7 +4207,7 @@ dependencies = [
 
 [[package]]
 name = "tron-font"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "foldhash",
  "fontique",
@@ -4221,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "tron-inspect"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -4234,7 +4234,7 @@ dependencies = [
 
 [[package]]
 name = "tron-pty"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "log",
  "rustix",
@@ -4244,7 +4244,7 @@ dependencies = [
 
 [[package]]
 name = "tron-render"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -4263,7 +4263,7 @@ dependencies = [
 
 [[package]]
 name = "tron-startup"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "base64 0.23.1",
  "log",
@@ -5402,7 +5402,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "anyhow",
  "clap",
