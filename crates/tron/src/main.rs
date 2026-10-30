@@ -1425,9 +1425,13 @@ impl App {
             }
             WindowEvent::DragDropped { id, .. } => session.drag_dropped(id),
             WindowEvent::DragLeft { id } => session.drag_left(id),
-            WindowEvent::DataTransferReceived { id, serial, value } => {
-                if !session.clipboard_data(serial, value.as_ref()) {
-                    session.drag_data(id, value.as_ref());
+            WindowEvent::DataTransferReceived { id: transfer, serial, value } => {
+                // Winit hands a clipboard read to the focused window, which
+                // need not be the one that asked for it.
+                if !self.sessions.values_mut().any(|session| session.clipboard_data(serial, value.as_ref()))
+                    && let Some(session) = self.sessions.get_mut(&id)
+                {
+                    session.drag_data(transfer, value.as_ref());
                 }
             }
             WindowEvent::PointerButton { state, position, button: ButtonSource::Mouse(button), .. } => {
