@@ -72,6 +72,23 @@ pub enum Command {
     Credits,
     /// Show the version and links
     About,
+    /// Download and install the latest release
+    #[command(after_help = "Works for installs made by install.sh and for the AppImage. \
+                            Files that did not change are left alone.")]
+    Update {
+        /// Only tell whether a newer release is out
+        #[arg(long)]
+        check: bool,
+        /// Install this release instead of the latest, such as 0.4.7
+        #[arg(long, value_name = "VERSION", conflicts_with = "check")]
+        to: Option<String>,
+        /// Install even when this version is already installed
+        #[arg(long, short)]
+        force: bool,
+        /// Install a downloaded release archive (.tar.zst or .tar.gz)
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["check", "to"])]
+        archive: Option<PathBuf>,
+    },
     /// Run the startup screen, then the given shell (used inside the terminal)
     #[command(hide = true)]
     StartupScreen {
@@ -92,7 +109,7 @@ impl Command {
             Self::Tour => "Tour",
             Self::Credits => "Credits",
             Self::About => "About",
-            Self::Completions { .. } | Self::StartupScreen { .. } => return None,
+            Self::Completions { .. } | Self::StartupScreen { .. } | Self::Update { .. } => return None,
         })
     }
 }
@@ -137,6 +154,7 @@ fn examples() -> String {
     format!(
         "{header}Examples:{header:#}\n  {command}tron -e nvim notes.md{command:#}\n  {command}tron -d ~/projects{command:#}\n  \
          {command}tron settings{command:#}      {dim}opens in this window when run inside tron{dim:#}\n  \
+         {command}tron update{command:#}        {dim}installs the latest release{dim:#}\n  \
          {command}tron completions fish > ~/.config/fish/completions/tron.fish{command:#}\n\n\
          {dim}Configuration: ~/.config/tron/config.toml{dim:#}"
     )

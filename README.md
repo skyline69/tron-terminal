@@ -82,6 +82,7 @@ packages you can install by hand:
 | `tron-VERSION-ARCH.AppImage` | Any Linux distribution: make it executable and run it |
 | `tron-VERSION-ARCH.flatpak` | Linux with Flatpak: `flatpak install --user tron-VERSION-ARCH.flatpak`. Shells run on the host |
 | `tron-VERSION-ARCH-linux.tar.gz`, `-macos.tar.gz` | The binary with `install.sh`, which installs it without Rust |
+| `tron-VERSION-ARCH-linux.tar.zst`, `-macos.tar.zst` | The same archive, smaller; `tron update` downloads it |
 
 Linux packages need glibc 2.34 or newer (2021 and later distributions). The
 macOS app is not notarized: the first time, open it with right click > Open, or
@@ -92,6 +93,8 @@ for all users under `/usr/local`, `--prefix DIR` picks another location,
 `--ref vX.Y.Z` installs a release (a branch name builds that branch), `--yes`
 answers every question and `--uninstall` removes tron again. See
 `./install.sh --help`.
+
+To update later, run `tron update` (see [Updates](#updates)).
 
 ## Building
 
@@ -333,6 +336,26 @@ When a newer one is out, a notice in the bottom right corner of each window
 offers to open its release page, to close the notice until tron starts
 again, or to not show it again for that release. Set `check = false` under
 `[updates]` to never ask.
+
+`tron update` installs the latest release in place of a tron that
+`install.sh` installed, or of the AppImage it runs from. It reads the release's
+version and checksums from its `SHA256SUMS`, without the GitHub API and its
+rate limit, downloads the archive over several connections at once, verifies
+it and unpacks it in memory. It checks that the new binary runs before it
+replaces anything, writes only the files whose contents changed, renders icons
+and refreshes the desktop caches only when they changed, and then shows what
+changed since your version. Windows that are open keep running the old version
+until you restart tron. An installation under `/usr/local` is installed through
+`sudo`.
+
+```sh
+tron update             # install the latest release
+tron update --check     # only tell whether one is out
+tron update --to 0.4.6  # install that release, also to go back
+tron update --force     # install again, as when files were deleted
+```
+
+Flatpak, Homebrew and cargo installs are updated the way they were installed.
 
 ## Remote hosts
 

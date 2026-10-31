@@ -36,6 +36,11 @@ env_logger.workspace = true
 arboard.workspace = true
 accesskit.workspace = true
 ratatui.workspace = true
+ureq.workspace = true
+sha2.workspace = true
+flate2.workspace = true
+zstd.workspace = true
+tar.workspace = true
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 smithay-clipboard.workspace = true

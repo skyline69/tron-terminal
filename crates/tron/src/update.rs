@@ -1,12 +1,20 @@
 //! Finding out whether a newer tron has been released, at most once a day, and
-//! remembering the release the user chose not to hear about again.
+//! remembering the release the user chose not to hear about again. And
+//! `tron update`, which installs it.
 //!
 //! GitHub redirects the latest release page to the release's tag, so `curl`
 //! reads the version from the redirect without the API or a JSON parser.
 
-use std::path::Path;
+mod download;
+mod install;
+mod release;
+
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, bail};
 
 /// The version of this tron.
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -147,6 +155,211 @@ fn parse(version: &str) -> Option<(u64, u64, u64)> {
 
 fn is_newer(version: &str, than: &str) -> bool {
     matches!((parse(version), parse(than)), (Some(version), Some(than)) if version > than)
+}
+
+/// What `tron update` was asked to do.
+#[derive(Debug, Default)]
+pub struct UpdateOptions {
+    /// Only tell whether a newer release is out.
+    pub check: bool,
+    /// Install this release instead of the latest.
+    pub to: Option<String>,
+    /// Install even when this version is installed.
+    pub force: bool,
+    /// Install this release archive instead of downloading one.
+    pub archive: Option<PathBuf>,
+}
+
+/// Where releases are downloaded from: `.../latest/download/NAME` and
+/// `.../download/vVERSION/NAME`. `TRON_UPDATE_URL` points it at a mirror or a test server.
+fn releases_url() -> String {
+    std::env::var("TRON_UPDATE_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+        .map(|url| url.trim_end_matches('/').to_owned())
+        .unwrap_or_else(|| format!("{REPOSITORY}/releases"))
+}
+
+fn styled(color: &str, text: &str) -> String {
+    if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        format!("\x1b[{color}m==>\x1b[0m {text}")
+    } else {
+        format!("==> {text}")
+    }
+}
+
+fn info(text: &str) {
+    eprintln!("{}", styled("36", text));
+}
+
+fn success(text: &str) {
+    eprintln!("{}", styled("32", text));
+}
+
+/// `tron update`: downloads the latest release, or the one asked for, and
+/// installs it where the running tron was installed.
+///
+/// One request for the release's `SHA256SUMS` tells its version and checksums,
+/// so there is no API call and no rate limit. The archive then comes down over
+/// several connections while the changelog is fetched beside it, is checked
+/// and unpacked in memory, and only files whose contents changed are written.
+pub fn run(options: UpdateOptions) -> anyhow::Result<()> {
+    let started = Instant::now();
+    if let Some(archive) = &options.archive {
+        return install_archive(archive, started);
+    }
+    let platform = release::platform()?;
+    let client = download::Client::new();
+    let base = releases_url();
+    let sums_url = match &options.to {
+        Some(version) => {
+            let version = version.strip_prefix('v').unwrap_or(version);
+            if parse(version).is_none() {
+                bail!("{version} is not a release version such as 1.2.3");
+            }
+            format!("{base}/download/v{version}/SHA256SUMS")
+        }
+        None => format!("{base}/latest/download/SHA256SUMS"),
+    };
+    let sums = client.text(&sums_url)?.with_context(|| match &options.to {
+        Some(version) => format!("there is no release {version}"),
+        None => "no release was found".to_owned(),
+    })?;
+    log::debug!("SHA256SUMS after {:?}", started.elapsed());
+    let sums = release::Sums::parse(&sums);
+    let version = sums.version(&platform).with_context(|| format!("the release has no archive for {platform}"))?;
+
+    if version == CURRENT && !options.force {
+        success(&format!("tron {CURRENT} is the latest release and installed"));
+        return Ok(());
+    }
+    if options.to.is_none() && is_newer(CURRENT, &version) && !options.force {
+        info(&format!("This tron, {CURRENT}, is newer than the latest release, {version}. Nothing changed."));
+        return Ok(());
+    }
+    if options.check {
+        info(&format!("tron {version} is out; you have {CURRENT}. Run tron update to install it."));
+        return Ok(());
+    }
+
+    let target = install::locate()?;
+    let (name, hash) = match &target {
+        install::Target::AppImage(_) => {
+            let arch = release::arch().context("there is no AppImage for this machine")?;
+            sums.appimage(&version, arch)
+        }
+        install::Target::Script(_) => sums.archive(&version, &platform),
+    }
+    .with_context(|| format!("tron {version} has no download for {platform}"))?;
+    let (url, changelog_url) =
+        (format!("{base}/download/v{version}/{name}"), format!("{base}/download/v{version}/CHANGELOG.md"));
+
+    let verb = if is_newer(&version, CURRENT) {
+        "Updating"
+    } else if version == CURRENT {
+        "Reinstalling"
+    } else {
+        "Downgrading"
+    };
+    info(&format!("{verb} tron {CURRENT} to {version}"));
+    // The changelog is small, so it comes down beside the archive at no cost.
+    let (data, changelog) = std::thread::scope(|scope| {
+        let changelog = is_newer(&version, CURRENT).then(|| scope.spawn(|| client.text(&changelog_url)));
+        let data = client.file(&url, &name);
+        let changelog = changelog.and_then(|job| job.join().ok()).and_then(Result::ok).flatten();
+        (data, changelog)
+    });
+    let data = data?;
+    let downloaded = started.elapsed();
+    log::debug!("{name} after {downloaded:?}");
+    release::verify(&name, &data, hash)?;
+    log::debug!("verified after {:?}", started.elapsed());
+
+    match target {
+        install::Target::AppImage(path) => {
+            install::install_appimage(&path, &data, &version)?;
+            success(&format!(
+                "tron {version} installed at {} in {:.2}s",
+                path.display(),
+                started.elapsed().as_secs_f64()
+            ));
+        }
+        install::Target::Script(layout) => {
+            let unpacked = release::unpack(&name, &data)?;
+            log::debug!("unpacked after {:?}", started.elapsed());
+            if layout.writable() {
+                let outcome = install::install(&layout, &unpacked, &version)?;
+                success(&format!(
+                    "tron {version} installed in {:.2}s (download {:.2}s, {} files written, {} unchanged)",
+                    started.elapsed().as_secs_f64(),
+                    downloaded.as_secs_f64(),
+                    outcome.written,
+                    outcome.unchanged
+                ));
+            } else {
+                install_as_root(&name, &data)?;
+            }
+        }
+    }
+    if let Some(changelog) = changelog {
+        let changes = release::changes(&changelog, CURRENT, &version);
+        if !changes.is_empty() {
+            eprintln!("\n{}", changes.trim_end());
+        }
+    }
+    eprintln!("\nNew windows run tron {version}; open ones keep running {CURRENT} until you restart tron.");
+    Ok(())
+}
+
+/// Installs a release archive from disk: run by sudo for a system install,
+/// or by hand for an archive downloaded elsewhere.
+fn install_archive(path: &Path, started: Instant) -> anyhow::Result<()> {
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let unpacked = release::unpack(&name, &data)?;
+    let version = unpacked.version().with_context(|| format!("{name} does not name a tron version"))?;
+    let install::Target::Script(layout) = install::locate()? else {
+        bail!("an AppImage is updated with the new AppImage, not with an archive");
+    };
+    if !layout.writable() {
+        bail!("cannot write to {}; run this as a user who can", layout.bin_dir.display());
+    }
+    let outcome = install::install(&layout, &unpacked, &version)?;
+    success(&format!(
+        "tron {version} installed in {:.2}s ({} files written, {} unchanged)",
+        started.elapsed().as_secs_f64(),
+        outcome.written,
+        outcome.unchanged
+    ));
+    Ok(())
+}
+
+/// Hands the verified archive to `sudo tron update --archive`, for an
+/// installation this user cannot write to, such as one in /usr/local.
+fn install_as_root(name: &str, data: &[u8]) -> anyhow::Result<()> {
+    let exe = std::env::current_exe().context("cannot find the running tron")?;
+    let dir = std::env::temp_dir().join(format!("tron-update-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let archive = dir.join(name);
+    let result = (|| {
+        std::fs::File::create(&archive)
+            .and_then(|mut file| file.write_all(data))
+            .with_context(|| format!("cannot write {}", archive.display()))?;
+        info("Installing needs administrator rights; sudo will ask for your password.");
+        let status = Command::new("sudo")
+            .arg("--")
+            .arg(&exe)
+            .args(["update", "--archive"])
+            .arg(&archive)
+            .status()
+            .context("cannot run sudo")?;
+        if !status.success() {
+            bail!("the installation as administrator failed");
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 #[cfg(test)]

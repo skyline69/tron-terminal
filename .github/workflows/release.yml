@@ -8,9 +8,11 @@ name: Release
 #
 # Packages:
 #   tron-VERSION-ARCH-linux.tar.gz   binary with install.sh (x86_64, aarch64)
+#   tron-VERSION-ARCH-linux.tar.zst  the same, about a quarter smaller, for `tron update`
 #   tron-VERSION-ARCH.AppImage       single file for any distribution (x86_64, aarch64)
 #   tron-VERSION-ARCH.flatpak        Flatpak bundle, shells run on the host (x86_64, aarch64)
 #   tron-VERSION-ARCH-macos.tar.gz   binary with install.sh (x86_64, aarch64)
+#   tron-VERSION-ARCH-macos.tar.zst  the same for `tron update`
 #   tron-VERSION-macos.dmg           universal tron.app on a designed disk image
 #
 # After publishing, the tron cask in skyline69/homebrew-tap is updated from
@@ -107,6 +109,9 @@ jobs:
           cp dist/dev.tron.Terminal.desktop dist/dev.tron.Terminal.metainfo.xml dist/dev.tron.Terminal.svg dist/dev.tron.Terminal.png "$dir/dist/"
           tar -czf "$dir.tar.gz" "$dir"
           sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
+          # tron update downloads this one. A 32 MiB window (--long=25) spans the whole binary;
+          # the decoder in tron accepts windows up to 128 MiB.
+          tar -cf - "$dir" | zstd -q -19 --long=25 -T0 -o "$dir.tar.zst"
       - name: Package the AppImage
         run: |
           appdir=tron.AppDir
@@ -132,6 +137,7 @@ jobs:
           name: release-linux-${{ matrix.arch }}
           path: |
             tron-*.tar.gz*
+            tron-*.tar.zst
             tron-*.AppImage*
           if-no-files-found: error
 
@@ -196,11 +202,14 @@ jobs:
           cp -R dist/macos/Icon.icon dist/macos/icon-1024.png "$dir/dist/macos/"
           tar -czf "$dir.tar.gz" "$dir"
           shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
+          tar -cf - "$dir" | zstd -q -19 --long=25 -T0 -o "$dir.tar.zst"
           cp "target/$TARGET/release/tron" "bin/tron-$ARCH"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: release-macos-${{ matrix.arch }}
-          path: tron-*.tar.gz*
+          path: |
+            tron-*.tar.gz*
+            tron-*.tar.zst
           if-no-files-found: error
       - uses: actions/upload-artifact@v7.0.1
         with:
