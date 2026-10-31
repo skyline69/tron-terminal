@@ -5,7 +5,7 @@ exclude = ["fuzz"]
 default-members = ["crates/tron"]
 
 [workspace.package]
-version = "0.4.8"
+version = "0.4.9"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
