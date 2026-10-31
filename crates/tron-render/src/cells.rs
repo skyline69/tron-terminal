@@ -25,6 +25,7 @@ const KIND_COLOR: u32 = 2;
 const KIND_CURLY: u32 = 3;
 const KIND_ROUNDED: u32 = 4;
 const KIND_GLOW: u32 = 5;
+const KIND_FADE: u32 = 6;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, PartialEq)]
@@ -461,6 +462,8 @@ pub struct CellPipeline {
     overlays: Vec<Overlay>,
     scrollbar: Option<Scrollbar>,
     glow_line: Option<GlowLine>,
+    /// Strength of the fades at the top and bottom edges of the grid, 0 to 1.
+    edge_fade: [f32; 2],
     overlay_instances: RowInstances,
     bidi: bool,
     flash: f32,
@@ -596,6 +599,7 @@ impl CellPipeline {
             overlays: Vec::new(),
             scrollbar: None,
             glow_line: None,
+            edge_fade: [0.0; 2],
             overlay_instances: RowInstances::default(),
             bidi: true,
             flash: 0.0,
@@ -688,6 +692,10 @@ impl CellPipeline {
 
     pub fn set_glow_line(&mut self, line: Option<GlowLine>) {
         self.glow_line = line;
+    }
+
+    pub fn set_edge_fade(&mut self, top: f32, bottom: f32) {
+        self.edge_fade = [top.clamp(0.0, 1.0), bottom.clamp(0.0, 1.0)];
     }
 
     fn rebind(&mut self, device: &wgpu::Device) {
@@ -893,6 +901,25 @@ impl CellPipeline {
             pos: [instance.pos[0], instance.pos[1] + offset],
             ..*instance
         };
+        // Text cut off at an edge fades into the background there. Drawn before the
+        // overlays and the scrollbar, which stay sharp.
+        let [fade_top, fade_bottom] = self.edge_fade;
+        let fade_color = colors.rgba(colors.palette.background);
+        let fade_color = [fade_color[0], fade_color[1], fade_color[2], theme.opacity.clamp(0.0, 1.0)];
+        let fade_height = cell_h.min(bottom - top);
+        let fade = |y: f32, from: f32, to: f32| Instance {
+            pos: [0.0, y],
+            size: [viewport[0], fade_height],
+            uv: [0.0, from, 0.0, to],
+            color: fade_color,
+            kind: KIND_FADE,
+        };
+        if fade_top > 0.0 && fade_height > 0.0 {
+            self.above.push(fade(top, fade_top, 0.0));
+        }
+        if fade_bottom > 0.0 && fade_height > 0.0 {
+            self.above.push(fade(bottom - fade_height, 0.0, fade_bottom));
+        }
         // Overlays (search bar, IME preedit) are drawn above the terminal text.
         if !self.overlays.is_empty() {
             let overlays = std::mem::take(&mut self.overlays);

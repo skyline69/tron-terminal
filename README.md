@@ -231,6 +231,11 @@ smooth = true
 smooth_ms = 80    # 0 follows the input without easing
 ```
 
+Text fades out at the top and bottom edges while history continues past them,
+and the fades ease in and out as you scroll. Full screen programs (vim, tmux,
+htop) draw on the alternate screen, which never fades. Turn it off with
+`fade_edges = false` under `[scrollback]`.
+
 Key bindings override the defaults:
 
 ```toml

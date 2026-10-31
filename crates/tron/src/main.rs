@@ -73,6 +73,8 @@ const UNFOCUSED_FPS: u32 = 10;
 /// How long the overlay scrollbar stays after scrolling stops, and how long it fades.
 const SCROLLBAR_VISIBLE: Duration = Duration::from_millis(900);
 const SCROLLBAR_FADE: Duration = Duration::from_millis(250);
+/// How long the fades at the grid's top and bottom edges take to come and go.
+const EDGE_FADE: Duration = Duration::from_millis(180);
 /// How often the shell's directory is read for the folder icon beside the title.
 #[cfg(target_os = "macos")]
 const REPRESENTED_DIRECTORY_POLL: Duration = Duration::from_millis(500);
@@ -320,6 +322,8 @@ struct Settings {
     smooth_scroll: bool,
     /// `[scrollback] smooth_ms`: how long a smooth scroll takes to settle.
     scroll_settle: Duration,
+    /// `[scrollback] fade_edges`: fade text out where history continues past an edge.
+    fade_edges: bool,
     copy_on_select: bool,
     osc52: Osc52,
     close_on_exit: bool,
@@ -345,6 +349,7 @@ impl Settings {
             scroll_multiplier: config.scrollback.multiplier,
             smooth_scroll: config.scrollback.smooth,
             scroll_settle: Duration::from_millis(config.scrollback.smooth_ms),
+            fade_edges: config.scrollback.fade_edges,
             copy_on_select: config.selection.copy_on_select,
             osc52: config.clipboard.osc52,
             close_on_exit: config.window.close_on_exit,
@@ -457,6 +462,32 @@ impl SmoothScroll {
     /// Whether the viewport has not arrived yet.
     fn animating(&self) -> bool {
         self.position != self.target
+    }
+}
+
+/// Text fading out at the top and bottom edges where history continues past them.
+/// Off on the alternate screen, where full screen programs own every row.
+#[derive(Default)]
+struct EdgeFade {
+    /// Strength at the top and bottom edges, 0 to 1.
+    strength: [f32; 2],
+    /// When the animation last advanced, while it runs.
+    stepped_at: Option<Instant>,
+}
+
+impl EdgeFade {
+    /// Moves the strengths toward `target`. Returns whether they have not arrived yet.
+    fn step(&mut self, now: Instant, target: [bool; 2]) -> bool {
+        let elapsed = self.stepped_at.map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
+        let step = elapsed.as_secs_f32() / EDGE_FADE.as_secs_f32();
+        let mut moving = false;
+        for (strength, on) in self.strength.iter_mut().zip(target) {
+            let goal = if on { 1.0 } else { 0.0 };
+            *strength = if goal > *strength { (*strength + step).min(goal) } else { (*strength - step).max(goal) };
+            moving |= *strength != goal;
+        }
+        self.stepped_at = moving.then_some(now);
+        moving
     }
 }
 
@@ -604,6 +635,7 @@ struct Session {
     screenshot: Option<(std::path::PathBuf, Instant)>,
     scroll_accumulator: f32,
     smooth: SmoothScroll,
+    edge_fade: EdgeFade,
     /// The inspector window following this one, while it is open.
     inspector: Option<Inspector>,
     /// When the inspector's next frame is due.
@@ -815,6 +847,7 @@ impl App {
             font_size: config.font.size,
             scroll_accumulator: 0.0,
             smooth: SmoothScroll::default(),
+            edge_fade: EdgeFade::default(),
             inspector: None,
             inspector_wake: None,
             frame_times: VecDeque::new(),
@@ -1874,6 +1907,7 @@ impl Session {
         // Moves the viewport before the snapshot is taken, so the frame shows where
         // the animation arrived.
         let scroll_wake = self.step_smooth_scroll(now);
+        let alt_screen;
         {
             let mut term = self.shared.term.lock();
             if term.sync_blocked() {
@@ -1900,6 +1934,7 @@ impl Session {
                 bar.shown_at = Some(Instant::now());
             }
             (bar.scrollback, bar.offset) = (scrollback, offset);
+            alt_screen = term.is_alt_screen();
             // The startup screen's shader ends when the shell shows its first prompt,
             // or when the screen stopped sending commands without turning it off.
             if let Some((since, marks)) = self.startup_shader
@@ -1961,6 +1996,9 @@ impl Session {
 
         if let Some(due) = self.update_scrollbar(now, self.snapshot.rows()) {
             wake_at(due);
+        }
+        if self.update_edge_fade(now, alt_screen) {
+            wake_at(now + self.frame_interval);
         }
         if let Some(due) = self.update_harness_line(now) {
             wake_at(due);
@@ -3126,6 +3164,29 @@ impl Session {
         wake
     }
 
+    /// Fades text out at the top edge while history continues above the view, and
+    /// at the bottom while the view is scrolled back. Returns whether the fades are
+    /// still easing and need another frame.
+    fn update_edge_fade(&mut self, now: Instant, alt_screen: bool) -> bool {
+        // Full screen programs draw their own bars at the edges: no fade, and none
+        // easing out over them either.
+        if !self.settings.fade_edges || alt_screen {
+            self.edge_fade = EdgeFade::default();
+            self.renderer.set_edge_fade(0.0, 0.0);
+            return false;
+        }
+        let position = match self.settings.smooth_scroll {
+            true => self.smooth.position,
+            false => self.scrollbar.offset as f32,
+        };
+        let above = (self.scrollbar.scrollback as f32) > position;
+        let below = position > 0.0;
+        let moving = self.edge_fade.step(now, [above, below]);
+        let [top, bottom] = self.edge_fade.strength;
+        self.renderer.set_edge_fade(top, bottom);
+        moving
+    }
+
     /// Starts the harness line's sweep when a coding agent harness starts, but not
     /// when one already running comes to the foreground, such as in another tmux pane.
     fn update_harness(&mut self) {
@@ -4110,6 +4171,24 @@ mod tests {
         assert_eq!(window_title(None, home, home, "tron"), "~");
         assert_eq!(window_title(None, Some(Path::new("/tmp")), home, "tron"), "/tmp");
         assert_eq!(window_title(None, None, home, "tron"), "tron");
+    }
+
+    #[test]
+    fn edge_fades_ease_in_and_out_over_their_duration() {
+        let start = Instant::now();
+        let mut fade = EdgeFade::default();
+        assert!(fade.step(start, [true, false]), "the first frame starts the fade");
+        assert_eq!(fade.strength, [0.0, 0.0]);
+        assert!(fade.step(start + EDGE_FADE / 2, [true, false]));
+        assert!((fade.strength[0] - 0.5).abs() < 1e-3, "halfway after half the time");
+        assert!(!fade.step(start + EDGE_FADE * 2, [true, false]), "arrived");
+        assert_eq!(fade.strength, [1.0, 0.0]);
+        // A long rest does not count toward the next change.
+        let later = start + Duration::from_secs(60);
+        assert!(fade.step(later, [false, true]));
+        assert_eq!(fade.strength, [1.0, 0.0]);
+        assert!(!fade.step(later + EDGE_FADE, [false, true]));
+        assert_eq!(fade.strength, [0.0, 1.0]);
     }
 
     #[test]
