@@ -606,7 +606,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tron-update-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+        // On macOS the temporary directory is reached through a link
+        // (/var to /private/var), and the running binary's path is resolved.
+        fs::canonicalize(&dir).unwrap()
     }
 
     #[test]
