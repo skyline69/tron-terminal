@@ -654,6 +654,12 @@ impl Renderer {
         self.cells.set_glow_line(line);
     }
 
+    /// How strongly text fades out at the top and bottom edges of the grid, 0 to 1
+    /// each, for content cut off there.
+    pub fn set_edge_fade(&mut self, top: f32, bottom: f32) {
+        self.cells.set_edge_fade(top, bottom);
+    }
+
     /// Allows reading presented frames back. Returns false when the surface does not support it.
     pub fn enable_capture(&mut self) -> bool {
         self.config.usage |= wgpu::TextureUsages::COPY_SRC;

@@ -90,6 +90,9 @@ smooth = false
 # How long the view takes to settle after a smooth scroll. 0 follows the input
 # without easing.
 smooth_ms = 80
+# Fade text out at the top and bottom edges where history continues past them.
+# Never on the alternate screen, where programs like vim and tmux draw.
+fade_edges = true
 
 [shell]
 # program = "/usr/bin/fish"

@@ -29,6 +29,7 @@ const KIND_COLOR: u32 = 2u;
 const KIND_CURLY: u32 = 3u;
 const KIND_ROUNDED: u32 = 4u;
 const KIND_GLOW: u32 = 5u;
+const KIND_FADE: u32 = 6u;
 
 struct Instance {
     @location(0) pos: vec2<f32>,
@@ -119,6 +120,13 @@ fn fs_main(v: VertexOut) -> @location(0) vec4<f32> {
             let a = clamp(line + glow, 0.0, 1.0) * ramp * ramp * v.color.a;
             let rgb = mix(v.color.rgb, vec3<f32>(1.0), line * ramp * 0.4);
             return vec4<f32>(rgb * a, a);
+        }
+        case KIND_FADE: {
+            // uv.y runs from the strength at the top edge to the one at the bottom edge.
+            // Eased, so the band has no visible start or end.
+            let t = clamp(v.uv.y, 0.0, 1.0);
+            let a = t * t * (3.0 - 2.0 * t) * v.color.a;
+            return vec4<f32>(v.color.rgb * a, a);
         }
         case KIND_COLOR: {
             let texel = textureLoad(color_atlas, vec2<i32>(v.uv), 0);

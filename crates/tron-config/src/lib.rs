@@ -792,11 +792,14 @@ pub struct ScrollbackConfig {
     /// How long the viewport takes to settle after a smooth scroll, in milliseconds.
     /// 0 follows the input without easing.
     pub smooth_ms: u64,
+    /// Fade text out at the top and bottom edges where history continues past
+    /// them. Never on the alternate screen, where full screen programs draw. On by default.
+    pub fade_edges: bool,
 }
 
 impl Default for ScrollbackConfig {
     fn default() -> Self {
-        Self { lines: 10_000, multiplier: 3.0, smooth: false, smooth_ms: 80 }
+        Self { lines: 10_000, multiplier: 3.0, smooth: false, smooth_ms: 80, fade_edges: true }
     }
 }
 
