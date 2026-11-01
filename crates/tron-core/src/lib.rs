@@ -23,6 +23,7 @@ pub use parser::{Params, Parser, Perform};
 pub use selection::{Point, Selection, SelectionKind, SelectionRange};
 pub use snapshot::Snapshot;
 pub use term::{
-    CommandMark, CursorShape, CursorState, Hyperlink, LinkMatch, Modes, NotifyWhen, Stats, TermEvent, Terminal,
+    CommandMark, CursorShape, CursorState, Hyperlink, LinkMatch, Modes, NotifyWhen, Progress, Stats, TermEvent,
+    Terminal,
 };
 pub use text::SearchMatch;

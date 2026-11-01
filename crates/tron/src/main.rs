@@ -43,13 +43,13 @@ use tron_config::{
     Action, Animation, Bell, BindKey, Binding, Blinking, Config, KeyCombo, NotifyMode, Osc52, Paths, Watcher,
 };
 use tron_core::{
-    CursorShape, LinkMatch, Modes, NotifyWhen, Palette, Parser, SearchMatch, Selection, SelectionKind, Snapshot,
-    TermEvent, Terminal,
+    CursorShape, LinkMatch, Modes, NotifyWhen, Palette, Parser, Progress, SearchMatch, Selection, SelectionKind,
+    Snapshot, TermEvent, Terminal,
 };
 use tron_font::{CellMetrics, FontSystem};
 use tron_inspect::Inspector;
 use tron_pty::{Pty, SpawnOptions, WindowSize};
-use tron_render::{GlowLine, Gpu, LinkHighlight, Overlay, PostShader, Renderer, Scrollbar, Theme};
+use tron_render::{GlowLine, Gpu, LinkHighlight, Overlay, PostShader, Renderer, Scrollbar, Streak, Theme};
 
 use clipboard::Clipboard;
 
@@ -333,6 +333,8 @@ struct Settings {
     open_command: String,
     notify_mode: NotifyMode,
     notify_command: String,
+    /// `[window] progress_bar`: draw the progress programs report.
+    progress_bar: bool,
     #[cfg(target_os = "macos")]
     option_as_alt: tron_config::OptionAsAlt,
 }
@@ -359,6 +361,7 @@ impl Settings {
             open_command: config.links.open_command.clone(),
             notify_mode: config.notifications.mode,
             notify_command: config.notifications.command.clone(),
+            progress_bar: config.window.progress_bar,
             #[cfg(target_os = "macos")]
             option_as_alt: config.window.option_as_alt,
         }
@@ -510,6 +513,32 @@ impl HarnessLine {
     }
 }
 
+/// How quickly the progress bar follows a change.
+const PROGRESS_EASE: Duration = Duration::from_millis(150);
+/// Output this soon after a key press is taken for the echo of typing, and
+/// shows at once instead of fading in.
+const TYPING_ECHO: Duration = Duration::from_millis(300);
+/// How long the indeterminate progress sweep takes to cross the window.
+const PROGRESS_SWEEP: Duration = Duration::from_millis(1600);
+
+/// The progress bar as drawn now.
+struct ProgressBar {
+    /// The fraction drawn, easing towards the reported one.
+    shown: f32,
+    /// Opacity, easing in when progress shows and out when it ends.
+    alpha: f32,
+    /// The last progress shown, drawn while the bar fades out.
+    last: Progress,
+    stepped_at: Option<Instant>,
+    /// When the indeterminate sweep started.
+    since: Instant,
+}
+
+/// How far an eased value moves towards its target in `elapsed`.
+fn ease(elapsed: Duration, over: Duration) -> f32 {
+    1.0 - (-elapsed.as_secs_f32() / over.as_secs_f32()).exp()
+}
+
 /// Where the heads of a sweep are after `elapsed`, as a distance from the center:
 /// they start at the center and ease out until the tails, `tail` long, have left
 /// a window whose sides are `half` from the center. `None` once the sweep is over.
@@ -609,6 +638,11 @@ struct Session {
     harness_watch: Arc<harness::Watch>,
     harness_line: HarnessLine,
     harness_config: tron_config::HarnessConfig,
+    /// The progress the program reports, and its bar.
+    progress: Progress,
+    progress_bar: ProgressBar,
+    /// The last key press, after which output is taken for its echo.
+    last_key: Option<Instant>,
     /// The folder shown beside the title, and when the shell's directory was last read.
     #[cfg(target_os = "macos")]
     represented_directory: (Option<PathBuf>, Instant),
@@ -832,6 +866,15 @@ impl App {
             harness_watch,
             harness_line: HarnessLine::new(),
             harness_config: config.harness.clone(),
+            progress: Progress::Hidden,
+            progress_bar: ProgressBar {
+                shown: 0.0,
+                alpha: 0.0,
+                last: Progress::Hidden,
+                stepped_at: None,
+                since: Instant::now(),
+            },
+            last_key: None,
             #[cfg(target_os = "macos")]
             represented_directory: (None, Instant::now() - REPRESENTED_DIRECTORY_POLL),
             #[cfg(target_os = "macos")]
@@ -1395,6 +1438,7 @@ impl App {
                         return;
                     }
                     session.blink_epoch = Instant::now();
+                    session.last_key = Some(session.blink_epoch);
                     if session.trace_latency && session.pending_key.is_none() {
                         session.pending_key = Some(session.blink_epoch);
                     }
@@ -1852,6 +1896,10 @@ impl Session {
                     }
                 }
                 TermEvent::Notification { title, body, when } => self.notify(&title, &body, when),
+                TermEvent::Progress(progress) => {
+                    self.progress = progress;
+                    self.renderer.set_progress(progress);
+                }
                 TermEvent::StartupScreen { token, payload } => self.startup_command(&token, &payload),
                 TermEvent::PointerShape(name) => self.app_pointer = pointer_icon(&name),
                 TermEvent::ColumnsChanged(cols) => {
@@ -2001,6 +2049,9 @@ impl Session {
             wake_at(now + self.frame_interval);
         }
         if let Some(due) = self.update_harness_line(now) {
+            wake_at(due);
+        }
+        if let Some(due) = self.update_progress(now) {
             wake_at(due);
         }
 
@@ -3228,6 +3279,89 @@ impl Session {
             color: self.harness_line.color,
         }));
         head.map(|_| now + self.frame_interval)
+    }
+
+    /// The color of the harness running in the window, for the progress bar.
+    fn harness_color(&self) -> Option<[u8; 3]> {
+        let found = self.harness_line.harness.as_ref()?;
+        harness::color(&found.name, &self.harness_config)
+    }
+
+    /// Draws the progress bar and decides whether new text fades in. Returns when
+    /// the next frame is due.
+    fn update_progress(&mut self, now: Instant) -> Option<Instant> {
+        let mut due: Option<Instant> = None;
+        let mut wake = |at: Instant| due = Some(due.map_or(at, |d| d.min(at)));
+        let paused = self.animations_paused(now);
+        let ambient = now + animation_interval(self.animation_fps, self.focused, self.frame_interval);
+        let smooth = now + self.frame_interval;
+        let palette = &self.snapshot.palette;
+        let accent = self.harness_color().unwrap_or(palette.colors[12]);
+
+        // The progress bar eases in, follows the reported fraction, and eases out.
+        let bar = &mut self.progress_bar;
+        let elapsed = bar.stepped_at.map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
+        let k = ease(elapsed, PROGRESS_EASE);
+        bar.stepped_at = Some(now);
+        let shown = self.settings.progress_bar && self.progress != Progress::Hidden;
+        if shown {
+            if bar.alpha < 0.01 {
+                bar.shown = 0.0;
+            }
+            if self.progress == Progress::Indeterminate && bar.last != Progress::Indeterminate {
+                bar.since = now;
+            }
+            bar.last = self.progress;
+        }
+        let fraction = |value: Option<u8>| value.map_or(1.0, |v| f32::from(v) / 100.0);
+        let target = match bar.last {
+            Progress::Normal(value) => fraction(Some(value)),
+            Progress::Error(value) | Progress::Paused(value) => fraction(value),
+            Progress::Hidden | Progress::Indeterminate => bar.shown,
+        };
+        let alpha = if shown { 1.0 } else { 0.0 };
+        bar.shown += (target - bar.shown) * k;
+        bar.alpha += (alpha - bar.alpha) * k;
+        if (target - bar.shown).abs() > 0.001 || (alpha - bar.alpha).abs() > 0.01 {
+            wake(smooth);
+        } else {
+            (bar.shown, bar.alpha) = (target, alpha);
+        }
+        let width = self.renderer.size().0 as f32;
+        let scale = self.scale_factor as f32;
+        let streak = |left: f32, right: f32, brightness: [f32; 2], color: [u8; 3]| Streak {
+            left,
+            right,
+            top: self.top_inset,
+            thickness: (2.0 * scale).max(1.0),
+            glow: 6.0 * scale,
+            brightness,
+            color,
+            alpha: bar.alpha,
+        };
+        let streaks = match bar.last {
+            _ if bar.alpha <= 0.0 => None,
+            Progress::Indeterminate => {
+                let length = width * 0.25;
+                let phase = now.saturating_duration_since(bar.since).as_secs_f32() / PROGRESS_SWEEP.as_secs_f32();
+                let head = phase.fract() * (width + length);
+                if !paused {
+                    wake(ambient);
+                }
+                Some(streak(head - length, head, [0.0, 1.0], accent))
+            }
+            Progress::Normal(_) => Some(streak(0.0, width * bar.shown, [0.3, 1.0], accent)),
+            Progress::Error(_) => Some(streak(0.0, width * bar.shown, [1.0, 1.0], palette.colors[9])),
+            Progress::Paused(_) => Some(streak(0.0, width * bar.shown, [1.0, 1.0], palette.colors[11])),
+            Progress::Hidden => None,
+        };
+        self.renderer.set_progress_bar(streaks.as_slice());
+
+        // Text the harness writes fades in, but not what typing echoes.
+        let typing = self.last_key.is_some_and(|at| now.saturating_duration_since(at) < TYPING_ECHO);
+        let fade_in = self.harness_config.fade_in_ms.min(2000) as u32;
+        self.renderer.set_fade_in(fade_in, self.harness_line.harness.is_some() && !typing);
+        due
     }
 
     /// Takes the gap to the previous frame, and follows the display's rate once

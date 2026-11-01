@@ -19,6 +19,9 @@
 //     const TRON_CURSOR_DURATION: f32 = 0.2;
 //
 // or for one second without it. The shader's image must not change after that.
+// Shaders that read `tron.progress` or `tron.progress_state` redraw while a
+// program reports progress, at `[shader] fps`. Their image must not change while
+// no progress shows.
 
 struct TronUniforms {
     // Surface size in pixels.
@@ -42,8 +45,10 @@ struct TronUniforms {
     cursor_change_time: f32,
     // Startup screen scene and parameters. Zero for user shaders.
     scene: u32,
-    _padding2: f32,
-    _padding3: f32,
+    // Progress a program reports with OSC 9;4, from 0 to 1.
+    progress: f32,
+    // 0 no progress, 1 running, 2 failed, 3 running for an unknown time, 4 paused.
+    progress_state: u32,
     params: vec4<f32>,
 };
 

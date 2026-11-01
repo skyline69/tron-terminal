@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use tron_core::{Point, Snapshot};
+use tron_core::{Point, Progress, Snapshot};
 use tron_font::{CellMetrics, FontSystem};
 
 use cells::CellPipeline;
@@ -109,6 +109,21 @@ pub struct GlowLine {
     pub thickness: f32,
     pub glow: f32,
     pub color: [u8; 3],
+}
+
+/// A thin bright line with a glow under it, from `left` to `right`, in physical
+/// pixels. Brightness runs from `brightness[0]` at the left end to `brightness[1]`
+/// at the right, so a streak can have a bright head and a fading tail.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Streak {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub thickness: f32,
+    pub glow: f32,
+    pub brightness: [f32; 2],
+    pub color: [u8; 3],
+    pub alpha: f32,
 }
 
 /// The thumb of an overlay scrollbar (macOS style), in physical pixels.
@@ -356,6 +371,7 @@ pub struct Renderer {
     gpu_busy: Arc<AtomicBool>,
     /// The startup screen's shader was requested.
     startup_enabled: bool,
+    progress: Progress,
 }
 
 /// Runs `f` with the Metal layer behind a surface.
@@ -388,6 +404,8 @@ struct PresentedKey {
     chains: (u64, u64),
     clear: [u64; 4],
     focused: bool,
+    /// The progress, which shaders may read.
+    progress: [u32; 2],
 }
 
 /// Whether the window keeps showing the last presented frame until the next one.
@@ -562,6 +580,7 @@ impl Renderer {
             compiler,
             gpu_busy: Arc::new(AtomicBool::new(false)),
             startup_enabled: false,
+            progress: Progress::Hidden,
         })
     }
 
@@ -652,6 +671,40 @@ impl Renderer {
     /// Glowing line drawn above the terminal, `None` to hide it.
     pub fn set_glow_line(&mut self, line: Option<GlowLine>) {
         self.cells.set_glow_line(line);
+    }
+
+    /// Streaks of the progress bar drawn above the terminal, none to hide it.
+    pub fn set_progress_bar(&mut self, streaks: &[Streak]) {
+        self.cells.set_progress_bar(streaks);
+    }
+
+    /// Glyphs that appear in the next frames fade in over `ms` milliseconds while
+    /// `allowed`, except when much of the screen changes at once.
+    pub fn set_fade_in(&mut self, ms: u32, allowed: bool) {
+        self.cells.set_fade_in(ms, allowed);
+    }
+
+    /// The progress a program reports, for shaders.
+    pub fn set_progress(&mut self, progress: Progress) {
+        self.progress = progress;
+    }
+
+    /// The progress as the shaders' uniforms hold it: the fraction and the state.
+    fn progress_uniforms(&self) -> (f32, u32) {
+        let (state, value) = match self.progress {
+            Progress::Hidden => (0, None),
+            Progress::Normal(value) => (1, Some(value)),
+            Progress::Error(value) => (2, value),
+            Progress::Indeterminate => (3, None),
+            Progress::Paused(value) => (4, value),
+        };
+        (f32::from(value.unwrap_or(0)) / 100.0, state)
+    }
+
+    /// Milliseconds since the renderer started, for fading glyphs in.
+    fn clock_ms(&self) -> u32 {
+        // Wraps after 49 days; fades compare clock values with wrapping subtraction.
+        self.started.elapsed().as_millis() as u32
     }
 
     /// How strongly text fades out at the top and bottom edges of the grid, 0 to 1
@@ -848,13 +901,14 @@ impl Renderer {
     /// Whether a user shader animates continuously, like a background. These
     /// animations can run below the display's refresh rate.
     pub fn has_ambient_animation(&self) -> bool {
-        self.post.is_animated()
+        self.post.is_animated() || (self.post.uses_progress() && self.progress != Progress::Hidden)
     }
 
     /// Whether an animation needs every display frame: the startup screen's shader,
-    /// or a cursor shader until it drew its final image after the cursor moved.
+    /// a cursor shader until it drew its final image after the cursor moved, or
+    /// glyphs fading in.
     pub fn has_smooth_animation(&self) -> bool {
-        self.startup.is_animated() || (self.post.uses_cursor_motion() && !self.cursor_settled)
+        self.startup.is_animated() || (self.post.uses_cursor_motion() && !self.cursor_settled) || self.cells.is_fading()
     }
 
     /// Builds the frame from a terminal snapshot.
@@ -862,6 +916,7 @@ impl Renderer {
         let viewport = [self.config.width as f32, self.config.height as f32];
         self.focused = focused;
         self.background = snapshot.palette.background;
+        self.cells.set_clock(self.clock_ms());
         self.cells.prepare(
             &self.device,
             &self.queue,
@@ -889,6 +944,7 @@ impl Renderer {
     /// presented again, and counts as presented.
     pub fn render(&mut self) -> bool {
         let viewport = [self.config.width as f32, self.config.height as f32];
+        self.cells.set_clock(self.clock_ms());
         let cells_changed = self.cells.upload(&self.device, &self.queue);
         self.images.upload_instances(&self.device, &self.queue, viewport);
 
@@ -900,11 +956,13 @@ impl Renderer {
             b: f64::from(background[2] * alpha),
             a: f64::from(alpha),
         };
+        let (progress, progress_state) = self.progress_uniforms();
         let presented = PresentedKey {
             size: (self.config.width, self.config.height),
             chains: (self.post.targets_revision(), self.startup.targets_revision()),
             clear: [clear.r, clear.g, clear.b, clear.a].map(f64::to_bits),
             focused: self.focused,
+            progress: [progress.to_bits(), progress_state],
         };
         // Programs like btop rewrite the screen with what it already shows. Every
         // present makes the window server composite the window again, which costs
@@ -1003,7 +1061,8 @@ impl Renderer {
                 previous_cursor: self.previous_cursor,
                 cursor_change_time: self.cursor_change_time,
                 scene: 0,
-                _padding2: [0.0; 2],
+                progress,
+                progress_state,
                 params: [0.0; 4],
             };
             if self.post.is_active() {

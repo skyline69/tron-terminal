@@ -115,7 +115,8 @@ pub struct PostUniforms {
     pub previous_cursor: [f32; 4],
     pub cursor_change_time: f32,
     pub scene: u32,
-    pub _padding2: [f32; 2],
+    pub progress: f32,
+    pub progress_state: u32,
     pub params: [f32; 4],
 }
 
@@ -223,6 +224,8 @@ pub struct PostChain {
     animated: bool,
     uses_previous: bool,
     uses_cursor_motion: bool,
+    /// A shader reads the progress.
+    uses_progress: bool,
     /// Seconds cursor shaders animate after the cursor moves.
     cursor_duration: f32,
     /// For each pass, whether it reads `terminal_blur`: its input's mip levels are
@@ -274,6 +277,7 @@ impl PostChain {
             animated: false,
             uses_previous: false,
             uses_cursor_motion: false,
+            uses_progress: false,
             cursor_duration: 0.0,
             blur_passes: Vec::new(),
             downsample: None,
@@ -314,6 +318,12 @@ impl PostChain {
     /// while after the cursor moves.
     pub fn uses_cursor_motion(&self) -> bool {
         self.is_active() && self.uses_cursor_motion
+    }
+
+    /// Whether a shader reads the progress, and so animates while a program
+    /// reports progress.
+    pub fn uses_progress(&self) -> bool {
+        self.is_active() && self.uses_progress
     }
 
     /// Seconds after a cursor move until every cursor shader shows its final image.
@@ -361,6 +371,7 @@ impl PostChain {
         let reads = compiled.passes.iter().map(|pass| pass.reads);
         self.animated = self.animation.unwrap_or(reads.clone().any(|r| r.time));
         self.uses_cursor_motion = self.animation.is_none() && reads.clone().any(|r| r.cursor_motion);
+        self.uses_progress = self.animation.is_none() && reads.clone().any(|r| r.progress);
         self.cursor_duration = reads
             .clone()
             .filter(|r| r.cursor_motion)
@@ -585,6 +596,9 @@ mod tests {
     #[test]
     fn uniforms_match_the_prelude_layout() {
         assert_eq!(size_of::<PostUniforms>(), 112);
+        assert_eq!(std::mem::offset_of!(PostUniforms, progress), 88);
+        assert_eq!(std::mem::offset_of!(PostUniforms, progress_state), 92);
+        assert!(PRELUDE.contains("progress: f32") && PRELUDE.contains("progress_state: u32"));
         assert_eq!(std::mem::offset_of!(PostUniforms, scene), 84);
         assert_eq!(std::mem::offset_of!(PostUniforms, params), 96);
         assert_eq!(std::mem::offset_of!(PostUniforms, background), 48);

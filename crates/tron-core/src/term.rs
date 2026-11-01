@@ -128,6 +128,8 @@ pub enum TermEvent {
     },
     /// DECCOLM switched the screen width. The window should resize to fit.
     ColumnsChanged(usize),
+    /// A progress report (`OSC 9 ; 4`), or [`Progress::Hidden`] once it ends.
+    Progress(Progress),
     /// The application asked for a mouse pointer shape (`OSC 22`), by CSS or X
     /// cursor name. Empty for the default.
     PointerShape(String),
@@ -137,6 +139,41 @@ pub enum TermEvent {
         token: String,
         payload: String,
     },
+}
+
+/// The state of a task an application reports with `OSC 9 ; 4 ; state ; percent`,
+/// ConEmu's progress sequence. Percentages are 0 to 100.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Progress {
+    /// No task, or it ended (state 0).
+    #[default]
+    Hidden,
+    /// Running, this far along (state 1).
+    Normal(u8),
+    /// Failed (state 2), with how far it got when the application says.
+    Error(Option<u8>),
+    /// Running for an unknown time (state 3).
+    Indeterminate,
+    /// Paused or waiting (state 4), with how far it got when the application says.
+    Paused(Option<u8>),
+}
+
+impl Progress {
+    /// Parses the parameters after `OSC 9 ; 4`. Unknown states are `None`.
+    fn parse(state: Option<&[u8]>, percent: Option<&[u8]>) -> Option<Self> {
+        let percent = percent
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|p| p.trim().parse::<u32>().ok())
+            .map(|p| p.min(100) as u8);
+        Some(match state.unwrap_or(b"0") {
+            b"0" | b"" => Self::Hidden,
+            b"1" => Self::Normal(percent.unwrap_or(0)),
+            b"2" => Self::Error(percent),
+            b"3" => Self::Indeterminate,
+            b"4" => Self::Paused(percent),
+            _ => return None,
+        })
+    }
 }
 
 /// When a notification should be shown (kitty's `o` key).
@@ -259,6 +296,8 @@ pub struct Terminal {
     /// Prompts and command output on the primary screen, oldest first.
     marks: VecDeque<CommandMark>,
     notification: Option<PendingNotification>,
+    /// A progress report is shown: a new prompt or a reset hides it.
+    progress_shown: bool,
     /// iTerm2 image arriving with `MultipartFile`, still base64 encoded.
     multipart_image: Option<(InlineImageArgs, Vec<u8>)>,
     /// Scaled text (OSC 66) was written, so writes must check for it.
@@ -312,6 +351,7 @@ impl Terminal {
             prompt_line: None,
             marks: VecDeque::new(),
             notification: None,
+            progress_shown: false,
             multipart_image: None,
             multicell: false,
             keyboard: [Vec::new(), Vec::new()],
@@ -583,6 +623,8 @@ impl Terminal {
         let line = self.grids[PRIMARY].screen_line(self.cursor.row);
         match kind {
             Some(b'A') => {
+                // The shell is back: whatever reported progress has ended, maybe without saying so.
+                self.set_progress(Progress::Hidden);
                 self.prompt_line = Some(line);
                 // A prompt redrawn in place, or after the screen was cleared, replaces later marks.
                 while self.marks.back().is_some_and(|m| m.prompt >= line) {
@@ -656,6 +698,14 @@ impl Terminal {
             None => self.marks.iter().rev().filter(|m| m.output_end.is_some()).find_map(range)?,
         };
         Some((Point::new(start, 0), Point::new(end, grid.cols() - 1)))
+    }
+
+    fn set_progress(&mut self, progress: Progress) {
+        let shown = progress != Progress::Hidden;
+        if shown || self.progress_shown {
+            self.events.push(TermEvent::Progress(progress));
+        }
+        self.progress_shown = shown;
     }
 
     fn notify(&mut self, title: String, body: String, when: Option<NotifyWhen>) {
@@ -1683,7 +1733,13 @@ impl Terminal {
         let separators = std::mem::take(&mut self.word_separators);
         // Snapshots keep a copy of the table, so indexes must stay valid.
         let extended = std::mem::take(&mut self.extended);
+        let events = std::mem::take(&mut self.events);
+        let progress_shown = self.progress_shown;
         *self = Self::new(self.cols(), self.rows(), self.max_scrollback);
+        self.events = events;
+        if progress_shown {
+            self.events.push(TermEvent::Progress(Progress::Hidden));
+        }
         self.extended = extended;
         self.default_cursor_shape = shape;
         self.cursor_shape = shape;
@@ -2555,7 +2611,11 @@ impl Perform for Terminal {
             }
             [b"133", kind, ..] => self.shell_mark(kind.first().copied()),
             // `OSC 9 ; 4 ; ...` is ConEmu's progress report, not a notification.
-            [b"9", rest @ ..] if rest.first() != Some(&&b"4"[..]) => {
+            [b"9", b"4", rest @ ..] => match Progress::parse(rest.first().copied(), rest.get(1).copied()) {
+                Some(progress) => self.set_progress(progress),
+                None => self.unhandled(format_args!("progress state {:?}", rest.first())),
+            },
+            [b"9", rest @ ..] => {
                 let body = String::from_utf8_lossy(&rest.join(&b';')).into_owned();
                 self.notify(String::new(), body, None);
             }
@@ -3157,6 +3217,8 @@ mod tests {
             t.take_events(),
             vec![
                 TermEvent::Notification { title: "build done".into(), body: String::new(), when: None },
+                // A progress report, not a notification.
+                TermEvent::Progress(Progress::Normal(50)),
                 TermEvent::Notification { title: "Title".into(), body: "Body".into(), when: None },
                 TermEvent::Notification {
                     title: "Hello".into(),
@@ -3167,6 +3229,39 @@ mod tests {
         );
         let reply = String::from_utf8(t.take_responses().unwrap()).unwrap();
         assert!(reply.starts_with("\x1b]99;i=q:p=?;p=title,body"), "{reply:?}");
+    }
+
+    #[test]
+    fn progress_reports_from_osc_9_4() {
+        let mut t = term(
+            10,
+            2,
+            b"\x1b]9;4;1;50\x07\x1b]9;4;3\x07\x1b]9;4;2\x07\x1b]9;4;4;250\x1b\\\x1b]9;4;7;1\x07\x1b]9;4;0\x07\x1b]9;4;0\x07",
+        );
+        assert_eq!(
+            t.take_events(),
+            vec![
+                TermEvent::Progress(Progress::Normal(50)),
+                TermEvent::Progress(Progress::Indeterminate),
+                TermEvent::Progress(Progress::Error(None)),
+                TermEvent::Progress(Progress::Paused(Some(100))),
+                TermEvent::Progress(Progress::Hidden),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_prompt_or_a_reset_hides_progress() {
+        let mut t = term(10, 2, b"\x1b]9;4;3\x07\x1b]133;A\x07\x1b]133;A\x07\x1b]9;4;1;5\x07\x1bc");
+        assert_eq!(
+            t.take_events(),
+            vec![
+                TermEvent::Progress(Progress::Indeterminate),
+                TermEvent::Progress(Progress::Hidden),
+                TermEvent::Progress(Progress::Normal(5)),
+                TermEvent::Progress(Progress::Hidden),
+            ]
+        );
     }
 
     #[test]

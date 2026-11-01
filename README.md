@@ -39,7 +39,7 @@
   kitty keyboard and text sizing protocols, iTerm2 inline images (PNG, JPEG,
   animated GIF), Sixel, synchronized output, OSC 8 hyperlinks, OSC 52
   clipboard, OSC 133 prompt marks, desktop notifications (OSC 9, 99 and 777),
-  styled underlines, true color.
+  progress reports (OSC 9;4), styled underlines, true color.
 - **Images and video.** `chafa`, `kitten icat`-style tools, `yazi` previews and
   `mpv --vo=kitty` work out of the box.
 

@@ -381,6 +381,8 @@ pub struct WindowConfig {
     pub close_on_exit: bool,
     /// macOS: Option keys that act as Alt. The others type special characters.
     pub option_as_alt: OptionAsAlt,
+    /// Draw the progress programs report (`OSC 9 ; 4`) as a glowing bar at the top edge.
+    pub progress_bar: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -407,6 +409,7 @@ impl Default for WindowConfig {
             rows: 30,
             close_on_exit: true,
             option_as_alt: OptionAsAlt::None,
+            progress_bar: true,
         }
     }
 }
@@ -729,20 +732,23 @@ impl Default for UpdatesConfig {
     }
 }
 
-/// `[harness]`: the glowing line at the top of the window while a coding agent
-/// harness, such as Claude Code or Codex, runs in it.
+/// `[harness]`: effects while a coding agent harness, such as Claude Code or
+/// Codex, runs in the window.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HarnessConfig {
-    /// Show the line.
+    /// Show the glowing line at the top edge when a harness starts.
     pub line: bool,
+    /// New text the harness writes fades in over this many milliseconds. 0 shows
+    /// it at once.
+    pub fade_in_ms: u64,
     /// Line colors by command name. Adds harnesses and overrides the brand colors.
     pub colors: BTreeMap<String, Rgb>,
 }
 
 impl Default for HarnessConfig {
     fn default() -> Self {
-        Self { line: true, colors: BTreeMap::new() }
+        Self { line: true, fade_in_ms: 150, colors: BTreeMap::new() }
     }
 }
 

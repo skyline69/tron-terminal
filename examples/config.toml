@@ -59,6 +59,8 @@ close_on_exit = true
 # macOS: Option keys that act as Alt: none, left, right or both. The others
 # type special characters.
 option_as_alt = "none"
+# Draw the progress programs report (OSC 9;4) as a glowing bar at the top edge.
+progress_bar = true
 
 [cursor]
 # block, beam or underline
@@ -160,6 +162,10 @@ check = true
 # harness runs in the window, also inside tmux, in the color of its brand:
 # claude, codex, opencode, pi, gemini, amp, crush, qwen and cursor-agent.
 line = true
+# New text the harness writes fades in over this many milliseconds. Typed
+# text, text replacing other text and screenfuls of output show at once.
+# 0 turns it off.
+fade_in_ms = 150
 # Colors by command name. Overrides the brand colors and adds other harnesses.
 # [harness.colors]
 # claude = "#d97757"

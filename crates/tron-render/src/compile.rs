@@ -30,6 +30,8 @@ pub struct Reads {
     pub cursor_motion: bool,
     /// Seconds a cursor effect lasts, from `const TRON_CURSOR_DURATION`.
     pub cursor_duration: Option<f32>,
+    /// `tron.progress` or `tron.progress_state`.
+    pub progress: bool,
     /// `terminal_blur(`.
     pub blur: bool,
     /// Defines `blur_source`, applied to the terminal before it is blurred.
@@ -40,9 +42,12 @@ impl Reads {
     fn of(source: &str) -> Self {
         let reads = |name: &str| source.contains(name);
         let cursor_motion = reads("tron.cursor_change_time") || reads("tron.previous_cursor");
+        let progress = reads("tron.progress");
         Self {
-            // Cursor shaders animate only after the cursor moves, even when they read the time.
-            time: !cursor_motion && (reads("tron.time") || reads("tron.frame")),
+            // Cursor shaders animate only after the cursor moves, and progress shaders
+            // only while progress shows, even when they read the time.
+            time: !cursor_motion && !progress && (reads("tron.time") || reads("tron.frame")),
+            progress,
             previous: reads("previous("),
             cursor_motion,
             cursor_duration: cursor_duration(source),

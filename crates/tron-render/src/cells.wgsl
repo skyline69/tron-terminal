@@ -15,7 +15,8 @@ struct Uniforms {
     cursor_text: vec4<f32>,
     // Top padding, cell height, smooth scroll offset.
     grid: vec4<f32>,
-    // Ring position of row 0, number of rows.
+    // Ring position of row 0, number of rows, clock in milliseconds, and how
+    // long glyphs fade in.
     ring: vec4<u32>,
 };
 
@@ -37,6 +38,8 @@ struct Instance {
     @location(2) uv: vec4<f32>,
     @location(3) color: vec4<f32>,
     @location(4) kind: u32,
+    // Clock when a glyph appeared, 0 when it does not fade in.
+    @location(5) born: u32,
 };
 
 struct VertexOut {
@@ -48,6 +51,8 @@ struct VertexOut {
     @location(3) local: vec2<f32>,
     // Raw instance uv, used as parameters by curly underlines.
     @location(4) @interpolate(flat) params: vec4<f32>,
+    // How far a glyph has faded in, 1 when it shows fully.
+    @location(5) @interpolate(flat) fade: f32,
 };
 
 @vertex
@@ -72,6 +77,13 @@ fn vs_main(@builtin(vertex_index) index: u32, inst: Instance) -> VertexOut {
     out.kind = inst.kind & 0xffu;
     out.local = corner * inst.size;
     out.params = inst.uv;
+    out.fade = 1.0;
+    if inst.born != 0u && u.ring.w != 0u {
+        // Wrapping subtraction: the clock may have wrapped since the glyph appeared.
+        let t = clamp(f32(u.ring.z - inst.born) / f32(u.ring.w), 0.0, 1.0);
+        // Eased out: most of the glyph shows early, the rest settles in.
+        out.fade = 1.0 - (1.0 - t) * (1.0 - t);
+    }
     return out;
 }
 
@@ -85,7 +97,7 @@ fn fs_main(v: VertexOut) -> @location(0) vec4<f32> {
             if all(p >= u.cursor_rect.xy) && all(p < u.cursor_rect.zw) {
                 color = u.cursor_text;
             }
-            let a = coverage * color.a;
+            let a = coverage * color.a * v.fade;
             return vec4<f32>(color.rgb * a, a);
         }
         case KIND_CURLY: {
@@ -130,7 +142,8 @@ fn fs_main(v: VertexOut) -> @location(0) vec4<f32> {
         }
         case KIND_COLOR: {
             let texel = textureLoad(color_atlas, vec2<i32>(v.uv), 0);
-            return vec4<f32>(texel.rgb * texel.a, texel.a);
+            let a = texel.a * v.fade;
+            return vec4<f32>(texel.rgb * a, a);
         }
         default: {
             return vec4<f32>(v.color.rgb * v.color.a, v.color.a);

@@ -14,7 +14,7 @@ use tron_font::{CellMetrics, FontSystem, GlyphFormat, GlyphKey, ShapedGlyph, Sty
 use unicode_width::UnicodeWidthChar;
 
 use crate::atlas::Atlas;
-use crate::{GlowLine, LinkHighlight, Overlay, Scrollbar, Theme};
+use crate::{GlowLine, LinkHighlight, Overlay, Scrollbar, Streak, Theme};
 
 const INITIAL_ATLAS_SIZE: u32 = 1024;
 const SHAPE_CACHE_LIMIT: usize = 16_384;
@@ -35,14 +35,18 @@ struct Instance {
     uv: [f32; 4],
     color: [f32; 4],
     kind: u32,
+    /// Glyphs: the clock in milliseconds when the glyph appeared, to fade it in.
+    /// 0 for glyphs shown at once.
+    born: u32,
 }
 
-const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Float32x2,
     1 => Float32x2,
     2 => Float32x4,
     3 => Float32x4,
     4 => Uint32,
+    5 => Uint32,
 ];
 
 #[repr(C)]
@@ -53,7 +57,8 @@ struct Uniforms {
     cursor_text: [f32; 4],
     /// Top padding, cell height and smooth scroll offset in pixels: where rows go.
     grid: [f32; 4],
-    /// Ring position of row 0, and the number of rows. See [`Slots`].
+    /// Ring position of row 0, the number of rows, the clock in milliseconds and
+    /// how long glyphs fade in. See [`Slots`].
     ring: [u32; 4],
 }
 
@@ -462,11 +467,26 @@ pub struct CellPipeline {
     overlays: Vec<Overlay>,
     scrollbar: Option<Scrollbar>,
     glow_line: Option<GlowLine>,
+    progress_bar: Vec<Streak>,
     /// Strength of the fades at the top and bottom edges of the grid, 0 to 1.
     edge_fade: [f32; 2],
     overlay_instances: RowInstances,
     bidi: bool,
     flash: f32,
+    /// How long new glyphs fade in, in milliseconds. 0 shows them at once.
+    fade_in: u32,
+    /// Whether glyphs that appear in the next frames fade in.
+    fade_allowed: bool,
+    /// Milliseconds since the renderer started, set before building and drawing.
+    clock: u32,
+    /// The clock when the last glyph that fades in appeared.
+    last_birth: Option<u32>,
+    /// The grid showed history in the last frame.
+    was_scrolled_back: bool,
+    /// Glyphs of a row before it changed, by position and atlas place, with when they appeared.
+    births: HashMap<[u32; 6], u32>,
+    /// Columns of a row that showed a glyph before it changed.
+    occupied: Vec<bool>,
     // Scratch buffers reused across rows.
     foreground: Vec<[f32; 4]>,
     run: Run,
@@ -599,10 +619,18 @@ impl CellPipeline {
             overlays: Vec::new(),
             scrollbar: None,
             glow_line: None,
+            progress_bar: Vec::new(),
             edge_fade: [0.0; 2],
             overlay_instances: RowInstances::default(),
             bidi: true,
             flash: 0.0,
+            fade_in: 0,
+            fade_allowed: false,
+            clock: 1,
+            last_birth: None,
+            was_scrolled_back: false,
+            births: HashMap::default(),
+            occupied: Vec::new(),
             foreground: Vec::new(),
             run: Run::default(),
             shaped: Vec::new(),
@@ -692,6 +720,38 @@ impl CellPipeline {
 
     pub fn set_glow_line(&mut self, line: Option<GlowLine>) {
         self.glow_line = line;
+    }
+
+    pub fn set_progress_bar(&mut self, streaks: &[Streak]) {
+        self.progress_bar.clear();
+        self.progress_bar.extend_from_slice(streaks);
+    }
+
+    /// Glyphs that appear fade in over `ms` milliseconds while `allowed`.
+    pub fn set_fade_in(&mut self, ms: u32, allowed: bool) {
+        self.fade_in = ms;
+        self.fade_allowed = allowed && ms > 0;
+    }
+
+    /// Sets the clock new glyphs are stamped with and fades are drawn at.
+    pub fn set_clock(&mut self, ms: u32) {
+        // 0 marks glyphs that do not fade.
+        self.clock = ms.max(1);
+    }
+
+    /// Whether a glyph is still fading in.
+    pub fn is_fading(&self) -> bool {
+        self.last_birth.is_some_and(|born| self.clock.wrapping_sub(born) < self.fade_in)
+    }
+
+    /// The clock the shader draws fades at. Once every fade is over it stays put,
+    /// so frames that change nothing else upload nothing.
+    fn fade_clock(&self) -> u32 {
+        match self.last_birth {
+            Some(born) if self.is_fading() => self.clock.max(born),
+            Some(born) => born.wrapping_add(self.fade_in),
+            None => 0,
+        }
     }
 
     pub fn set_edge_fade(&mut self, top: f32, bottom: f32) {
@@ -807,6 +867,17 @@ impl CellPipeline {
             self.row_cache.clear();
             self.clear_row_cache = false;
         }
+        // Text streaming in fades in. Not when everything is drawn again, nor when the
+        // view scrolls through history, nor for screenfuls of output arriving at once.
+        let scrolled_back = snapshot.display_offset != 0;
+        let damaged = snapshot.damaged.iter().filter(|&&damaged| damaged).count();
+        let fade = self.fade_allowed
+            && !self.full_rebuild
+            && !scrolled_back
+            && !self.was_scrolled_back
+            && damaged * 2 <= rows
+            && snapshot.shift * 2 < rows;
+        self.was_scrolled_back = scrolled_back;
         for y in 0..rows {
             let cursor_row = moved && (Some(y) == old_row || Some(y) == new_row);
             if !(self.full_rebuild || snapshot.damaged[y] || cursor_row) {
@@ -838,6 +909,9 @@ impl CellPipeline {
                     };
                     self.row_cache.insert(key, copy);
                 }
+            }
+            if fade {
+                self.stamp_births(&mut instances.foreground, y);
             }
             // A row built the same as before keeps its slot as it is.
             if instances != self.rows[y] {
@@ -913,6 +987,7 @@ impl CellPipeline {
             uv: [0.0, from, 0.0, to],
             color: fade_color,
             kind: KIND_FADE,
+            born: 0,
         };
         if fade_top > 0.0 && fade_height > 0.0 {
             self.above.push(fade(top, fade_top, 0.0));
@@ -947,6 +1022,7 @@ impl CellPipeline {
                 uv: [bar.width / 2.0, 0.0, bar.width, bar.height],
                 color: [r, g, b, bar.alpha],
                 kind: KIND_ROUNDED,
+                born: 0,
             });
         }
         if let Some(line) = self.glow_line {
@@ -962,6 +1038,7 @@ impl CellPipeline {
                 uv: [left_brightness, line.thickness, right_brightness, line.glow],
                 color: [r, g, b, 1.0],
                 kind: KIND_GLOW,
+                born: 0,
             };
             let near = (line.head - tail).max(0.0);
             let right_far = line.head.min(viewport[0] - line.center);
@@ -981,6 +1058,20 @@ impl CellPipeline {
                     brightness(left_far),
                     brightness(near),
                 ));
+            }
+        }
+        for streak in &self.progress_bar {
+            let [r, g, b, _] = colors.rgba(streak.color);
+            let (left, right) = (streak.left.max(0.0), streak.right.min(viewport[0]));
+            if right > left && streak.alpha > 0.0 {
+                self.above.push(Instance {
+                    pos: [left, streak.top],
+                    size: [right - left, streak.thickness + streak.glow],
+                    uv: [streak.brightness[0], streak.thickness, streak.brightness[1], streak.glow],
+                    color: [r, g, b, streak.alpha.min(1.0)],
+                    kind: KIND_GLOW,
+                    born: 0,
+                });
             }
         }
         if self.flash > 0.0 {
@@ -1009,8 +1100,39 @@ impl CellPipeline {
             cursor_rect,
             cursor_text: colors.rgba(cursor_text),
             grid: [padding_top, cell_h, scroll, 0.0],
-            ring: [self.ring as u32, rows as u32, 0, 0],
+            ring: [self.ring as u32, rows as u32, 0, self.fade_in],
         };
+    }
+
+    /// Gives the glyphs of row `y`'s new instances the time they appeared: that of
+    /// the same glyph in the same place before, else now when they appear in a
+    /// column that was empty. Glyphs replacing others, like a spinner or a counter,
+    /// or text that moved, show at once.
+    fn stamp_births(&mut self, foreground: &mut [Instance], y: usize) {
+        let is_glyph = |instance: &Instance| matches!(instance.kind, KIND_MASK | KIND_COLOR);
+        let key = |i: &Instance| [i.pos[0], i.pos[1], i.uv[0], i.uv[1], i.uv[2], i.uv[3]].map(f32::to_bits);
+        let (cell_w, left) = (self.metrics.width.max(1) as f32, self.padding[0]);
+        let column = |i: &Instance| ((i.pos[0] + i.size[0] * 0.5 - left) / cell_w).max(0.0) as usize;
+        self.births.clear();
+        self.occupied.fill(false);
+        for old in self.rows[y].foreground.iter().filter(|i| is_glyph(i)) {
+            self.births.insert(key(old), old.born);
+            let col = column(old);
+            if col >= self.occupied.len() {
+                self.occupied.resize(col + 1, false);
+            }
+            self.occupied[col] = true;
+        }
+        for instance in foreground.iter_mut().filter(|i| is_glyph(i)) {
+            instance.born = match self.births.get(&key(instance)) {
+                Some(&born) => born,
+                None if self.occupied.get(column(instance)).copied().unwrap_or(false) => 0,
+                None => {
+                    self.last_birth = Some(self.clock);
+                    self.clock
+                }
+            };
+        }
     }
 
     /// Slot of row `y`.
@@ -1348,6 +1470,7 @@ impl CellPipeline {
                     uv: [layout.cell_width, amplitude, thickness.max(1.0), band],
                     color,
                     kind: KIND_CURLY,
+                    born: 0,
                 });
             } else {
                 out.foreground.push(solid(left, y, width, thickness, color));
@@ -1516,6 +1639,7 @@ impl CellPipeline {
                 changed = true;
             }
         }
+        self.uniforms.ring[2] = self.fade_clock();
         if bytemuck::bytes_of(&self.uniforms) != bytemuck::bytes_of(&self.uploaded_uniforms) {
             queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniforms));
             self.uploaded_uniforms = self.uniforms;
@@ -1638,11 +1762,12 @@ fn glyph_instance(entry: &GlyphEntry, left: f32, top: f32, color: [f32; 4]) -> I
             GlyphFormat::Mask => KIND_MASK,
             GlyphFormat::Color => KIND_COLOR,
         },
+        born: 0,
     }
 }
 
 fn solid(x: f32, y: f32, width: f32, height: f32, color: [f32; 4]) -> Instance {
-    Instance { pos: [x, y], size: [width, height], uv: [0.0; 4], color, kind: KIND_SOLID }
+    Instance { pos: [x, y], size: [width, height], uv: [0.0; 4], color, kind: KIND_SOLID, born: 0 }
 }
 
 fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -1722,6 +1847,7 @@ mod tests {
             uv: [0.0, 100.0, 4.0, 120.0],
             color: [1.0; 4],
             kind: KIND_MASK,
+            born: 0,
         };
         let clipped = clip_vertical(glyph, 0.0, 16.0).unwrap();
         assert_eq!((clipped.pos[1], clipped.size[1], clipped.uv[1], clipped.uv[3]), (0.0, 10.0, 110.0, 120.0));
