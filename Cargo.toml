@@ -33,12 +33,12 @@ clap = { version = "4.6.7", features = ["derive"] }
 clap_complete = "4.6.11"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
-flate2 = "1.1.10"
+flate2 = "1.1.11"
 foldhash = "0.2.0"
 gif = "0.14.2"
 fontique = "0.12.0"
 harfrust = "0.15.0"
-log = "0.4.34"
+log = "0.4.35"
 env_logger = "0.11.11"
 # Since 0.37 the bundled fonts are opt-in; without them the inspector draws every glyph as a box.
 egui = { version = "0.37.0", features = ["default_fonts"] }
@@ -88,12 +88,12 @@ sha2 = "0.11.1"
 swash = "0.2.10"
 tar = { version = "0.4.46", default-features = false }
 thiserror = "2.0.21"
-toml = "1.1.8"
-toml_edit = "0.25.17"
+toml = "1.2.1"
+toml_edit = "0.25.19"
 unicode-bidi = "0.3.18"
 unicode-width = "0.2.3"
 # Only `tron update` uses it; rustls with ring needs no system TLS library or cmake.
-ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 wgpu = "30.0.1"
 winit = "0.31.0-beta.4"
 zune-jpeg = "0.5.15"
