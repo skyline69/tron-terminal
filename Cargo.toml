@@ -29,24 +29,24 @@ anyhow = "1.0.104"
 arboard = { version = "3.7.0", default-features = false }
 base64 = "0.23.1"
 bitflags = "2.13.2"
-clap = { version = "4.6.7", features = ["derive"] }
-clap_complete = "4.6.11"
+clap = { version = "4.6.9", features = ["derive"] }
+clap_complete = "4.6.12"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 flate2 = "1.1.11"
 foldhash = "0.2.0"
 gif = "0.14.2"
-fontique = "0.12.0"
-harfrust = "0.15.0"
+fontique = "0.13.0"
+harfrust = "0.16.1"
 log = "0.4.35"
-env_logger = "0.11.11"
+env_logger = "0.11.12"
 # Since 0.37 the bundled fonts are opt-in; without them the inspector draws every glyph as a box.
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui-wgpu = { version = "0.37.0", default-features = false }
 etcetera = "0.11.0"
 memchr = "2.8.3"
 miniz_oxide = "0.9.1"
-notify = "9.0.0-rc.7"
+notify = "9.0.0"
 objc2 = { version = "0.6.5", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
@@ -80,7 +80,7 @@ parking_lot = "0.13.0"
 png = "0.18.1"
 ratatui = "0.30.2"
 tachyonfx = { version = "0.25.2", default-features = false, features = ["std", "std-duration"] }
-pollster = "1.0.1"
+pollster = "1.0.3"
 rustix = { version = "1.1.6", features = ["pty", "termios", "process", "fs", "stdio", "shm", "mm", "param"] }
 smithay-clipboard = "0.7.3"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -88,16 +88,16 @@ sha2 = "0.11.1"
 swash = "0.2.10"
 tar = { version = "0.4.46", default-features = false }
 thiserror = "2.0.21"
-toml = "1.2.1"
-toml_edit = "0.25.19"
+toml = "1.2.2"
+toml_edit = "0.25.20"
 unicode-bidi = "0.3.18"
 unicode-width = "0.2.3"
 # Only `tron update` uses it; rustls with ring needs no system TLS library or cmake.
-ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
-wgpu = "30.0.1"
+ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
+wgpu = "30.0.2"
 winit = "0.31.0-beta.4"
 zune-jpeg = "0.5.15"
-zstd = { version = "0.14.3", default-features = false }
+zstd = { version = "0.14.4", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -22,7 +22,7 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2.9.3
-      - uses: taiki-e/install-action@v2.90.2
+      - uses: taiki-e/install-action@v2.90.7
         with:
           tool: nextest
       - name: ShellCheck
@@ -42,7 +42,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2.9.3
-      - uses: taiki-e/install-action@v2.90.2
+      - uses: taiki-e/install-action@v2.90.7
         with:
           tool: nextest
       - name: Clippy
