@@ -1441,8 +1441,7 @@ impl Terminal {
             let (block_cols, block_rows) = size.cells();
             for y in top..(top + block_rows).min(rows) {
                 let line = self.grids[self.active].row_mut(y);
-                for x in left..(left + block_cols).min(cols) {
-                    let cell = &mut line.cells[x];
+                for cell in &mut line.cells[left..(left + block_cols).min(cols)] {
                     let extended = *self.extended.get(cell.extended);
                     if extended.size.is_some() {
                         cell.extended = self.extended.intern(Extended { size: None, ..extended });
