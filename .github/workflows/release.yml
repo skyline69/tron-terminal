@@ -91,8 +91,12 @@ jobs:
       ARCH: ${{ matrix.arch }}
     steps:
       - name: Install build tools and libraries
-        # tar and zstd for the Rust cache, file for appimagetool.
-        run: dnf -y install gcc git tar zstd file pkgconf-pkg-config fontconfig-devel libxkbcommon-devel wayland-devel
+        # tar and zstd for the Rust cache, file for appimagetool. The X11 libraries and patchelf
+        # (from EPEL) are for the AppImage, which bundles the libraries.
+        run: |
+          dnf -y install epel-release
+          dnf -y install gcc git tar zstd file pkgconf-pkg-config fontconfig-devel libxkbcommon-devel wayland-devel \
+            libxkbcommon-x11 libXfixes libXi patchelf
       - uses: actions/checkout@v7.0.1
       # dtolnay/rust-toolchain publishes no releases; the `stable` ref installs the latest stable Rust.
       - uses: dtolnay/rust-toolchain@stable
@@ -126,6 +130,14 @@ jobs:
           cp dist/dev.tron.Terminal.png "$appdir/"
           ln -s dev.tron.Terminal.png "$appdir/.DirIcon"
           ln -s usr/bin/tron "$appdir/AppRun"
+          # Winit loads these with dlopen on X11, and minimal systems lack some of them. A RUNPATH
+          # finds them, where LD_LIBRARY_PATH would leak into the shells tron starts.
+          mkdir -p "$appdir/usr/lib"
+          for lib in libxkbcommon.so.0 libxkbcommon-x11.so.0 libxcb-xkb.so.1 libXfixes.so.3 libXi.so.6; do
+            cp -L "/usr/lib64/$lib" "$appdir/usr/lib/"
+            patchelf --set-rpath '$ORIGIN' "$appdir/usr/lib/$lib"
+          done
+          patchelf --set-rpath '$ORIGIN/../lib' "$appdir/usr/bin/tron"
           # appimagetool is only published as its rolling "continuous" build.
           curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
           chmod +x appimagetool
