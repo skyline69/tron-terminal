@@ -814,8 +814,7 @@ fn theme_tab(ui: &mut egui::Ui, report: &Report, skin: Skin) {
         for half in 0..2 {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                for index in half * 8..half * 8 + 8 {
-                    let color = colors.ansi[index];
+                for (index, &color) in colors.ansi.iter().enumerate().skip(half * 8).take(8) {
                     let (rect, response) = ui.allocate_exact_size(cell, Sense::hover());
                     let fill = Color32::from_rgb(color[0], color[1], color[2]);
                     ui.painter().rect(
