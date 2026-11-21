@@ -255,11 +255,34 @@ impl Gpu {
     /// Opens the GPU. This is the slowest part of startup, so it can run on a
     /// background thread before the window exists.
     pub async fn new() -> Result<Self, RenderError> {
-        let started = Instant::now();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        Self::open(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        })
+        .await
+    }
+
+    /// Opens the GPU for a window, falling back to OpenGL where the primary
+    /// backends find no adapter, such as on a system without Vulkan drivers.
+    /// OpenGL presents only on the display it was opened with, so it takes the
+    /// window.
+    pub async fn for_window(window: impl wgpu::wgt::WgpuHasDisplayHandle) -> Result<Self, RenderError> {
+        match Self::new().await {
+            Err(RenderError::Adapter(error)) => {
+                log::warn!("no Vulkan adapter ({error}), trying OpenGL");
+                Self::open(wgpu::InstanceDescriptor {
+                    backends: wgpu::Backends::GL,
+                    ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window))
+                })
+                .await
+            }
+            other => other,
+        }
+    }
+
+    async fn open(descriptor: wgpu::InstanceDescriptor) -> Result<Self, RenderError> {
+        let started = Instant::now();
+        let instance = wgpu::Instance::new(descriptor);
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
@@ -463,14 +486,14 @@ fn alpha_mode(modes: &[wgpu::CompositeAlphaMode], opacity: f32) -> wgpu::Composi
 impl Renderer {
     /// Creates a renderer for a window. `padding` is in physical pixels.
     pub async fn new(
-        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        target: impl Into<wgpu::SurfaceTarget<'static>> + wgpu::wgt::WgpuHasDisplayHandle + Clone,
         width: u32,
         height: u32,
         metrics: CellMetrics,
         padding: [f32; 2],
         theme: Theme,
     ) -> Result<Self, RenderError> {
-        let gpu = Gpu::new().await?;
+        let gpu = Gpu::for_window(target.clone()).await?;
         Self::with_gpu(gpu, target, width, height, metrics, padding, theme)
     }
 
