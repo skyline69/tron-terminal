@@ -27,6 +27,8 @@ const INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// File in the data directory holding the last check and the skipped release.
 const STATE_FILE: &str = "update-check";
+/// Largest archive `--archive` will read into memory.
+const MAX_ARCHIVE: usize = 512 * 1024 * 1024;
 
 /// The page of the release `version` on GitHub.
 pub fn release_url(version: &str) -> String {
@@ -179,6 +181,16 @@ fn releases_url() -> String {
         .ok()
         .filter(|url| !url.is_empty())
         .map(|url| url.trim_end_matches('/').to_owned())
+        .filter(|url| {
+            // A plain-http mirror would make the checksum decorative, since the
+            // checksum comes from the same place.
+            if url.starts_with("https://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost") {
+                true
+            } else {
+                log::warn!("TRON_UPDATE_URL is not HTTPS; using the default");
+                false
+            }
+        })
         .unwrap_or_else(|| format!("{REPOSITORY}/releases"))
 }
 
@@ -355,8 +367,14 @@ fn read_regular_file(path: &Path) -> anyhow::Result<Vec<u8>> {
     if !metadata.is_file() {
         bail!("{} is not a regular file", path.display());
     }
+    // The download path caps its own sizes; an archive named on the command
+    // line could be a device or a file that grows while it is read.
+    let limit = u64::try_from(MAX_ARCHIVE).unwrap_or(u64::MAX);
+    if metadata.len() > limit {
+        bail!("{} is larger than {} MB", path.display(), MAX_ARCHIVE >> 20);
+    }
     let mut data = Vec::new();
-    file.read_to_end(&mut data).with_context(|| format!("cannot read {}", path.display()))?;
+    std::io::Read::by_ref(&mut file).take(limit).read_to_end(&mut data).with_context(|| format!("cannot read {}", path.display()))?;
     Ok(data)
 }
 

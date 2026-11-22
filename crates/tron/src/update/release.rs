@@ -82,10 +82,11 @@ pub fn platform() -> anyhow::Result<String> {
     Ok(format!("{arch}-{os}"))
 }
 
-/// Fails unless `data` has the SHA-256 checksum `expected` (lowercase hex).
+/// Fails unless `data` has the SHA-256 checksum `expected`.
 pub fn verify(name: &str, data: &[u8], expected: &str) -> anyhow::Result<()> {
     let actual = hex(&Sha256::digest(data));
-    if actual != expected {
+    // Digests are printed in either case; only the bytes matter.
+    if !actual.eq_ignore_ascii_case(expected) {
         bail!("the checksum of {name} does not match; the download is damaged or was altered");
     }
     Ok(())
@@ -153,9 +154,6 @@ pub fn unpack(name: &str, data: &[u8]) -> anyhow::Result<Unpacked> {
             .read_to_end(&mut data)
             .with_context(|| format!("cannot unpack {path} from {name}"))?;
         budget = budget.saturating_sub(data.len());
-        if budget == 0 {
-            bail!("{name} expands to more than {} MB", UNPACKED_LIMIT >> 20);
-        }
         files.insert(rest.to_owned(), data);
     }
     let top = top.with_context(|| format!("{name} is empty"))?;
