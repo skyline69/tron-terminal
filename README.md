@@ -88,6 +88,10 @@ Linux packages need glibc 2.34 or newer (2021 and later distributions). The
 macOS app is not notarized: the first time, open it with right click > Open, or
 allow it under System Settings > Privacy & Security.
 
+Every release artifact carries a build provenance attestation. Check a download
+with `gh attestation verify FILE --repo skyline69/tron-terminal` to confirm that
+this repository's release workflow built it.
+
 Options: `--prebuilt` or `--build` choose without asking, `--system` installs
 for all users under `/usr/local`, `--prefix DIR` picks another location,
 `--ref vX.Y.Z` installs a release (a branch name builds that branch), `--yes`
