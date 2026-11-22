@@ -36,6 +36,8 @@ const MAX_GIF_FRAMES: usize = 1000;
 const MAX_RELATIVE_DEPTH: usize = 8;
 /// Most placements kept at once; each costs memory and a copy per frame.
 const MAX_PLACEMENTS: usize = 4096;
+/// Most images kept at once, however small each one is.
+const MAX_IMAGES: usize = 1024;
 /// Placements below this z-index are drawn under cell backgrounds.
 pub const BELOW_BACKGROUND_Z: i32 = i32::MIN / 2;
 /// Character that marks a cell showing part of an image (placeholder mode).
@@ -83,7 +85,12 @@ impl Image {
     }
 
     fn memory(&self) -> usize {
-        self.frames.iter().map(|f| f.rgba.len()).sum()
+        // Pixels are not the whole cost: the bookkeeping around a tiny image is
+        // larger than its 4-byte payload, so charge a fixed overhead too, or a
+        // stream of 1x1 images fits inside the quota forever.
+        const IMAGE_OVERHEAD: usize = 256;
+        const FRAME_OVERHEAD: usize = 64;
+        self.frames.iter().map(|f| f.rgba.len() + FRAME_OVERHEAD).sum::<usize>() + IMAGE_OVERHEAD
     }
 }
 
@@ -597,7 +604,7 @@ impl Graphics {
 
     /// Evicts the oldest images, preferring ones without placements.
     fn enforce_quota(&mut self, keep: Option<u32>) {
-        while self.memory > self.quota {
+        while self.memory > self.quota || self.images.len() > MAX_IMAGES {
             let placed = |id: u32| self.placements.iter().any(|p| p.image_id == id);
             let victim = self
                 .images
