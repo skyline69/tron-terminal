@@ -1383,21 +1383,38 @@ fn map_shared_memory(name: &str, control: &Control) -> Result<Vec<u8>, String> {
     use rustix::mm::{MapFlags, ProtFlags};
     let fd = rustix::shm::open(name, rustix::shm::OFlags::RDONLY, rustix::fs::Mode::empty())
         .map_err(|e| format!("EBADF:{e}"))?;
+    let stat = rustix::fs::fstat(&fd).map_err(|e| format!("EBADF:{e}"))?;
+    // Never read, and therefore never remove, an object another user owns.
+    if stat.st_uid != rustix::process::geteuid().as_raw() {
+        return Err("EPERM:shared memory is owned by another user".into());
+    }
     // macOS rounds the object up to whole pages; the `S` key gives the exact size.
-    let len = usize::try_from(rustix::fs::fstat(&fd).map_err(|e| format!("EBADF:{e}"))?.st_size).unwrap_or(0);
-    let start = control.offset.min(len);
+    let mapped = usize::try_from(stat.st_size).unwrap_or(0);
+    let start = control.offset.min(mapped);
     let limit = if control.size > 0 { control.size } else { MAX_TRANSFER };
-    let count = (len - start).min(limit);
+    let count = (mapped - start).min(limit);
     if count == 0 {
         return Ok(Vec::new());
     }
     // SAFETY: a read-only mapping of the whole object, unmapped before returning.
     // Shared, because macOS refuses private mappings of shared memory.
     let data = unsafe {
-        let ptr = rustix::mm::mmap(std::ptr::null_mut(), len, ProtFlags::READ, MapFlags::SHARED, &fd, 0)
+        let ptr = rustix::mm::mmap(std::ptr::null_mut(), mapped, ProtFlags::READ, MapFlags::SHARED, &fd, 0)
             .map_err(|e| format!("EBADF:{e}"))?;
-        let data = std::slice::from_raw_parts(ptr.cast::<u8>().add(start), count).to_vec();
-        let _ = rustix::mm::munmap(ptr, len);
+        // The owner can truncate the object between the fstat and this copy, and
+        // reading a page past the new end raises SIGBUS. Re-check the size now
+        // that the mapping exists and clamp to whichever is smaller.
+        let len = usize::try_from(rustix::fs::fstat(&fd).map(|s| s.st_size).unwrap_or(0))
+            .unwrap_or(0)
+            .min(mapped);
+        let start = start.min(len);
+        let count = (len - start).min(limit);
+        let data = if count == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(ptr.cast::<u8>().add(start), count).to_vec()
+        };
+        let _ = rustix::mm::munmap(ptr, mapped);
         data
     };
     Ok(data)
