@@ -782,6 +782,12 @@ impl App {
         self.tab != Tab::Shaders || self.exit.is_some()
     }
 
+    /// Input during the goodbye animation is dropped, but the events still have to be
+    /// read: a pending one would make `poll` return at once and spin a core.
+    fn accepts_input(&self) -> bool {
+        self.exit.is_none()
+    }
+
     fn exit_done(&self, now: Instant) -> bool {
         self.exit.is_some_and(|since| !self.animations || now.saturating_duration_since(since) >= EXIT)
     }
@@ -1599,7 +1605,7 @@ pub fn run<W: Write>(
         }
         let content = Areas::new(terminal.get_frame().area()).content;
         match event::poll(FRAME) {
-            Ok(true) if app.exit.is_none() => {
+            Ok(true) if app.accepts_input() => {
                 let command = match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
                     Event::Mouse(mouse) => match mouse.kind {
@@ -1635,6 +1641,11 @@ pub fn run<W: Write>(
                 if std::mem::take(&mut app.commit_pending) {
                     link.commit();
                 }
+            }
+            // Leaving: take the event anyway, or it stays pending and every poll
+            // returns at once, spinning a core until the goodbye animation ends.
+            Ok(true) => {
+                event::read()?;
             }
             Ok(_) => {}
             Err(error) => break Err(error),
@@ -1965,7 +1976,9 @@ mod tests {
         let mut app = app();
         let now = app.started + INTRO;
         assert_eq!(app.shader_params(now)[1], GRID);
+        assert!(app.accepts_input());
         app.start_exit();
+        assert!(!app.accepts_input(), "input is dropped while leaving");
         let end = app.exit.unwrap() + EXIT;
         assert!(app.exit_done(end));
         assert_eq!(app.shader_params(end)[0], 0.0);
