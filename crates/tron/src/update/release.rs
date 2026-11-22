@@ -196,6 +196,15 @@ pub fn changes(changelog: &str, from: &str, to: &str) -> String {
             text.push_str(&format!("    - {item}\n"));
         }
     }
+    // The changelog arrives over the network, and this text is printed to the
+    // terminal the emulator itself runs in: an escape sequence here could move
+    // the cursor, fake the result of the update or read the clipboard. Keep
+    // printable text and line breaks only, and no bidi overrides either.
+    text.retain(|c| {
+        c == '\n'
+            || (!c.is_control()
+                && !matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+    });
     text
 }
 
@@ -223,6 +232,14 @@ not a line
         assert_eq!(sums.archive("0.4.7", "x86_64-macos").unwrap().0, "tron-0.4.7-x86_64-macos.tar.zst", "zstd first");
         assert_eq!(sums.appimage("0.4.7", "aarch64").unwrap().0, "tron-0.4.7-aarch64.AppImage");
         assert_eq!(sums.appimage("0.4.7", "x86_64"), None);
+    }
+
+    #[test]
+    fn changes_keeps_no_escape_sequences() {
+        let changelog = "## [0.4.15] - 2026-01-01\n- Fix \u{1b}]52;c;AAAA\u{7} it\n";
+        let text = changes(changelog, "0.4.14", "0.4.15");
+        assert!(text.contains("Fix ]52;c;AAAA it"), "{text:?}");
+        assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
     }
 
     #[test]
