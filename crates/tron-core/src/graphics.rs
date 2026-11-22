@@ -34,6 +34,8 @@ const DEFAULT_GAP_MS: u32 = 40;
 const MAX_GIF_FRAMES: usize = 1000;
 /// Deepest chain of placements positioned relative to each other.
 const MAX_RELATIVE_DEPTH: usize = 8;
+/// Most placements kept at once; each costs memory and a copy per frame.
+const MAX_PLACEMENTS: usize = 4096;
 /// Placements below this z-index are drawn under cell backgrounds.
 pub const BELOW_BACKGROUND_Z: i32 = i32::MIN / 2;
 /// Character that marks a cell showing part of an image (placeholder mode).
@@ -539,6 +541,12 @@ impl Graphics {
         ctx: &Context,
     ) -> Result<(u32, u32), String> {
         let file = decode_file(data)?;
+        // One image that cannot fit in the whole budget would be retained above
+        // the limit forever by the keep-exemption in `enforce_quota`.
+        let decoded: usize = file.frames.iter().map(|(rgba, _)| rgba.len()).sum();
+        if decoded > self.quota {
+            return Err("ENOSPC:image exceeds the image memory limit".into());
+        }
         let (cell_w, cell_h) = (ctx.cell_width.max(1), ctx.cell_height.max(1));
         let screen_w = (ctx.cols as u32).saturating_mul(cell_w).max(1);
         let screen_h = (ctx.rows as u32).saturating_mul(cell_h).max(1);
@@ -670,6 +678,9 @@ impl Graphics {
             for old in replaced {
                 self.remove_image(old);
             }
+        }
+        if self.placements.len() >= MAX_PLACEMENTS {
+            return Err("ENOSPC:too many placements".into());
         }
         self.placements.push(Placement {
             image_id: id,
