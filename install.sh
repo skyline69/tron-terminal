@@ -21,6 +21,8 @@ readonly MIN_GLIBC="2.34"
 readonly API_URL=${TRON_INSTALL_API_URL:-https://api.github.com/repos/$REPO_SLUG}
 readonly DOWNLOAD_URL=${TRON_INSTALL_DOWNLOAD_URL:-https://github.com/$REPO_SLUG/releases/download}
 readonly RAW_URL=${TRON_INSTALL_RAW_URL:-https://raw.githubusercontent.com/$REPO_SLUG}
+# Downloads are HTTPS only. A local test server has to opt out explicitly.
+insecure=${TRON_INSTALL_ALLOW_INSECURE:-0}
 
 usage() {
 	cat <<EOF
@@ -110,12 +112,20 @@ run() {
 	fi
 }
 
-# fetch URL [FILE]: downloads URL to FILE, or to standard output.
+# fetch URL [FILE]: downloads URL to FILE, or to standard output. HTTPS only,
+# so neither the URL nor a redirect can downgrade a download to plain HTTP.
 fetch() {
+	local curl_opts=(--tlsv1.2 --connect-timeout 10 --retry 2) wget_opts=(--timeout=10)
+	if [ "$insecure" = 1 ]; then
+		curl_opts+=(--proto '=http,https' --proto-redir '=http,https')
+	else
+		curl_opts+=(--proto '=https' --proto-redir '=https')
+		wget_opts+=(--https-only)
+	fi
 	if has curl; then
-		curl -fsSL --connect-timeout 10 --retry 2 -o "${2:--}" "$1"
+		curl -fsSL "${curl_opts[@]}" -o "${2:--}" "$1"
 	elif has wget; then
-		wget -q --timeout=10 -O "${2:--}" "$1"
+		wget -q "${wget_opts[@]}" -O "${2:--}" "$1"
 	else
 		return 1
 	fi
