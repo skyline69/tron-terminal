@@ -407,6 +407,12 @@ impl Graphics {
                 if control.action == b'q' {
                     return respond(&control, Ok(()));
                 }
+                // An image larger than the whole quota can never be kept: the
+                // quota spares the image being written, so it would stay above
+                // the limit for as long as the application wants.
+                if decoded.rgba.len() > self.quota {
+                    return respond(&control, Err("ENOSPC:image exceeds the image memory limit".into()));
+                }
                 let anonymous = control.id == 0;
                 let id = if anonymous { self.internal_id() } else { control.id };
                 self.store(id, decoded, anonymous);
@@ -533,6 +539,10 @@ impl Graphics {
 
     /// Adds a decoded image (Sixel) at the cursor. Returns the cursor advance.
     pub fn add_image(&mut self, width: u32, height: u32, rgba: Vec<u8>, ctx: &Context) -> (u32, u32) {
+        if rgba.len() > self.quota {
+            log::debug!("sixel image of {} bytes exceeds the image memory limit", rgba.len());
+            return (1, 1);
+        }
         let id = self.internal_id();
         self.store(id, Decoded { width, height, rgba, opaque: false }, true);
         let advance = self.place(id, &Control::default(), ctx).ok().flatten();
@@ -1498,6 +1508,17 @@ mod tests {
         assert_eq!((p.line, p.col, p.cols, p.rows), (5, 2, 3, 2));
         assert_eq!(g.images()[&7].width, 25);
         assert!(g.images()[&7].opaque);
+    }
+
+    #[test]
+    fn a_direct_transfer_larger_than_the_quota_is_refused() {
+        let mut g = Graphics::new();
+        g.set_limits(1024, true);
+        let data = BASE64.encode([0u8; 4 * 64 * 64]);
+        let out = g.handle(format!("a=t,f=32,s=64,v=64,i=4;{data}").as_bytes(), &ctx());
+        let reply = String::from_utf8(out.response.expect("a reply")).unwrap();
+        assert!(reply.contains("ENOSPC"), "{reply}");
+        assert!(g.images().is_empty(), "nothing above the quota is kept");
     }
 
     #[test]
