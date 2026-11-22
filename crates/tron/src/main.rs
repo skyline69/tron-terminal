@@ -353,7 +353,13 @@ impl Settings {
             bidi: config.font.bidi,
             padding: (config.window.padding_x, config.window.padding_y),
             font_size: config.font.size,
-            scroll_multiplier: config.scrollback.multiplier,
+            // A wheel delta is multiplied by this: `inf` would scroll forever
+            // and `nan` would poison the accumulator.
+            scroll_multiplier: if config.scrollback.multiplier.is_finite() {
+                config.scrollback.multiplier.clamp(0.0, 100.0)
+            } else {
+                3.0
+            },
             smooth_scroll: config.scrollback.smooth,
             scroll_settle: Duration::from_millis(config.scrollback.smooth_ms),
             fade_edges: config.scrollback.fade_edges,
@@ -3121,7 +3127,10 @@ impl Session {
         self.schedule_redraw();
     }
 
-    /// Wheel input: reports to the application, sends arrows on the alternate
+    /// Most lines one wheel event may scroll.
+const MAX_WHEEL_LINES: usize = 1000;
+
+/// Wheel input: reports to the application, sends arrows on the alternate
     /// screen, or scrolls history.
     fn scroll(&mut self, lines: f32) {
         let over_palette = self.palette_hit().is_some_and(|hit| hit != panel::PaletteHit::Outside);
@@ -3143,6 +3152,10 @@ impl Session {
         self.scroll_accumulator += lines;
         let whole = self.scroll_accumulator.trunc();
         self.scroll_accumulator -= whole;
+        if !whole.is_finite() {
+            self.scroll_accumulator = 0.0;
+            return;
+        }
         if whole == 0.0 {
             return;
         }
@@ -3156,7 +3169,8 @@ impl Session {
             self.window.request_redraw();
             return;
         }
-        let count = whole.abs() as usize;
+        // Bounded so a large multiplier cannot ask for a gigabyte of arrow keys.
+        let count = (whole.abs() as usize).min(Self::MAX_WHEEL_LINES);
 
         if reporting {
             let (row, col) = self.renderer.cell_at(self.mouse.position.0, self.mouse.position.1);
