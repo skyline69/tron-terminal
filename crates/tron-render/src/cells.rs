@@ -876,10 +876,7 @@ impl CellPipeline {
             selection: snapshot.selection,
             extended: &snapshot.extended,
         };
-        if self.clear_row_cache
-            || self.row_cache.len() > rows * 4 + 64
-            || self.row_cache_seen.len() > rows * 8 + 128
-        {
+        if self.clear_row_cache || self.row_cache.len() > rows * 4 + 64 || self.row_cache_seen.len() > rows * 8 + 128 {
             self.row_cache.clear();
             self.row_cache_seen.clear();
             self.overlay_cache.clear();
@@ -960,16 +957,7 @@ impl CellPipeline {
                 instances.background.clear();
                 instances.foreground.clear();
                 let has_rtl = self.bidi && rtl;
-                self.build_row(
-                    row,
-                    snapshot.overscan_line(),
-                    None,
-                    has_rtl,
-                    &colors,
-                    fonts,
-                    queue,
-                    &mut instances,
-                );
+                self.build_row(row, snapshot.overscan_line(), None, has_rtl, &colors, fonts, queue, &mut instances);
             }
             self.overscan = instances;
         } else {
@@ -1041,8 +1029,7 @@ impl CellPipeline {
                 let offset = row_offset(overlay.row);
                 let key = overlay_key(overlay, snapshot.cols);
                 if let Some(cached) = self.overlay_cache.get(&key) {
-                    self.above
-                        .extend(cached.background.iter().chain(&cached.foreground).map(|i| shifted(i, offset)));
+                    self.above.extend(cached.background.iter().chain(&cached.foreground).map(|i| shifted(i, offset)));
                     continue;
                 }
                 instances.background.clear();
@@ -1056,10 +1043,7 @@ impl CellPipeline {
                 }
                 self.overlay_cache.insert(
                     key,
-                    RowInstances {
-                        background: instances.background.clone(),
-                        foreground: instances.foreground.clone(),
-                    },
+                    RowInstances { background: instances.background.clone(), foreground: instances.foreground.clone() },
                 );
             }
             self.overlay_instances = instances;

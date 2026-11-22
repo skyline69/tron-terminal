@@ -294,10 +294,7 @@ impl ImagePipeline {
             self.push(
                 Layer::AboveText,
                 image,
-                ImageInstance {
-                    pos: [instance.pos[0] + padding[0], instance.pos[1] + padding[1]],
-                    ..instance
-                },
+                ImageInstance { pos: [instance.pos[0] + padding[0], instance.pos[1] + padding[1]], ..instance },
             );
         }
         self.placeholder_instances = tiles;

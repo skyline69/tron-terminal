@@ -32,9 +32,7 @@ pub fn system_tool(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let closed = |path: &Path| path.metadata().is_ok_and(|meta| meta.permissions().mode() & 0o022 == 0);
     SYSTEM_DIRS.iter().map(|dir| Path::new(dir).join(name)).find(|path| {
-        path.metadata().is_ok_and(|metadata| metadata.is_file())
-            && closed(path)
-            && path.parent().is_some_and(closed)
+        path.metadata().is_ok_and(|metadata| metadata.is_file()) && closed(path) && path.parent().is_some_and(closed)
     })
 }
 

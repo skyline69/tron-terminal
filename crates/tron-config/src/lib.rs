@@ -577,7 +577,7 @@ impl BindKey {
                     | "down"
                     | "left"
                     | "right"
-            ) || named.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (1..=35).contains(&n));
+            ) || named.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (1..=24).contains(&n));
         known.then(|| Self::Named(named.to_owned()))
     }
 }

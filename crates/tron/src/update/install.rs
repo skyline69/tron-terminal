@@ -122,9 +122,7 @@ fn locate_in(exe: &Path, candidates: &[PathBuf]) -> Option<Layout> {
         }
         let app = entries
             .iter()
-            .find(|entry| {
-                entry.file_name() == Some(OsStr::new("tron.app")) && app_dir_ok(entry.parent(), prefix)
-            })
+            .find(|entry| entry.file_name() == Some(OsStr::new("tron.app")) && app_dir_ok(entry.parent(), prefix))
             .cloned();
         Some(Layout { bin_dir, share_dir: share_dir.clone(), app, manifest, entries })
     })
@@ -138,7 +136,9 @@ fn manifest_entry_ok(entry: &Path) -> bool {
 /// An app bundle may sit beside the prefix or in an Applications folder.
 fn app_dir_ok(dir: Option<&Path>, prefix: &Path) -> bool {
     dir.is_some_and(|dir| {
-        dir == prefix || dir == Path::new("/Applications") || home().is_some_and(|home| dir == home.join("Applications"))
+        dir == prefix
+            || dir == Path::new("/Applications")
+            || home().is_some_and(|home| dir == home.join("Applications"))
     })
 }
 
@@ -492,7 +492,9 @@ fn refresh_linux_caches(share: &Path) {
                 )
             });
         }
-        if let Some(kde) = ["kbuildsycoca6", "kbuildsycoca5"].into_iter().find(|program| crate::tool::system_tool(program).is_some()) {
+        if let Some(kde) =
+            ["kbuildsycoca6", "kbuildsycoca5"].into_iter().find(|program| crate::tool::system_tool(program).is_some())
+        {
             scope.spawn(move || run_quietly(kde, &[]));
         }
     });

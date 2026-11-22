@@ -3136,9 +3136,9 @@ impl Session {
     }
 
     /// Most lines one wheel event may scroll.
-const MAX_WHEEL_LINES: usize = 1000;
+    const MAX_WHEEL_LINES: usize = 1000;
 
-/// Wheel input: reports to the application, sends arrows on the alternate
+    /// Wheel input: reports to the application, sends arrows on the alternate
     /// screen, or scrolls history.
     fn scroll(&mut self, lines: f32) {
         let over_palette = self.palette_hit().is_some_and(|hit| hit != panel::PaletteHit::Outside);
@@ -3835,8 +3835,9 @@ fn spawn_reader(
 /// A press of `key` with no modifiers, as winit would report it, for bindings
 /// that send a key.
 /// The function keys winit knows, so `key:f13` and the like map to a real key.
-/// The name the configuration uses is `f1`…`f35`.
-const FUNCTION_KEYS: [(NamedKey, KeyCode); 35] = [
+/// The name the configuration uses is `f1`…`f24`: above that there is no
+/// escape sequence a program would recognise.
+const FUNCTION_KEYS: [(NamedKey, KeyCode); 24] = [
     (NamedKey::F1, KeyCode::F1),
     (NamedKey::F2, KeyCode::F2),
     (NamedKey::F3, KeyCode::F3),
@@ -3861,17 +3862,6 @@ const FUNCTION_KEYS: [(NamedKey, KeyCode); 35] = [
     (NamedKey::F22, KeyCode::F22),
     (NamedKey::F23, KeyCode::F23),
     (NamedKey::F24, KeyCode::F24),
-    (NamedKey::F25, KeyCode::F25),
-    (NamedKey::F26, KeyCode::F26),
-    (NamedKey::F27, KeyCode::F27),
-    (NamedKey::F28, KeyCode::F28),
-    (NamedKey::F29, KeyCode::F29),
-    (NamedKey::F30, KeyCode::F30),
-    (NamedKey::F31, KeyCode::F31),
-    (NamedKey::F32, KeyCode::F32),
-    (NamedKey::F33, KeyCode::F33),
-    (NamedKey::F34, KeyCode::F34),
-    (NamedKey::F35, KeyCode::F35),
 ];
 
 /// The function key `name` is, such as `f13`.
@@ -4378,7 +4368,8 @@ mod tests {
         let app_cursor = input::KeyModes { app_cursor: true, ..input::KeyModes::default() };
         assert_eq!(encode("home", app_cursor).as_deref(), Some(&b"\x1bOH"[..]));
         assert!(unmodified_key(&BindKey::Named("f1".into())).is_some(), "every function key maps");
-        assert!(unmodified_key(&BindKey::Named("f35".into())).is_some());
+        assert!(unmodified_key(&BindKey::Named("f24".into())).is_some());
+        assert!(unmodified_key(&BindKey::Named("f25".into())).is_none(), "no sequence above F24");
         assert_eq!(encode("f13", input::KeyModes::default()).as_deref(), Some(&b"\x1b[25~"[..]));
         assert!(unmodified_key(&BindKey::Named("f36".into())).is_none());
         assert_eq!(bind_key(&Key::Named(NamedKey::F13)), Some(BindKey::Named("f13".into())));

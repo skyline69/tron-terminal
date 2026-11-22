@@ -671,8 +671,7 @@ mod tests {
         let _ = std::fs::remove_file(&pid_file);
         // The background sleep ignores SIGHUP; the shell replaces itself with a
         // foreground sleep that does not, so the hangup has to end the child.
-        let script =
-            format!("nohup sleep 30 >/dev/null 2>&1 & echo $! > {}; exec sleep 30", pid_file.display());
+        let script = format!("nohup sleep 30 >/dev/null 2>&1 & echo $! > {}; exec sleep 30", pid_file.display());
         let options =
             SpawnOptions { program: Some("/bin/sh".into()), args: vec!["-c".into(), script], ..Default::default() };
         let mut pty = Pty::spawn(&options, WindowSize { rows: 24, cols: 80, ..WindowSize::default() }).expect("spawn");
@@ -694,9 +693,12 @@ mod tests {
 
     #[test]
     fn hangup_ends_a_shell_that_ignores_the_closed_master() {
-        let options = SpawnOptions { program: Some("/bin/sh".into()), args: vec!["-c".into(), "sleep 30".into()], ..Default::default() };
-        let mut pty = Pty::spawn(&options, WindowSize { rows: 24, cols: 80, ..WindowSize::default() })
-            .expect("spawn");
+        let options = SpawnOptions {
+            program: Some("/bin/sh".into()),
+            args: vec!["-c".into(), "sleep 30".into()],
+            ..Default::default()
+        };
+        let mut pty = Pty::spawn(&options, WindowSize { rows: 24, cols: 80, ..WindowSize::default() }).expect("spawn");
         // The reader keeps a duplicate of the master open, so dropping the pty
         // alone would leave `sleep` running.
         let reader = pty.reader().expect("reader");

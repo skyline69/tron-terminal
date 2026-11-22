@@ -473,11 +473,7 @@ impl Graphics {
                 }
                 let name = BASE64.decode(data).map_err(|e| format!("EINVAL:bad base64: {e}"))?;
                 let name = String::from_utf8(name).map_err(|_| "EINVAL:path is not UTF-8".to_string())?;
-                if control.medium == b's' {
-                    read_shared_memory(&name, control)?
-                } else {
-                    read_file(&name, control)?
-                }
+                if control.medium == b's' { read_shared_memory(&name, control)? } else { read_file(&name, control)? }
             }
             _ => return Err("EINVAL:unknown transmission medium".into()),
         };
@@ -1424,9 +1420,7 @@ fn map_shared_memory(name: &str, control: &Control) -> Result<Vec<u8>, String> {
         // The owner can truncate the object between the fstat and this copy, and
         // reading a page past the new end raises SIGBUS. Re-check the size now
         // that the mapping exists and clamp to whichever is smaller.
-        let len = usize::try_from(rustix::fs::fstat(&fd).map(|s| s.st_size).unwrap_or(0))
-            .unwrap_or(0)
-            .min(mapped);
+        let len = usize::try_from(rustix::fs::fstat(&fd).map(|s| s.st_size).unwrap_or(0)).unwrap_or(0).min(mapped);
         let start = start.min(len);
         let count = (len - start).min(limit);
         let data = if count == 0 {

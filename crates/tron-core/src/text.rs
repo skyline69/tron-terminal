@@ -9,8 +9,7 @@ const MAX_WRAPPED_ROWS: i64 = 256;
 
 /// Schemes underlined as links. `file:` is absent for the same reason as in
 /// `LINK_SCHEMES`.
-const URL_SCHEMES: [&str; 8] =
-    ["https://", "http://", "ftp://", "sftp://", "ssh://", "git://", "gemini://", "mailto:"];
+const URL_SCHEMES: [&str; 8] = ["https://", "http://", "ftp://", "sftp://", "ssh://", "git://", "gemini://", "mailto:"];
 
 /// Characters of a logical line and the cell each one came from.
 pub struct LogicalLine {
