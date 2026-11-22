@@ -23,6 +23,10 @@ const MAX_COMMAND_MARKS: usize = 4096;
 const MAX_NOTIFICATION_TEXT: usize = 4096;
 /// Largest iTerm2 multipart image, base64 encoded.
 const MAX_INLINE_IMAGE: usize = 64 * 1024 * 1024;
+/// Longest OSC 8 link id kept, in characters.
+const MAX_LINK_ID_CHARS: usize = 64;
+/// Most bytes of link ids and URIs kept for the life of a screen.
+const MAX_LINK_BYTES: usize = 16 * 1024 * 1024;
 
 bitflags! {
     /// Terminal modes set through SM/RM and DECSET/DECRST.
@@ -307,6 +311,8 @@ pub struct Terminal {
     dcs: Option<DcsRequest>,
     links: Vec<Hyperlink>,
     link_ids: std::collections::HashMap<(Option<String>, String), u16>,
+    /// Bytes of `links` and `link_ids`, which live until the screen is reset.
+    link_bytes: usize,
     title_stack: Vec<String>,
     extended: ExtendedTable,
     stats: Stats,
@@ -358,6 +364,7 @@ impl Terminal {
             dcs: None,
             links: Vec::new(),
             link_ids: std::collections::HashMap::new(),
+            link_bytes: 0,
             title_stack: Vec::new(),
             extended: ExtendedTable::new(),
             stats: Stats::default(),
@@ -602,13 +609,18 @@ impl Terminal {
     }
 
     fn intern_link(&mut self, id: Option<String>, uri: String) -> u16 {
+        // Ids are only compared for equality; an application must not be able to
+        // keep megabytes alive per link until the next reset.
+        let id = id.map(|id| id.chars().take(MAX_LINK_ID_CHARS).collect::<String>());
         let key = (id, uri);
         if let Some(&link) = self.link_ids.get(&key) {
             return link;
         }
-        if self.links.len() >= usize::from(u16::MAX - 1) {
+        let cost = key.1.len() + key.0.as_ref().map_or(0, String::len);
+        if self.links.len() >= usize::from(u16::MAX - 1) || self.link_bytes.saturating_add(cost) > MAX_LINK_BYTES {
             return 0;
         }
+        self.link_bytes += cost;
         self.links.push(Hyperlink { id: key.0.clone(), uri: key.1.clone() });
         let link = self.links.len() as u16;
         self.link_ids.insert(key, link);
