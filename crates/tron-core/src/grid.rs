@@ -71,9 +71,6 @@ impl Row {
         self.extras.clear();
     }
 
-    /// Records a write to `start..end`: updates the occupied prefix and drops
-    /// combining characters of overwritten cells.
-    #[inline]
     /// Feeds the visible content to a hasher without allocating, so a caller
     /// can tell whether the row changed before building anything from it.
     pub fn hash_content<H: std::hash::Hasher>(&self, hasher: &mut H) {
@@ -84,6 +81,9 @@ impl Row {
         self.extras.hash(hasher);
     }
 
+    /// Records a write to `start..end`: updates the occupied prefix and drops
+    /// combining characters of overwritten cells.
+    #[inline]
     pub fn touch(&mut self, start: usize, end: usize) {
         if end > self.occupied {
             self.occupied = end;
