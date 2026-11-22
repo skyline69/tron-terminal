@@ -203,12 +203,35 @@ impl Pty {
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.child.try_wait()
     }
+
+    /// Hangs the child's session up, then kills what did not go away.
+    ///
+    /// Closing the master is not enough on its own: the reader and writer
+    /// handles are duplicates of it, so the kernel sends no SIGHUP while a
+    /// detached thread still holds one. The child runs in its own session, so
+    /// its pid also names the process group of everything it started.
+    pub fn hangup(&mut self) {
+        let Some(group) = rustix::process::Pid::from_raw(self.child.id() as i32) else { return };
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return;
+        }
+        if rustix::process::kill_process_group(group, rustix::process::Signal::HUP).is_err() {
+            return;
+        }
+        for _ in 0..8 {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        let _ = self.child.wait();
+    }
 }
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        // Closing the master sends SIGHUP to the session. Reap if it already exited.
-        let _ = self.child.try_wait();
+        self.hangup();
     }
 }
 
@@ -629,6 +652,21 @@ pub fn is_closed_error(error: &io::Error) -> bool {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn hangup_ends_a_shell_that_ignores_the_closed_master() {
+        let options = SpawnOptions { program: Some("/bin/sh".into()), args: vec!["-c".into(), "sleep 30".into()], ..Default::default() };
+        let mut pty = Pty::spawn(&options, WindowSize { rows: 24, cols: 80, ..WindowSize::default() })
+            .expect("spawn");
+        // The reader keeps a duplicate of the master open, so dropping the pty
+        // alone would leave `sleep` running.
+        let reader = pty.reader().expect("reader");
+        let started = std::time::Instant::now();
+        pty.hangup();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "hanging up waits for the kill");
+        assert!(matches!(pty.try_wait(), Ok(Some(_))), "the child is reaped");
+        drop(reader);
+    }
 
     #[test]
     fn host_command_passes_environment_and_program() {
