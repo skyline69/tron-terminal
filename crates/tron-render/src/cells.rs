@@ -173,7 +173,8 @@ struct RowLayout {
 }
 
 impl RowLayout {
-    fn new(row: &Row, padding: f32, cell_w: f32, cell_h: f32, bidi: bool) -> Self {
+    /// `rtl`: right-to-left text should be reordered, which needs the row to have some.
+    fn new(row: &Row, padding: f32, cell_w: f32, cell_h: f32, rtl: bool) -> Self {
         let (scale_x, scale_y, glyph_shift) = match row.line_size {
             LineSize::Single => (1.0, 1.0, 0.0),
             LineSize::DoubleWidth => (2.0, 1.0, 0.0),
@@ -190,7 +191,7 @@ impl RowLayout {
             glyph_shift,
             clipped: scale_y > 1.0,
             cols,
-            bidi: if bidi { bidi_order(row, cols) } else { None },
+            bidi: if rtl { bidi_order(row, cols) } else { None },
         }
     }
 
@@ -251,6 +252,11 @@ fn bidi_order(row: &Row, cols: usize) -> Option<(Vec<usize>, Vec<bool>)> {
         column += width;
     }
     Some((visual, rtl))
+}
+
+/// Whether any cell of the row holds a character of a right-to-left script.
+fn row_has_rtl(row: &Row) -> bool {
+    row.cells.iter().any(|cell| is_rtl_char(cell.ch))
 }
 
 /// Characters of right-to-left scripts: Hebrew, Arabic, Syriac, Thaana, NKo and others.
@@ -898,16 +904,17 @@ impl CellPipeline {
                     .as_ref()
                     .is_some_and(|h| h.id.is_some() || (h.start.line..=h.end.line).contains(&line));
             let key = (!highlighted).then(|| row_key(row, cursor_col));
+            let has_rtl = self.bidi && key.map_or_else(|| row_has_rtl(row), |(_, rtl)| rtl);
             let mut instances = std::mem::take(&mut self.spare);
-            if let Some(cached) = key.and_then(|k| self.row_cache.get(&k)) {
+            if let Some(cached) = key.and_then(|(key, _)| self.row_cache.get(&key)) {
                 // Scrolled content: same cells as a row built earlier, reuse its instances.
                 instances.background.clone_from(&cached.background);
                 instances.foreground.clone_from(&cached.foreground);
             } else {
                 instances.background.clear();
                 instances.foreground.clear();
-                self.build_row(row, line, cursor_col, &colors, fonts, queue, &mut instances);
-                if let Some(key) = key {
+                self.build_row(row, line, cursor_col, has_rtl, &colors, fonts, queue, &mut instances);
+                if let Some((key, _)) = key {
                     let copy = RowInstances {
                         background: instances.background.clone(),
                         foreground: instances.foreground.clone(),
@@ -933,14 +940,24 @@ impl CellPipeline {
         let scroll = if snapshot.overscan.is_some() { self.scroll_offset } else { 0.0 };
         if let Some(row) = &snapshot.overscan {
             let mut instances = std::mem::take(&mut self.overscan);
-            let key = row_key(row, None);
+            let (key, rtl) = row_key(row, None);
             if let Some(cached) = self.row_cache.get(&key) {
                 instances.background.clone_from(&cached.background);
                 instances.foreground.clone_from(&cached.foreground);
             } else {
                 instances.background.clear();
                 instances.foreground.clear();
-                self.build_row(row, snapshot.overscan_line(), None, &colors, fonts, queue, &mut instances);
+                let has_rtl = self.bidi && rtl;
+                self.build_row(
+                    row,
+                    snapshot.overscan_line(),
+                    None,
+                    has_rtl,
+                    &colors,
+                    fonts,
+                    queue,
+                    &mut instances,
+                );
             }
             self.overscan = instances;
         } else {
@@ -1019,7 +1036,8 @@ impl CellPipeline {
                 instances.background.clear();
                 instances.foreground.clear();
                 let row = overlay_row(overlay, snapshot.cols);
-                self.build_row(&row, i64::MIN, None, &colors, fonts, queue, &mut instances);
+                let has_rtl = self.bidi && row_has_rtl(&row);
+                self.build_row(&row, i64::MIN, None, has_rtl, &colors, fonts, queue, &mut instances);
                 self.above.extend(instances.background.iter().chain(&instances.foreground).map(|i| shifted(i, offset)));
                 if self.overlay_cache.len() > 64 {
                     self.overlay_cache.clear();
@@ -1205,6 +1223,7 @@ impl CellPipeline {
         row: &Row,
         line: i64,
         cursor_col: Option<usize>,
+        has_rtl: bool,
         colors: &ColorContext<'_>,
         fonts: &mut FontSystem,
         queue: &wgpu::Queue,
@@ -1214,7 +1233,7 @@ impl CellPipeline {
         let (cell_w, cell_h) = (m.width as f32, m.height as f32);
         // Positions are relative to the row top.
         let top = 0.0;
-        let layout = RowLayout::new(row, self.padding[0], cell_w, cell_h, self.bidi);
+        let layout = RowLayout::new(row, self.padding[0], cell_w, cell_h, has_rtl);
         let cols = layout.cols;
 
         // Backgrounds, decorations and per-cell text colors.
@@ -1523,7 +1542,7 @@ impl CellPipeline {
         let m = self.metrics;
         let (cell_w, cell_h) = (m.width as f32, m.height as f32);
         let row = &snapshot.rows[cursor.row];
-        let layout = RowLayout::new(row, self.padding[0], cell_w, cell_h, self.bidi);
+        let layout = RowLayout::new(row, self.padding[0], cell_w, cell_h, self.bidi && row_has_rtl(row));
         let col = cursor.col.min(layout.cols - 1);
         let wide = row.cells.get(col).is_some_and(|c| c.flags.contains(Flags::WIDE));
         let width = if wide { 2.0 } else { 1.0 } * layout.cell_width;
@@ -1727,8 +1746,9 @@ impl CellPipeline {
     }
 }
 
-/// Hash of everything a row's instances depend on besides colors and fonts.
-fn row_key(row: &Row, cursor_col: Option<usize>) -> u64 {
+/// Hash of everything a row's instances depend on besides colors and fonts,
+/// with whether the row holds right-to-left text.
+fn row_key(row: &Row, cursor_col: Option<usize>) -> (u64, bool) {
     use std::hash::{BuildHasher, Hash, Hasher};
     let mut hasher = foldhash::fast::FixedState::with_seed(0x7472_6f6e).build_hasher();
     // Hash the cells as one byte slice. Their derived `Hash` feeds every field
@@ -1737,14 +1757,18 @@ fn row_key(row: &Row, cursor_col: Option<usize>) -> u64 {
     let bytes = unsafe { std::slice::from_raw_parts(row.cells.as_ptr().cast::<u8>(), size_of_val(&row.cells[..])) };
     hasher.write(bytes);
     row.line_size.hash(&mut hasher);
+    // The right-to-left bit comes with the pass the combining characters need,
+    // so laying out the row does not scan it again.
+    let mut has_rtl = false;
     for (col, cell) in row.cells.iter().enumerate() {
+        has_rtl |= is_rtl_char(cell.ch);
         if cell.flags.contains(Flags::GRAPHEME) {
             col.hash(&mut hasher);
             row.combining(col).hash(&mut hasher);
         }
     }
     cursor_col.hash(&mut hasher);
-    hasher.finish()
+    (hasher.finish(), has_rtl)
 }
 
 /// Hash of everything an overlay's instances depend on besides the state that
@@ -1875,7 +1899,7 @@ mod tests {
     fn double_size_lines_stretch_and_clip() {
         let mut double = row("abcdef");
         double.line_size = LineSize::DoubleHeightBottom;
-        let layout = RowLayout::new(&double, 10.0, 8.0, 16.0, true);
+        let layout = RowLayout::new(&double, 10.0, 8.0, 16.0, false);
         assert_eq!((layout.cols, layout.left(2), layout.glyph_shift), (3, 42.0, -16.0));
         let glyph = Instance {
             pos: [0.0, -10.0],
