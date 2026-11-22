@@ -887,13 +887,15 @@ pub struct ShaderConfig {
 pub struct ImageConfig {
     /// Memory limit for decoded images, in MiB.
     pub memory_limit: u32,
-    /// Allow applications to send images as file paths.
+    /// Allow applications to send images as file paths or shared memory
+    /// objects. Off by default: any file printed in the terminal can ask it to
+    /// read the user's files.
     pub file_transfer: bool,
 }
 
 impl Default for ImageConfig {
     fn default() -> Self {
-        Self { memory_limit: 320, file_transfer: true }
+        Self { memory_limit: 320, file_transfer: false }
     }
 }
 

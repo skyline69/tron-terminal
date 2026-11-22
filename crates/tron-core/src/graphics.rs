@@ -338,7 +338,7 @@ impl Graphics {
             generation: 0,
             memory: 0,
             quota: DEFAULT_QUOTA,
-            allow_files: true,
+            allow_files: false,
         }
     }
 
@@ -460,14 +460,17 @@ impl Graphics {
         let raw = match control.medium {
             b'd' => BASE64.decode(data).map_err(|e| format!("EINVAL:bad base64: {e}"))?,
             b'f' | b't' | b's' => {
+                // Shared memory is another way to name bytes outside this
+                // process, so it needs the same permission as a file path.
+                if !self.allow_files {
+                    return Err("EPERM:file transmission is disabled".into());
+                }
                 let name = BASE64.decode(data).map_err(|e| format!("EINVAL:bad base64: {e}"))?;
                 let name = String::from_utf8(name).map_err(|_| "EINVAL:path is not UTF-8".to_string())?;
                 if control.medium == b's' {
                     read_shared_memory(&name, control)?
-                } else if self.allow_files {
-                    read_file(&name, control)?
                 } else {
-                    return Err("EPERM:file transmission is disabled".into());
+                    read_file(&name, control)?
                 }
             }
             _ => return Err("EINVAL:unknown transmission medium".into()),
@@ -1555,6 +1558,7 @@ mod tests {
         let name = format!("tron-test-{}", std::process::id());
         create_shared_memory(&name, &[9u8; 3]);
         let mut g = Graphics::new();
+        g.set_limits(DEFAULT_QUOTA, true);
         let encoded = BASE64.encode(&name);
         let out = g.handle(format!("a=t,t=s,f=24,s=1,v=1,i=4;{encoded}").as_bytes(), &ctx());
         assert_eq!(out.response.as_deref(), Some(&b"\x1b_Gi=4;OK\x1b\\"[..]));
@@ -1563,10 +1567,23 @@ mod tests {
     }
 
     #[test]
+    fn file_and_shared_memory_transfer_are_off_by_default() {
+        let name = format!("tron-test-denied-{}", std::process::id());
+        create_shared_memory(&name, &[1u8; 3]);
+        let encoded = BASE64.encode(&name);
+        let out = Graphics::new().handle(format!("a=t,t=s,f=24,s=1,v=1,i=7,q=1;{encoded}").as_bytes(), &ctx());
+        let reply = String::from_utf8(out.response.unwrap()).unwrap();
+        assert!(reply.contains("EPERM"), "{reply}");
+        assert!(shared_memory_exists(&name), "a refused object must not be unlinked");
+        let _ = rustix::shm::unlink(format!("/{name}").as_str());
+    }
+
+    #[test]
     fn shared_memory_with_more_flag_is_not_chunked() {
         let name = format!("tron-test-more-{}", std::process::id());
         create_shared_memory(&name, &[5u8; 3]);
         let mut g = Graphics::new();
+        g.set_limits(DEFAULT_QUOTA, true);
         let encoded = BASE64.encode(&name);
         g.handle(format!("a=T,t=s,f=24,s=1,v=1,C=1,q=2,m=1;{encoded}").as_bytes(), &ctx());
         assert_eq!(g.images().len(), 1);
