@@ -15,6 +15,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::Duration;
 
 use etcetera::{AppStrategy, AppStrategyArgs};
 use serde::{Deserialize, Deserializer};
@@ -1043,19 +1045,75 @@ pub struct Watcher {
     _watcher: notify::RecommendedWatcher,
 }
 
+/// Waits this long after the last event before reading the config, so an editor that
+/// truncates and then writes `config.toml` is not read in between.
+const SETTLE: Duration = Duration::from_millis(50);
+/// How often a file that does not parse yet is read again, at most this many times.
+const RETRIES: u32 = 10;
+
 impl Watcher {
     /// Creates the config directory if needed and starts watching it.
     pub fn new(paths: &Paths, on_change: impl Fn() + Send + 'static) -> Result<Self, notify::Error> {
         std::fs::create_dir_all(&paths.config_dir).map_err(notify::Error::io)?;
+        // A burst of events is reported once, after it settled and the file parses.
+        let (sender, events) = std::sync::mpsc::channel();
+        let config_file = paths.config_file.clone();
+        std::thread::Builder::new()
+            .name("config-watch".into())
+            .spawn(move || debounce(events, SETTLE, RETRIES, || config_ready(&config_file), on_change))
+            .map_err(notify::Error::io)?;
         let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if let Ok(event) = event
                 && (event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove())
             {
-                on_change();
+                let _ = sender.send(());
             }
         })?;
         notify::Watcher::watch(&mut watcher, &paths.config_dir, notify::RecursiveMode::Recursive)?;
         Ok(Self { _watcher: watcher })
+    }
+}
+
+/// Reports the burst of `events` once: after `settle` without a new one and once
+/// `ready` agrees the file is complete. Reading again up to `retries` times gives a
+/// half written file time to finish; then the change is reported anyway, so a broken
+/// configuration still shows its error.
+fn debounce(events: Receiver<()>, settle: Duration, retries: u32, ready: impl Fn() -> bool, on_change: impl Fn()) {
+    let mut waiting = false;
+    let mut attempts = 0;
+    loop {
+        if !waiting {
+            if events.recv().is_err() {
+                return;
+            }
+            waiting = true;
+            attempts = 0;
+        }
+        match events.recv_timeout(settle) {
+            // Another event: the burst goes on.
+            Ok(()) => {
+                attempts = 0;
+                continue;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            // The watcher was dropped.
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        if ready() || attempts >= retries {
+            waiting = false;
+            on_change();
+        } else {
+            attempts += 1;
+        }
+    }
+}
+
+/// Whether `config.toml` holds complete, parseable content.
+fn config_ready(path: &Path) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Config::parse(&text).is_ok(),
+        // A file that is not there (yet) is the default configuration.
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     }
 }
 
@@ -1208,5 +1266,84 @@ mod tests {
             Err(ConfigError::ThemeNotFound(_))
         ));
         let _ = std::fs::remove_dir_all(&paths.config_dir);
+    }
+
+    #[test]
+    fn a_half_written_config_is_not_reported() {
+        let paths = temp_paths("ready");
+        assert!(config_ready(&paths.config_file), "a missing file is the default configuration");
+        std::fs::write(&paths.config_file, "[font]\nsize = ").unwrap();
+        assert!(!config_ready(&paths.config_file), "truncated TOML waits for the rest");
+        std::fs::write(&paths.config_file, "[font]\nsize = 13.0\n").unwrap();
+        assert!(config_ready(&paths.config_file));
+        let _ = std::fs::remove_dir_all(&paths.config_dir);
+    }
+
+    #[test]
+    fn a_burst_of_watch_events_reloads_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let (sender, events) = std::sync::mpsc::channel();
+        let ready = Arc::new(AtomicBool::new(false));
+        let reloads = Arc::new(AtomicUsize::new(0));
+        let (flag, count) = (ready.clone(), reloads.clone());
+        let thread = std::thread::spawn(move || {
+            debounce(
+                events,
+                Duration::from_millis(20),
+                1_000,
+                || flag.load(Ordering::SeqCst),
+                || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+        });
+        for _ in 0..5 {
+            sender.send(()).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(reloads.load(Ordering::SeqCst), 0, "a file that does not parse yet is not reloaded");
+        ready.store(true, Ordering::SeqCst);
+        for _ in 0..100 {
+            if reloads.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(reloads.load(Ordering::SeqCst), 1, "the whole burst is one reload");
+        drop(sender);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_broken_config_is_reported_after_retrying() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (sender, events) = std::sync::mpsc::channel();
+        let reloads = Arc::new(AtomicUsize::new(0));
+        let count = reloads.clone();
+        let thread = std::thread::spawn(move || {
+            debounce(
+                events,
+                Duration::from_millis(5),
+                2,
+                || false,
+                || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+        });
+        sender.send(()).unwrap();
+        for _ in 0..100 {
+            if reloads.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(reloads.load(Ordering::SeqCst), 1, "the error reaches the user, as before");
+        drop(sender);
+        thread.join().unwrap();
     }
 }
