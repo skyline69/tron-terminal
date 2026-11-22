@@ -808,6 +808,17 @@ impl Graphics {
         let edit = control.rows as usize;
         let base = control.cols as usize;
         let count = image.frames.len();
+        let append = !(edit > 0 && edit <= count);
+        // A frame costs a full canvas, but a client can send one for ~40 bytes.
+        // Without these two limits a 10000x10000 image can be grown by 400 MB
+        // per command past every quota, since the edited image is exempt from
+        // eviction.
+        if append && image.frames.len() >= MAX_GIF_FRAMES {
+            return Err("ENOSPC:too many frames".into());
+        }
+        if append && self.memory.saturating_add(width * height * 4) > self.quota {
+            return Err("ENOSPC:animation frame exceeds the image memory limit".into());
+        }
         let mut canvas: Vec<u8> = if edit > 0 && edit <= count {
             image.frames[edit - 1].rgba.to_vec()
         } else if base > 0 && base <= count {
