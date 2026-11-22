@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::path::{Path, PathBuf};
 
 use tron_config::{Config, Paths};
 
@@ -332,7 +333,10 @@ impl Choices {
     /// Writes the values that differ from `saved` to `config.toml`, keeping
     /// everything else in the file, comments included.
     pub fn save(&self, saved: &Choices, paths: &Paths) -> io::Result<()> {
-        let text = match std::fs::read_to_string(&paths.config_file) {
+        // Write through links: a config symlinked into a dotfiles repository stays a
+        // link, instead of the rename replacing it with a regular file.
+        let target = resolved_target(&paths.config_file);
+        let text = match std::fs::read_to_string(&target) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(error),
@@ -348,10 +352,25 @@ impl Choices {
                 .map(toml_edit::Item::Value);
             set_path(&mut document, key, item);
         }
-        std::fs::create_dir_all(&paths.config_dir)?;
-        let temporary = paths.config_file.with_extension("toml.tmp");
+        let temporary = target.with_extension("toml.tmp");
+        if let Some(parent) = temporary.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::write(&temporary, document.to_string())?;
-        std::fs::rename(&temporary, &paths.config_file)
+        std::fs::rename(&temporary, &target)
+    }
+}
+
+/// The file to write: what `path` points at when it is a symlink. A link to a file
+/// that does not exist yet has no canonical target, so its own target is used.
+fn resolved_target(path: &Path) -> PathBuf {
+    if let Ok(target) = std::fs::canonicalize(path) {
+        return target;
+    }
+    match std::fs::read_link(path) {
+        Ok(target) if target.is_absolute() => target,
+        Ok(target) => path.parent().map_or(target.clone(), |parent| parent.join(&target)),
+        Err(_) => path.to_path_buf(),
     }
 }
 
@@ -549,6 +568,38 @@ mod tests {
         again.settings.insert("startup", toml::Value::String(FIRST_LAUNCH.into()));
         again.save(&choices, &paths).unwrap();
         assert_eq!(Config::load(&paths).unwrap().startup, None);
+        let _ = std::fs::remove_dir_all(&paths.config_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_symlinked_config_keeps_the_link() {
+        let paths = temp_paths("symlink");
+        let dotfiles = paths.config_dir.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let linked = dotfiles.join("config.toml");
+        std::fs::write(&linked, "theme = \"nord\"\n").unwrap();
+        std::os::unix::fs::symlink(&linked, &paths.config_file).unwrap();
+
+        let config = Config::load(&paths).unwrap();
+        let saved = Choices::from_config(&config);
+        let mut choices = saved.clone();
+        choices.settings.insert("font.size", toml::Value::Float(15.0));
+        choices.save(&saved, &paths).unwrap();
+
+        let metadata = std::fs::symlink_metadata(&paths.config_file).unwrap();
+        assert!(metadata.file_type().is_symlink(), "the symlink is still there");
+        assert_eq!(std::fs::read_link(&paths.config_file).unwrap(), linked);
+        let text = std::fs::read_to_string(&linked).unwrap();
+        assert!(text.contains("size = 15.0"), "the target got the change: {text}");
+
+        // A link to a file that does not exist yet is written through as well.
+        let new = dotfiles.join("new.toml");
+        std::fs::remove_file(&paths.config_file).unwrap();
+        std::os::unix::fs::symlink(&new, &paths.config_file).unwrap();
+        choices.save(&saved, &paths).unwrap();
+        assert_eq!(std::fs::read_link(&paths.config_file).unwrap(), new);
+        assert!(std::fs::read_to_string(&new).unwrap().contains("size = 15.0"));
         let _ = std::fs::remove_dir_all(&paths.config_dir);
     }
 }

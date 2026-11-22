@@ -21,6 +21,8 @@ readonly MIN_GLIBC="2.34"
 readonly API_URL=${TRON_INSTALL_API_URL:-https://api.github.com/repos/$REPO_SLUG}
 readonly DOWNLOAD_URL=${TRON_INSTALL_DOWNLOAD_URL:-https://github.com/$REPO_SLUG/releases/download}
 readonly RAW_URL=${TRON_INSTALL_RAW_URL:-https://raw.githubusercontent.com/$REPO_SLUG}
+# Downloads are HTTPS only. A local test server has to opt out explicitly.
+insecure=${TRON_INSTALL_ALLOW_INSECURE:-0}
 
 usage() {
 	cat <<EOF
@@ -71,6 +73,23 @@ die() {
 	exit 1
 }
 
+# The URL overrides only serve mirrors and tests. Anything but HTTPS would
+# quietly downgrade an install that claims to verify its downloads.
+require_https() {
+	case $1 in
+	https://*) return 0 ;;
+	esac
+	if [ "$insecure" = 1 ]; then
+		warn "$2 is not HTTPS; continuing because TRON_INSTALL_ALLOW_INSECURE=1"
+	else
+		die "$2 must start with https://, not \"$1\". Set TRON_INSTALL_ALLOW_INSECURE=1 only for a local test."
+	fi
+}
+
+require_https "$API_URL" TRON_INSTALL_API_URL
+require_https "$DOWNLOAD_URL" TRON_INSTALL_DOWNLOAD_URL
+require_https "$RAW_URL" TRON_INSTALL_RAW_URL
+
 # prompt TEXT HINT: shows a question and reads the answer from the terminal into
 # $answer. Reading the terminal also works when the script is piped into bash.
 prompt() {
@@ -110,12 +129,20 @@ run() {
 	fi
 }
 
-# fetch URL [FILE]: downloads URL to FILE, or to standard output.
+# fetch URL [FILE]: downloads URL to FILE, or to standard output. HTTPS only,
+# so neither the URL nor a redirect can downgrade a download to plain HTTP.
 fetch() {
+	local curl_opts=(--tlsv1.2 --connect-timeout 10 --retry 2) wget_opts=(--timeout=10)
+	if [ "$insecure" = 1 ]; then
+		curl_opts+=(--proto '=http,https' --proto-redir '=http,https')
+	else
+		curl_opts+=(--proto '=https' --proto-redir '=https')
+		wget_opts+=(--https-only)
+	fi
 	if has curl; then
-		curl -fsSL --connect-timeout 10 --retry 2 -o "${2:--}" "$1"
+		curl -fsSL "${curl_opts[@]}" -o "${2:--}" "$1"
 	elif has wget; then
-		wget -q --timeout=10 -O "${2:--}" "$1"
+		wget -q "${wget_opts[@]}" -O "${2:--}" "$1"
 	else
 		return 1
 	fi
@@ -319,22 +346,34 @@ find_release() {
 	target_version=$version
 }
 
+# sha256_of FILE: prints the SHA-256 of FILE, or fails when no tool can compute it.
+sha256_of() {
+	if has sha256sum; then
+		sha256sum "$1" | awk '{ print $1 }'
+	elif has shasum; then
+		shasum -a 256 "$1" | awk '{ print $1 }'
+	elif has openssl; then
+		# OpenSSL 3 prints "SHA2-256(file)= hex", older ones "SHA256(file)= hex".
+		openssl dgst -sha256 "$1" | awk '{ print $NF }'
+	else
+		return 1
+	fi
+}
+
 # Downloads, verifies and unpacks the release archive into the work directory.
 download_release() {
-	local archive=$work/$release_archive expected actual=""
+	local archive=$work/$release_archive expected actual
 	info "Downloading $release_archive"
 	fetch "$DOWNLOAD_URL/$release_tag/$release_archive" "$archive" || die "downloading $release_archive failed"
 	fetch "$DOWNLOAD_URL/$release_tag/$release_archive.sha256" "$archive.sha256" ||
 		die "downloading the checksum of $release_archive failed"
-	expected=$(awk '{ print $1; exit }' "$archive.sha256")
-	if has sha256sum; then
-		actual=$(sha256sum "$archive" | awk '{ print $1 }')
-	elif has shasum; then
-		actual=$(shasum -a 256 "$archive" | awk '{ print $1 }')
+	expected=$(awk '{ print $1; exit }' "$archive.sha256" | tr 'A-F' 'a-f')
+	if ! printf '%s' "$expected" | grep -Eqx '[0-9a-f]{64}'; then
+		die "the checksum file of $release_archive does not hold a SHA-256 digest; the download is not verified"
 	fi
-	if [ -z "$actual" ]; then
-		warn "neither sha256sum nor shasum is installed; the download is not verified"
-	elif [ "$actual" != "$expected" ]; then
+	actual=$(sha256_of "$archive") ||
+		die "verifying $release_archive needs sha256sum, shasum or openssl; install one of them and run again"
+	if [ "$actual" != "$expected" ]; then
 		die "the checksum of $release_archive does not match; the download is damaged or was altered"
 	fi
 	tar -xzf "$archive" -C "$work"
@@ -571,6 +610,16 @@ install_file() {
 
 sed_escape() { printf '%s' "$1" | sed 's/[&|\\]/\\&/g'; }
 
+# Where the fish completions go: into the user's config for a user install,
+# into the prefix otherwise. The manifest check below needs the same path.
+fish_completions_dir() {
+	if [ "$system" = 0 ] && [ "$prefix" = "$HOME/.local" ]; then
+		printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
+	else
+		printf '%s\n' "$share_dir/fish/vendor_completions.d"
+	fi
+}
+
 install_icons() {
 	local svg=$src/dist/$APP_ID.svg icons=$share_dir/icons/hicolor size
 	install_file 644 "$svg" "$icons/scalable/apps/$APP_ID.svg"
@@ -597,11 +646,7 @@ install_completions() {
 		install_file 644 "$work/_tron" "$share_dir/zsh/site-functions/_tron"
 	fi
 	if has fish; then
-		if [ "$system" = 0 ] && [ "$prefix" = "$HOME/.local" ]; then
-			fish_dir=${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions
-		else
-			fish_dir=$share_dir/fish/vendor_completions.d
-		fi
+		fish_dir=$(fish_completions_dir)
 		"$binary" completions fish >"$work/tron.fish"
 		install_file 644 "$work/tron.fish" "$fish_dir/tron.fish"
 	fi
@@ -811,15 +856,59 @@ do_install() {
 	path_hints
 }
 
+# managed_path PATH: whether PATH is a location this script installs tron into.
+# The manifest is only trusted for these paths.
+managed_path() {
+	local path=$1 fish_dir
+	fish_dir=$(fish_completions_dir)
+	case $path in
+	"$bin_dir/tron" | "$manifest_file" | "$fish_dir/tron.fish") return 0 ;;
+	esac
+	if [ "$os" = macos ] && [ -n "$app_dir" ] && [ "$path" = "$app_dir/tron.app" ]; then
+		return 0
+	fi
+	case $path in
+	"$share_dir/applications/$APP_ID.desktop" | \
+		"$share_dir/metainfo/$APP_ID.metainfo.xml" | \
+		"$share_dir/bash-completion/completions/tron" | \
+		"$share_dir/zsh/site-functions/_tron" | \
+		"$share_dir/fish/vendor_completions.d/tron.fish")
+		return 0
+		;;
+	"$share_dir"/icons/hicolor/*/"$APP_ID".svg | "$share_dir"/icons/hicolor/*/"$APP_ID".png) return 0 ;;
+	esac
+	return 1
+}
+
+# check_managed PATH: dies unless PATH is absolute, free of .. and inside the
+# locations this script writes, so a poisoned manifest cannot delete files
+# elsewhere.
+check_managed() {
+	case $1 in
+	/*) ;;
+	*) die "$manifest_file names \"$1\", which is not an absolute path; refusing to remove it." ;;
+	esac
+	case $1 in
+	*..*) die "$manifest_file names \"$1\", which contains ..; refusing to remove it." ;;
+	esac
+	managed_path "$1" ||
+		die "$manifest_file names \"$1\", which this script never installs; refusing to remove it. Fix or delete that line."
+}
+
 do_uninstall() {
 	local path removed=0
 	if [ ! -f "$manifest_file" ]; then
 		die "no installation found in $prefix (looked for $manifest_file). Use --system or --prefix for other locations."
 	fi
+	# Check every entry before the first removal, so a tampered manifest cannot
+	# delete anything this script never installed.
+	while IFS= read -r path || [ -n "$path" ]; do
+		if [ -n "$path" ]; then check_managed "$path"; fi
+	done <"$manifest_file"
 	ask "Remove tron from $prefix? Your configuration in ~/.config/tron stays." y || { info "Nothing changed."; exit 0; }
-	while IFS= read -r path; do
+	while IFS= read -r path || [ -n "$path" ]; do
 		case $path in
-		"") ;;
+		"") continue ;;
 		*/tron.app) run rm -rf "$path" ;;
 		*) run rm -f "$path" ;;
 		esac

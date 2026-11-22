@@ -478,13 +478,17 @@ impl App {
             }
             Command::Activate => match self.tab {
                 Tab::Themes => {
-                    if let Some(theme) = self.catalog.themes.get(self.themes.selected) {
+                    if let Some(theme) = self.shown(Tab::Themes).and_then(|index| self.catalog.themes.get(index)) {
                         self.choices.theme = theme.name.clone();
                     }
                 }
-                Tab::Shaders => self.toggle_shader(),
+                Tab::Shaders => {
+                    if let Some(index) = self.shown(Tab::Shaders) {
+                        self.toggle_shader(index);
+                    }
+                }
                 Tab::Credits => {
-                    if let Some(credit) = self.credits.get(self.credits_picker.selected) {
+                    if let Some(credit) = self.shown(Tab::Credits).and_then(|index| self.credits.get(index)) {
                         open_link(&self.catalog.config.links.open_command, &credit.source_url);
                     }
                 }
@@ -517,7 +521,7 @@ impl App {
             Command::Toggle(index) => {
                 if self.tab == Tab::Shaders {
                     self.shaders.set(index, self.catalog.shaders.len());
-                    self.toggle_shader();
+                    self.toggle_shader(index);
                 }
             }
             Command::Reorder(delta) => {
@@ -563,6 +567,33 @@ impl App {
             ),
             _ => Vec::new(),
         }
+    }
+
+    /// The rows on `tab`'s list that the search lets through. Moves the selection onto
+    /// the first one when the search hides it, so the list shows what Enter acts on.
+    fn visible_rows(&mut self, tab: Tab) -> Vec<usize> {
+        let visible = self.visible(tab);
+        let selected = match tab {
+            Tab::Themes => Some(&mut self.themes),
+            Tab::Shaders => Some(&mut self.shaders),
+            Tab::Credits => Some(&mut self.credits_picker),
+            _ => None,
+        };
+        if let Some(picker) = selected {
+            picker.move_within(0, &visible);
+        }
+        visible
+    }
+
+    /// The index Enter acts on for `tab`: the selection, when the list shows it.
+    fn shown(&self, tab: Tab) -> Option<usize> {
+        let selected = match tab {
+            Tab::Themes => self.themes.selected,
+            Tab::Shaders => self.shaders.selected,
+            Tab::Credits => self.credits_picker.selected,
+            _ => return None,
+        };
+        self.visible(tab).contains(&selected).then_some(selected)
     }
 
     /// Keeps the selection on a match while the search changes.
@@ -625,9 +656,9 @@ impl App {
         rest
     }
 
-    /// Checks or unchecks the highlighted shader. Checked shaders run in the order they were checked.
-    fn toggle_shader(&mut self) {
-        if let Some(shader) = self.catalog.shaders.get(self.shaders.selected) {
+    /// Checks or unchecks shader `index`. Checked shaders run in the order they were checked.
+    fn toggle_shader(&mut self, index: usize) {
+        if let Some(shader) = self.catalog.shaders.get(index) {
             match self.choices.shaders.iter().position(|file| *file == shader.file) {
                 Some(index) => {
                     self.choices.shaders.remove(index);
@@ -780,6 +811,12 @@ impl App {
     /// and come back for the goodbye animation.
     fn wants_startup_shader(&self) -> bool {
         self.tab != Tab::Shaders || self.exit.is_some()
+    }
+
+    /// Input during the goodbye animation is dropped, but the events still have to be
+    /// read: a pending one would make `poll` return at once and spin a core.
+    fn accepts_input(&self) -> bool {
+        self.exit.is_none()
     }
 
     fn exit_done(&self, now: Instant) -> bool {
@@ -1306,6 +1343,7 @@ impl App {
     fn draw_themes(&mut self, frame: &mut Frame, area: Rect) {
         let [list_area, _, preview_area] =
             Layout::horizontal([Constraint::Length(28), Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+        let visible = self.visible_rows(Tab::Themes);
         let items: Vec<Item> = self
             .catalog
             .themes
@@ -1321,7 +1359,6 @@ impl App {
             Some(Target::Item(index)) => Some(index),
             _ => None,
         };
-        let visible = self.visible(Tab::Themes);
         let list_area = self.draw_search(frame, list_area, visible.len(), items.len());
         let rows = pickers::draw_filtered(frame, list_area, &items, &visible, &mut self.themes, hover, true);
         self.hits.extend(rows.into_iter().map(|(rect, index)| (rect, Target::Item(index))));
@@ -1333,6 +1370,7 @@ impl App {
     fn draw_credits(&mut self, frame: &mut Frame, area: Rect) {
         let [list_area, _, details_area] =
             Layout::horizontal([Constraint::Length(36), Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+        let visible = self.visible_rows(Tab::Credits);
         let items: Vec<Item> = self
             .credits
             .iter()
@@ -1342,7 +1380,6 @@ impl App {
             Some(Target::Item(index)) => Some(index),
             _ => None,
         };
-        let visible = self.visible(Tab::Credits);
         let list_area = self.draw_search(frame, list_area, visible.len(), items.len());
         let rows = pickers::draw_filtered(frame, list_area, &items, &visible, &mut self.credits_picker, hover, true);
         self.hits.extend(rows.into_iter().map(|(rect, index)| (rect, Target::Item(index))));
@@ -1354,6 +1391,7 @@ impl App {
     fn draw_shaders(&mut self, frame: &mut Frame, area: Rect) {
         let [list_area, _, details_area] =
             Layout::horizontal([Constraint::Length(36), Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+        let visible = self.visible_rows(Tab::Shaders);
         let items: Vec<Item> = self
             .catalog
             .shaders
@@ -1373,7 +1411,6 @@ impl App {
             Some(Target::Item(index) | Target::Toggle(index)) => Some(index),
             _ => None,
         };
-        let visible = self.visible(Tab::Shaders);
         let list_area = self.draw_search(frame, list_area, visible.len(), items.len());
         let rows = pickers::draw_filtered(frame, list_area, &items, &visible, &mut self.shaders, hover, true);
         for (rect, index) in rows {
@@ -1599,7 +1636,7 @@ pub fn run<W: Write>(
         }
         let content = Areas::new(terminal.get_frame().area()).content;
         match event::poll(FRAME) {
-            Ok(true) if app.exit.is_none() => {
+            Ok(true) if app.accepts_input() => {
                 let command = match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
                     Event::Mouse(mouse) => match mouse.kind {
@@ -1635,6 +1672,11 @@ pub fn run<W: Write>(
                 if std::mem::take(&mut app.commit_pending) {
                     link.commit();
                 }
+            }
+            // Leaving: take the event anyway, or it stays pending and every poll
+            // returns at once, spinning a core until the goodbye animation ends.
+            Ok(true) => {
+                event::read()?;
             }
             Ok(_) => {}
             Err(error) => break Err(error),
@@ -1830,6 +1872,40 @@ mod tests {
     }
 
     #[test]
+    fn enter_acts_on_the_row_the_search_shows() {
+        let mut app = App::new(true, catalog(), &[]);
+        app.apply(Command::Select(Tab::Themes), Rect::default());
+        app.apply(Command::Move(1), Rect::default());
+        let before = app.choices.clone();
+        assert_ne!(app.catalog.themes[app.themes.selected].name, before.theme, "a hidden theme would change it");
+
+        // No row matches: the list shows none and Enter chooses nothing.
+        app.apply(Command::SearchOpen, Rect::default());
+        for c in "zzzz".chars() {
+            app.apply(Command::SearchType(c), Rect::default());
+        }
+        assert!(app.visible(Tab::Themes).is_empty());
+        let text = screen(&mut app);
+        assert!(text.contains("No matches"), "{text}");
+        app.apply(Command::Activate, Rect::default());
+        assert_eq!(app.choices, before, "an entry the search hides is not activated");
+
+        // A selection the search hides moves onto a match, and Enter takes that one.
+        app.apply(Command::SearchClear, Rect::default());
+        app.apply(Command::SearchOpen, Rect::default());
+        for c in "drac".chars() {
+            app.apply(Command::SearchType(c), Rect::default());
+        }
+        let shown = app.visible(Tab::Themes)[0];
+        app.themes.selected = app.catalog.themes.len() - 1;
+        assert_ne!(app.themes.selected, shown);
+        screen(&mut app);
+        assert_eq!(app.themes.selected, shown, "the list moves the selection onto a shown row");
+        app.apply(Command::Activate, Rect::default());
+        assert_eq!(app.choices.theme, app.catalog.themes[shown].name);
+    }
+
+    #[test]
     fn choices_can_be_undone_and_redone() {
         let mut app = App::new(true, catalog(), &[]);
         let original = app.choices.clone();
@@ -1965,7 +2041,9 @@ mod tests {
         let mut app = app();
         let now = app.started + INTRO;
         assert_eq!(app.shader_params(now)[1], GRID);
+        assert!(app.accepts_input());
         app.start_exit();
+        assert!(!app.accepts_input(), "input is dropped while leaving");
         let end = app.exit.unwrap() + EXIT;
         assert!(app.exit_done(end));
         assert_eq!(app.shader_params(end)[0], 0.0);

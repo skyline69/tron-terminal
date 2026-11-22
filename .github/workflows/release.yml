@@ -48,7 +48,7 @@ jobs:
       build: ${{ steps.version.outputs.build }}
       publish: ${{ steps.version.outputs.publish }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Read the version
@@ -97,10 +97,11 @@ jobs:
           dnf -y install epel-release
           dnf -y install gcc git tar zstd file pkgconf-pkg-config fontconfig-devel libxkbcommon-devel wayland-devel \
             libxkbcommon-x11 libXfixes libXi patchelf
-      - uses: actions/checkout@v7.0.1
-      # dtolnay/rust-toolchain publishes no releases; the `stable` ref installs the latest stable Rust.
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # dtolnay/rust-toolchain publishes no releases; the SHA is the commit the `stable` branch
+      # points at. It still installs the latest stable Rust, so this pins the action, not Rust.
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: linux-${{ matrix.arch }}
       - name: Build
@@ -138,13 +139,26 @@ jobs:
             patchelf --set-rpath '$ORIGIN' "$appdir/usr/lib/$lib"
           done
           patchelf --set-rpath '$ORIGIN/../lib' "$appdir/usr/bin/tron"
-          # appimagetool is only published as its rolling "continuous" build.
-          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
+          # appimagetool from the versioned 1.9.1 release, pinned by digest so a
+          # replaced asset fails the build instead of being executed. Bumping the
+          # version means recomputing both hashes deliberately: sha256sum of that
+          # release's appimagetool-$ARCH.AppImage, cross-checked with the digest
+          # GitHub records for the asset.
+          case "$ARCH" in
+            x86_64) appimagetool_sha256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0 ;;
+            aarch64) appimagetool_sha256=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158 ;;
+            *)
+              echo "::error::No pinned appimagetool digest for $ARCH."
+              exit 1
+              ;;
+          esac
+          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-$ARCH.AppImage"
+          echo "$appimagetool_sha256  appimagetool" | sha256sum -c -
           chmod +x appimagetool
           APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool \
             -u "gh-releases-zsync|skyline69|tron-terminal|latest|tron-*-$ARCH.AppImage.zsync" \
             "$appdir" "tron-$VERSION-$ARCH.AppImage"
-      - uses: actions/upload-artifact@v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-linux-${{ matrix.arch }}
           path: |
@@ -169,8 +183,8 @@ jobs:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
       options: --privileged
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6.8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
         with:
           manifest-path: dist/flatpak/dev.tron.Terminal.yml
           # The action only adds the architecture to the name for several in one job.
@@ -195,11 +209,11 @@ jobs:
       ARCH: ${{ matrix.arch }}
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
       - name: Build
@@ -216,14 +230,14 @@ jobs:
           shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
           tar -cf - "$dir" | zstd -q -19 --long=25 -T0 -o "$dir.tar.zst"
           cp "target/$TARGET/release/tron" "bin/tron-$ARCH"
-      - uses: actions/upload-artifact@v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-macos-${{ matrix.arch }}
           path: |
             tron-*.tar.gz*
             tron-*.tar.zst
           if-no-files-found: error
-      - uses: actions/upload-artifact@v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-binary-${{ matrix.arch }}
           path: bin/tron-${{ matrix.arch }}
@@ -235,8 +249,8 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: actions/download-artifact@v8.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: macos-binary-*
           path: bin
@@ -288,7 +302,7 @@ jobs:
             -D app=tron.app -D background=background.tiff -D icon=tron.icns \
             tron "tron-$VERSION-macos.dmg"
           shasum -a 256 "tron-$VERSION-macos.dmg" > "tron-$VERSION-macos.dmg.sha256"
-      - uses: actions/upload-artifact@v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-dmg
           path: tron-*.dmg*
@@ -300,29 +314,38 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Needed by actions/attest-build-provenance: mint the OIDC token, store the
+      # attestation and its artifact storage record.
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Generate release notes
-        uses: orhun/git-cliff-action@v4.9.1
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
           config: cliff.toml
           args: --unreleased --tag ${{ needs.version.outputs.tag }} --strip header
         env:
           OUTPUT: RELEASE_NOTES.md
       - name: Generate the changelog
-        uses: orhun/git-cliff-action@v4.9.1
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
           config: cliff.toml
           args: --tag ${{ needs.version.outputs.tag }}
         env:
           OUTPUT: CHANGELOG.md
-      - uses: actions/download-artifact@v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
           path: artifacts
           merge-multiple: true
+      - name: Attest the release artifacts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: artifacts/*
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -341,7 +364,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Update the cask in skyline69/homebrew-tap
         env:
           GH_TOKEN: ${{ github.token }}
@@ -358,7 +381,10 @@ jobs:
             echo "::error::No checksum for tron-$VERSION-macos.dmg in $TAG."
             exit 1
           fi
-          git clone --depth 1 "https://x-access-token:$TAP_TOKEN@github.com/skyline69/homebrew-tap.git" tap
+          # The credential goes into an HTTPS header rather than the clone URL, so
+          # a failed clone or push cannot print the token in the public log.
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TAP_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$auth" clone --depth 1 https://github.com/skyline69/homebrew-tap.git tap
           sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$sha256/g" dist/homebrew/tron.rb > tap/Casks/tron.rb
           cd tap
           git config user.name "github-actions[bot]"
@@ -369,4 +395,4 @@ jobs:
             exit 0
           fi
           git commit -m "tron $VERSION"
-          git push origin HEAD
+          git -c http.extraheader="$auth" push origin HEAD

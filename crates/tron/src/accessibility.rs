@@ -102,11 +102,12 @@ impl Accessibility {
             return None;
         }
         let initial = self.flags.initial.swap(false, Ordering::AcqRel);
-        let rows: Vec<RowText> = snapshot.rows.iter().map(RowText::new).collect();
         let cursor = snapshot.cursor();
+        // Hash the cells rather than their text: this runs on every frame, and
+        // building a string per row here allocated for rows nobody reads.
         let mut hasher = DefaultHasher::new();
-        for row in &rows {
-            row.text.hash(&mut hasher);
+        for row in &snapshot.rows {
+            row.hash_content(&mut hasher);
         }
         (cursor.row, cursor.col, cursor.visible).hash(&mut hasher);
         let hash = hasher.finish();
@@ -117,6 +118,8 @@ impl Accessibility {
         if !initial && let Some(due) = self.last_sent.map(|at| at + UPDATE_INTERVAL).filter(|&due| due > now) {
             return Some(due);
         }
+        // Only now, past the change and rate checks, is the text built.
+        let rows: Vec<RowText> = snapshot.rows.iter().map(RowText::new).collect();
         self.last_hash = hash;
         self.last_sent = Some(now);
         self.adapter.update_if_active(|| tree(&rows, snapshot, layout));

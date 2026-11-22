@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, bail};
@@ -100,18 +100,45 @@ fn locate_in(exe: &Path, candidates: &[PathBuf]) -> Option<Layout> {
         let manifest = share_dir.join(MANIFEST);
         let text = fs::read_to_string(&manifest).ok()?;
         let entries: Vec<PathBuf> = text.lines().filter(|line| !line.is_empty()).map(PathBuf::from).collect();
+        // A manifest is a plain file that an unprivileged user may have
+        // written, and it decides where a root install puts the binary. Take
+        // only absolute paths without "..", and derive every directory from
+        // where the manifest sits rather than from what it names.
+        if !entries.iter().all(|entry| manifest_entry_ok(entry)) {
+            log::warn!("ignoring {}: it names a path tron never installs", manifest.display());
+            return None;
+        }
+        let prefix = share_dir.parent()?;
+        let bin_dir = prefix.join("bin");
+        let binary = bin_dir.join("tron");
+        if !entries.contains(&binary) {
+            return None;
+        }
         // The binary, or on macOS the PREFIX/bin/tron link into tron.app.
         let lists_exe =
             entries.iter().any(|entry| entry == exe || fs::canonicalize(entry).is_ok_and(|resolved| resolved == exe));
         if !lists_exe {
             return None;
         }
-        let bin = entries.iter().find(|entry| {
-            entry.file_name() == Some(OsStr::new("tron"))
-                && entry.parent().and_then(Path::file_name) == Some(OsStr::new("bin"))
-        })?;
-        let app = entries.iter().find(|entry| entry.file_name() == Some(OsStr::new("tron.app"))).cloned();
-        Some(Layout { bin_dir: bin.parent()?.to_owned(), share_dir: share_dir.clone(), app, manifest, entries })
+        let app = entries
+            .iter()
+            .find(|entry| entry.file_name() == Some(OsStr::new("tron.app")) && app_dir_ok(entry.parent(), prefix))
+            .cloned();
+        Some(Layout { bin_dir, share_dir: share_dir.clone(), app, manifest, entries })
+    })
+}
+
+/// Whether a manifest line is a plain absolute path.
+fn manifest_entry_ok(entry: &Path) -> bool {
+    entry.is_absolute() && !entry.components().any(|component| component == Component::ParentDir)
+}
+
+/// An app bundle may sit beside the prefix or in an Applications folder.
+fn app_dir_ok(dir: Option<&Path>, prefix: &Path) -> bool {
+    dir.is_some_and(|dir| {
+        dir == prefix
+            || dir == Path::new("/Applications")
+            || home().is_some_and(|home| dir == home.join("Applications"))
     })
 }
 
@@ -190,19 +217,15 @@ fn stage(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
     file.set_permissions(fs::Permissions::from_mode(mode))
 }
 
-/// Whether `program` is on `PATH`.
-fn has(program: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|dir| {
-            fs::metadata(dir.join(program))
-                .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        })
-    })
-}
-
 /// Runs a command quietly; failures are only logged, as for `|| true` in install.sh.
 fn run_quietly(program: &str, args: &[&OsStr]) {
-    match Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
+    // Only a program from a system directory: this runs as root during an
+    // update, so `PATH` must not decide what is executed.
+    let Some(tool) = crate::tool::system_tool(program) else {
+        log::debug!("{program} is not installed in a system directory");
+        return;
+    };
+    match Command::new(tool).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
         Ok(status) if !status.success() => log::debug!("{program} failed: {status}"),
         Err(error) => log::debug!("cannot run {program}: {error}"),
         Ok(_) => {}
@@ -427,16 +450,16 @@ fn render_icon(svg: &Path, size: u32, dest: &Path) -> bool {
         return false;
     }
     let size_text = size.to_string();
-    let status = if has("rsvg-convert") {
-        Command::new("rsvg-convert")
+    let status = if let Some(rsvg) = crate::tool::system_tool("rsvg-convert") {
+        Command::new(rsvg)
             .args(["-w", &size_text, "-h", &size_text])
             .arg(svg)
             .arg("-o")
             .arg(&temporary)
             .stderr(Stdio::null())
             .status()
-    } else if has("magick") {
-        Command::new("magick")
+    } else if let Some(magick) = crate::tool::system_tool("magick") {
+        Command::new(magick)
             .args(["-background", "none", "-density", "384"])
             .arg(svg)
             .args(["-resize", &format!("{size}x{size}")])
@@ -458,10 +481,10 @@ fn refresh_linux_caches(share: &Path) {
     let applications = share.join("applications");
     let icons = share.join("icons/hicolor");
     std::thread::scope(|scope| {
-        if has("update-desktop-database") {
+        if crate::tool::system_tool("update-desktop-database").is_some() {
             scope.spawn(|| run_quietly("update-desktop-database", &[OsStr::new("-q"), applications.as_os_str()]));
         }
-        if has("gtk-update-icon-cache") {
+        if crate::tool::system_tool("gtk-update-icon-cache").is_some() {
             scope.spawn(|| {
                 run_quietly(
                     "gtk-update-icon-cache",
@@ -469,7 +492,9 @@ fn refresh_linux_caches(share: &Path) {
                 )
             });
         }
-        if let Some(kde) = ["kbuildsycoca6", "kbuildsycoca5"].into_iter().find(|program| has(program)) {
+        if let Some(kde) =
+            ["kbuildsycoca6", "kbuildsycoca5"].into_iter().find(|program| crate::tool::system_tool(program).is_some())
+        {
             scope.spawn(move || run_quietly(kde, &[]));
         }
     });
@@ -493,8 +518,8 @@ fn update_app(app: &Path, version: &str, binary_changed: bool) -> anyhow::Result
     if !binary_changed && !plist_changed {
         return Ok(());
     }
-    if has("codesign") {
-        let status = Command::new("codesign")
+    if let Some(codesign) = crate::tool::system_tool("codesign") {
+        let status = Command::new(codesign)
             .args(["--force", "--sign", "-"])
             .arg(app)
             .stdout(Stdio::null())
@@ -537,10 +562,10 @@ fn install_completions(
 ) -> anyhow::Result<()> {
     let share = &layout.share_dir;
     let mut targets = vec![("bash", share.join("bash-completion/completions/tron"))];
-    if has("zsh") {
+    if crate::tool::system_tool("zsh").is_some() {
         targets.push(("zsh", share.join("zsh/site-functions/_tron")));
     }
-    if has("fish") {
+    if crate::tool::system_tool("fish").is_some() {
         let dir = match (layout.is_user(), std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from), home()) {
             (true, Some(config), _) if config.is_absolute() => config.join("fish/completions"),
             (true, _, Some(home)) => home.join(".config/fish/completions"),
@@ -638,7 +663,7 @@ mod tests {
         assert!(layout.writable());
 
         // macOS: the manifest lists tron.app and a link to its binary.
-        let app = dir.join("Applications/tron.app");
+        let app = dir.join("tron.app");
         let app_binary = app.join("Contents/MacOS/tron");
         fs::create_dir_all(app_binary.parent().unwrap()).unwrap();
         fs::write(&app_binary, "").unwrap();
@@ -648,6 +673,22 @@ mod tests {
         let layout = locate_in(&app_binary, &[share]).unwrap();
         assert_eq!(layout.app.as_deref(), Some(app.as_path()));
         assert_eq!(layout.binary(), app_binary);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_manifest_naming_another_bin_directory() {
+        let dir = temp_dir("poison");
+        let share = dir.join("share");
+        fs::create_dir_all(share.join("tron")).unwrap();
+        let evil = dir.join("evil/bin/tron");
+        fs::create_dir_all(evil.parent().unwrap()).unwrap();
+        fs::write(&evil, "").unwrap();
+        let manifest = share.join(MANIFEST);
+        fs::write(&manifest, format!("{}\n{}\n", evil.display(), manifest.display())).unwrap();
+        assert!(locate_in(&evil, std::slice::from_ref(&share)).is_none(), "a foreign bin directory is ignored");
+        fs::write(&manifest, format!("{}/../../bin/tron\n", share.display())).unwrap();
+        assert!(locate_in(&dir.join("bin/tron"), std::slice::from_ref(&share)).is_none(), ".. is refused");
         fs::remove_dir_all(&dir).unwrap();
     }
 

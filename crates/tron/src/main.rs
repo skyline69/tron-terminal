@@ -12,6 +12,7 @@ mod menu;
 mod mouse;
 mod panel;
 mod terminfo;
+mod tool;
 mod update;
 
 use std::collections::{HashMap, VecDeque};
@@ -85,9 +86,12 @@ const INBOX_LIMIT: usize = 1 << 20;
 /// Most bytes parsed while holding the terminal lock, so a frame never waits
 /// long for its snapshot.
 const PARSE_SLICE: usize = 64 << 10;
-/// Link schemes opened on Ctrl+click.
-const LINK_SCHEMES: [&str; 9] =
-    ["http://", "https://", "file://", "mailto:", "ftp://", "sftp://", "ssh://", "git://", "gemini://"];
+/// Most messages queued for the pty writer before the parser waits.
+const PTY_INPUT_QUEUE: usize = 1024;
+/// Link schemes opened on Ctrl+click. `file:` is deliberately absent: a printed
+/// file must not be able to make the terminal open a local path.
+const LINK_SCHEMES: [&str; 8] =
+    ["http://", "https://", "mailto:", "ftp://", "sftp://", "ssh://", "git://", "gemini://"];
 
 use cli::Cli;
 
@@ -100,12 +104,13 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some(cli::Command::StartupScreen { shell }) => tron_startup::run(shell),
-        Some(cli::Command::Update { check, to, force, archive }) => {
+        Some(cli::Command::Update { check, to, force, archive, sha256 }) => {
             return update::run(update::UpdateOptions {
                 check: *check,
                 to: to.clone(),
                 force: *force,
                 archive: archive.clone(),
+                sha256: sha256.clone(),
             });
         }
         // Tab commands such as `tron settings` open the startup screen below.
@@ -234,7 +239,7 @@ enum AppRequest {
 struct Suspended {
     pty: Pty,
     shared: Arc<Shared>,
-    input: mpsc::Sender<Vec<u8>>,
+    input: mpsc::SyncSender<Vec<u8>>,
 }
 
 /// Where a window's terminal is and how its cells are laid out, for Look Up.
@@ -348,7 +353,13 @@ impl Settings {
             bidi: config.font.bidi,
             padding: (config.window.padding_x, config.window.padding_y),
             font_size: config.font.size,
-            scroll_multiplier: config.scrollback.multiplier,
+            // A wheel delta is multiplied by this: `inf` would scroll forever
+            // and `nan` would poison the accumulator.
+            scroll_multiplier: if config.scrollback.multiplier.is_finite() {
+                config.scrollback.multiplier.clamp(0.0, 100.0)
+            } else {
+                3.0
+            },
             smooth_scroll: config.scrollback.smooth,
             scroll_settle: Duration::from_millis(config.scrollback.smooth_ms),
             fade_edges: config.scrollback.fade_edges,
@@ -558,6 +569,9 @@ struct Session {
     clipboard: Clipboard,
     clipboard_requests: VecDeque<ClipboardTarget>,
     clipboard_pending: Option<(AsyncRequestSerial, ClipboardTarget)>,
+    /// When to give up on `clipboard_pending`: a clipboard owner may never
+    /// answer, and a read left pending would block every later one.
+    clipboard_deadline: Option<std::time::Instant>,
     accessibility: Option<accessibility::Accessibility>,
     drop: Option<DropState>,
     window: Arc<dyn Window>,
@@ -566,7 +580,7 @@ struct Session {
     font_family: String,
     shared: Arc<Shared>,
     pty: Pty,
-    input: mpsc::Sender<Vec<u8>>,
+    input: mpsc::SyncSender<Vec<u8>>,
     settings: Settings,
     /// Token accepted for startup screen commands, from this window's processes.
     startup_token: Option<String>,
@@ -824,6 +838,7 @@ impl App {
             clipboard: Clipboard::new(window.as_ref()),
             clipboard_requests: VecDeque::new(),
             clipboard_pending: None,
+            clipboard_deadline: None,
             accessibility,
             drop: None,
             frame_interval: frame_interval(window.as_ref(), self.max_fps),
@@ -1170,6 +1185,11 @@ impl ApplicationHandler for App {
             let output = session.shared.wake_pending.swap(false, Ordering::AcqRel);
             session.poll_shaders();
             session.update_harness();
+            // A window that stays open after its shell exited must still reap
+            // it, or the process stays a zombie for the life of the window.
+            if session.exited {
+                let _ = session.pty.try_wait();
+            }
             if session.shared.exited.load(Ordering::Acquire) && !session.exited {
                 if session.settings.close_on_exit {
                     closed.push(id);
@@ -1530,7 +1550,10 @@ impl App {
 
 impl Session {
     fn send(&self, bytes: Vec<u8>) {
-        let _ = self.input.send(bytes);
+        if let Err(mpsc::TrySendError::Full(bytes)) = self.input.try_send(bytes) {
+            // Only a child that has stopped reading its input can get here.
+            log::warn!("pty input queue is full; dropped {} bytes", bytes.len());
+        }
     }
 
     /// The terminal modes that change how keys are encoded.
@@ -2516,6 +2539,7 @@ impl Session {
         // A delayed clipboard result belongs to the terminal that requested it.
         self.clipboard_requests.clear();
         self.clipboard_pending = None;
+        self.clipboard_deadline = None;
         self.suspended = Some(Suspended {
             pty: std::mem::replace(&mut self.pty, pty),
             shared: std::mem::replace(&mut self.shared, shared),
@@ -2535,6 +2559,7 @@ impl Session {
         let Some(shell) = self.suspended.take() else { return };
         self.clipboard_requests.clear();
         self.clipboard_pending = None;
+        self.clipboard_deadline = None;
         self.pty = shell.pty;
         self.shared = shell.shared;
         self.input = shell.input;
@@ -2678,10 +2703,22 @@ impl Session {
 
     /// Keep reads ordered, including repeated paste keys and OSC 52 queries.
     fn start_clipboard_read(&mut self, event_loop: &dyn ActiveEventLoop) {
+        // The request may be dropped without ever delivering an event (the
+        // owner closed, the protocol stalled). Reserve the slot only so long.
+        if self.clipboard_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            self.clipboard_deadline = None;
+            if let Some((_, target)) = self.clipboard_pending.take() {
+                log::debug!("clipboard read timed out");
+                self.finish_clipboard_read(target, None);
+            }
+        }
         while self.clipboard_pending.is_none() {
             let Some(target) = self.clipboard_requests.pop_front() else { break };
             match clipboard::request_text(event_loop) {
-                Ok(serial) => self.clipboard_pending = Some((serial, target)),
+                Ok(serial) => {
+                    self.clipboard_pending = Some((serial, target));
+                    self.clipboard_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                }
                 Err(error) => {
                     log::debug!("clipboard read failed: {error}");
                     self.finish_clipboard_read(target, None);
@@ -2696,6 +2733,7 @@ impl Session {
             return false;
         }
         self.clipboard_pending = None;
+        self.clipboard_deadline = None;
         let text = value.try_as_string().map_err(|error| log::debug!("clipboard read failed: {error}")).ok();
         self.finish_clipboard_read(target, text);
         true
@@ -2926,6 +2964,14 @@ impl Session {
             self.mouse.last_cell = Some((row, col));
             return;
         }
+        if !pressed {
+            // The press was reported while a modifier was held that is gone by
+            // the release, so nothing is sent now. Forget the button anyway,
+            // or every later motion report claims it is still down.
+            if let Some(code) = mouse::button_code(button) {
+                self.mouse.buttons &= !(1 << code);
+            }
+        }
 
         // A right click or Control-click opens the context menu, for this window.
         #[cfg(target_os = "macos")]
@@ -3089,6 +3135,9 @@ impl Session {
         self.schedule_redraw();
     }
 
+    /// Most lines one wheel event may scroll.
+    const MAX_WHEEL_LINES: usize = 1000;
+
     /// Wheel input: reports to the application, sends arrows on the alternate
     /// screen, or scrolls history.
     fn scroll(&mut self, lines: f32) {
@@ -3111,6 +3160,10 @@ impl Session {
         self.scroll_accumulator += lines;
         let whole = self.scroll_accumulator.trunc();
         self.scroll_accumulator -= whole;
+        if !whole.is_finite() {
+            self.scroll_accumulator = 0.0;
+            return;
+        }
         if whole == 0.0 {
             return;
         }
@@ -3124,7 +3177,8 @@ impl Session {
             self.window.request_redraw();
             return;
         }
-        let count = whole.abs() as usize;
+        // Bounded so a large multiplier cannot ask for a gigabyte of arrow keys.
+        let count = (whole.abs() as usize).min(Self::MAX_WHEEL_LINES);
 
         if reporting {
             let (row, col) = self.renderer.cell_at(self.mouse.position.0, self.mouse.position.1);
@@ -3667,8 +3721,11 @@ impl Session {
     }
 }
 
-fn spawn_writer(mut writer: File, shared: Arc<Shared>) -> io::Result<mpsc::Sender<Vec<u8>>> {
-    let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+fn spawn_writer(mut writer: File, shared: Arc<Shared>) -> io::Result<mpsc::SyncSender<Vec<u8>>> {
+    // Bounded: a reply the parser produces while the child is not reading its
+    // input must not queue without limit. The parser blocks instead, which
+    // throttles the pty and leaves the event loop responsive.
+    let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(PTY_INPUT_QUEUE);
     thread::Builder::new().name("pty-writer".into()).spawn(move || {
         for bytes in receiver {
             shared.written_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -3707,7 +3764,7 @@ fn spawn_reader(
     mut reader: File,
     shared: Arc<Shared>,
     proxy: EventLoopProxy,
-    responses: mpsc::Sender<Vec<u8>>,
+    responses: mpsc::SyncSender<Vec<u8>>,
 ) -> io::Result<()> {
     let pipe = Arc::new(Pipe::default());
     let parser_pipe = pipe.clone();
@@ -3777,10 +3834,58 @@ fn spawn_reader(
 
 /// A press of `key` with no modifiers, as winit would report it, for bindings
 /// that send a key.
+/// The function keys winit knows, so `key:f13` and the like map to a real key.
+/// The name the configuration uses is `f1`…`f24`: above that there is no
+/// escape sequence a program would recognise.
+const FUNCTION_KEYS: [(NamedKey, KeyCode); 24] = [
+    (NamedKey::F1, KeyCode::F1),
+    (NamedKey::F2, KeyCode::F2),
+    (NamedKey::F3, KeyCode::F3),
+    (NamedKey::F4, KeyCode::F4),
+    (NamedKey::F5, KeyCode::F5),
+    (NamedKey::F6, KeyCode::F6),
+    (NamedKey::F7, KeyCode::F7),
+    (NamedKey::F8, KeyCode::F8),
+    (NamedKey::F9, KeyCode::F9),
+    (NamedKey::F10, KeyCode::F10),
+    (NamedKey::F11, KeyCode::F11),
+    (NamedKey::F12, KeyCode::F12),
+    (NamedKey::F13, KeyCode::F13),
+    (NamedKey::F14, KeyCode::F14),
+    (NamedKey::F15, KeyCode::F15),
+    (NamedKey::F16, KeyCode::F16),
+    (NamedKey::F17, KeyCode::F17),
+    (NamedKey::F18, KeyCode::F18),
+    (NamedKey::F19, KeyCode::F19),
+    (NamedKey::F20, KeyCode::F20),
+    (NamedKey::F21, KeyCode::F21),
+    (NamedKey::F22, KeyCode::F22),
+    (NamedKey::F23, KeyCode::F23),
+    (NamedKey::F24, KeyCode::F24),
+];
+
+/// The function key `name` is, such as `f13`.
+fn function_key(name: &str) -> Option<(NamedKey, KeyCode)> {
+    let number: usize = name.strip_prefix('f')?.parse().ok()?;
+    FUNCTION_KEYS.get(number.checked_sub(1)?).copied()
+}
+
 fn unmodified_key(key: &BindKey) -> Option<KeyEvent> {
     let (logical, physical, text) = match key {
         BindKey::Char(c) => (Key::Character(c.to_string().into()), KeyCode::Space, Some(c.to_string())),
         BindKey::Named(name) => {
+            if let Some((named, code)) = function_key(name) {
+                return Some(KeyEvent {
+                    physical_key: PhysicalKey::Code(code),
+                    logical_key: Key::Named(named),
+                    text: None,
+                    location: KeyLocation::Standard,
+                    state: ElementState::Pressed,
+                    repeat: false,
+                    text_with_all_modifiers: None,
+                    key_without_modifiers: Key::Named(named),
+                });
+            }
             let (named, code) = match name.as_str() {
                 "enter" => (NamedKey::Enter, KeyCode::Enter),
                 "tab" => (NamedKey::Tab, KeyCode::Tab),
@@ -3821,23 +3926,8 @@ fn bind_key(key: &Key) -> Option<BindKey> {
             chars.next().is_none().then(|| BindKey::Char(c.to_lowercase().next().unwrap_or(c)))
         }
         Key::Named(named) => {
-            let function = match named {
-                NamedKey::F1 => Some(1),
-                NamedKey::F2 => Some(2),
-                NamedKey::F3 => Some(3),
-                NamedKey::F4 => Some(4),
-                NamedKey::F5 => Some(5),
-                NamedKey::F6 => Some(6),
-                NamedKey::F7 => Some(7),
-                NamedKey::F8 => Some(8),
-                NamedKey::F9 => Some(9),
-                NamedKey::F10 => Some(10),
-                NamedKey::F11 => Some(11),
-                NamedKey::F12 => Some(12),
-                _ => None,
-            };
-            if let Some(n) = function {
-                return Some(BindKey::Named(format!("f{n}")));
+            if let Some(index) = FUNCTION_KEYS.iter().position(|(function, _)| function == named) {
+                return Some(BindKey::Named(format!("f{}", index + 1)));
             }
             let name = match named {
                 NamedKey::Enter => "enter",
@@ -4277,7 +4367,12 @@ mod tests {
         assert_eq!(encode("end", input::KeyModes::default()).as_deref(), Some(&b"\x1b[F"[..]));
         let app_cursor = input::KeyModes { app_cursor: true, ..input::KeyModes::default() };
         assert_eq!(encode("home", app_cursor).as_deref(), Some(&b"\x1bOH"[..]));
-        assert!(unmodified_key(&BindKey::Named("f13".into())).is_none());
+        assert!(unmodified_key(&BindKey::Named("f1".into())).is_some(), "every function key maps");
+        assert!(unmodified_key(&BindKey::Named("f24".into())).is_some());
+        assert!(unmodified_key(&BindKey::Named("f25".into())).is_none(), "no sequence above F24");
+        assert_eq!(encode("f13", input::KeyModes::default()).as_deref(), Some(&b"\x1b[25~"[..]));
+        assert!(unmodified_key(&BindKey::Named("f36".into())).is_none());
+        assert_eq!(bind_key(&Key::Named(NamedKey::F13)), Some(BindKey::Named("f13".into())));
     }
 
     #[test]

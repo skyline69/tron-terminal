@@ -2,19 +2,20 @@
 //! remembering the release the user chose not to hear about again. And
 //! `tron update`, which installs it.
 //!
-//! GitHub redirects the latest release page to the release's tag, so `curl`
-//! reads the version from the redirect without the API or a JSON parser.
+//! GitHub redirects the latest release page to the release's tag, so the
+//! version comes from the redirect without the API or a JSON parser.
 
 mod download;
 mod install;
 mod release;
 
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
+use ureq::ResponseExt;
 
 /// The version of this tron.
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -26,6 +27,8 @@ const INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// File in the data directory holding the last check and the skipped release.
 const STATE_FILE: &str = "update-check";
+/// Largest archive `--archive` will read into memory.
+const MAX_ARCHIVE: usize = 512 * 1024 * 1024;
 
 /// The page of the release `version` on GitHub.
 pub fn release_url(version: &str) -> String {
@@ -112,30 +115,29 @@ pub fn skip(data_dir: &Path, version: &str) {
 
 /// The version of the latest release, from where GitHub redirects its page.
 fn latest_release() -> Option<String> {
-    let output = Command::new("curl")
-        .args(["--silent", "--show-error", "--max-time", "10", "--output", "/dev/null"])
-        .args(["--write-out", "%{redirect_url}"])
-        .arg(format!("{REPOSITORY}/releases/latest"))
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            let version = version_from_url(String::from_utf8_lossy(&output.stdout).trim());
-            if version.is_none() {
-                log::debug!("update check: no release found");
-            }
-            version
-        }
-        Ok(output) => {
-            log::debug!("update check failed: {}", String::from_utf8_lossy(&output.stderr).trim());
-            None
-        }
+    // In-process rather than through `curl`: no PATH lookup, no subprocess
+    // output to parse, and the TLS stack is the same one that verifies the
+    // download.
+    let agent = ureq::Agent::config_builder()
+        .user_agent(concat!("tron/", env!("CARGO_PKG_VERSION")))
+        .timeout_connect(Some(Duration::from_secs(5)))
+        .timeout_recv_response(Some(Duration::from_secs(10)))
+        .timeout_global(Some(Duration::from_secs(15)))
+        .build()
+        .new_agent();
+    let url = format!("{REPOSITORY}/releases/latest");
+    let response = match agent.get(&url).call() {
+        Ok(response) => response,
         Err(error) => {
-            log::debug!("update check: cannot run curl: {error}");
-            None
+            log::debug!("update check failed: {error}");
+            return None;
         }
+    };
+    let version = version_from_url(response.get_uri().to_string().as_str());
+    if version.is_none() {
+        log::debug!("update check: no release found");
     }
+    version
 }
 
 /// `1.2.3` from a release URL ending in `/releases/tag/v1.2.3`.
@@ -168,6 +170,8 @@ pub struct UpdateOptions {
     pub force: bool,
     /// Install this release archive instead of downloading one.
     pub archive: Option<PathBuf>,
+    /// The SHA-256 the archive must have; needed when installing as root.
+    pub sha256: Option<String>,
 }
 
 /// Where releases are downloaded from: `.../latest/download/NAME` and
@@ -177,6 +181,17 @@ fn releases_url() -> String {
         .ok()
         .filter(|url| !url.is_empty())
         .map(|url| url.trim_end_matches('/').to_owned())
+        .filter(|url| {
+            // A plain-http mirror would make the checksum decorative, since the
+            // checksum comes from the same place.
+            if url.starts_with("https://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost")
+            {
+                true
+            } else {
+                log::warn!("TRON_UPDATE_URL is not HTTPS; using the default");
+                false
+            }
+        })
         .unwrap_or_else(|| format!("{REPOSITORY}/releases"))
 }
 
@@ -206,7 +221,7 @@ fn success(text: &str) {
 pub fn run(options: UpdateOptions) -> anyhow::Result<()> {
     let started = Instant::now();
     if let Some(archive) = &options.archive {
-        return install_archive(archive, started);
+        return install_archive(archive, options.sha256.as_deref(), started);
     }
     let platform = release::platform()?;
     let client = download::Client::new();
@@ -297,7 +312,7 @@ pub fn run(options: UpdateOptions) -> anyhow::Result<()> {
                     outcome.unchanged
                 ));
             } else {
-                install_as_root(&name, &data)?;
+                install_as_root(&name, &data, hash)?;
             }
         }
     }
@@ -313,9 +328,20 @@ pub fn run(options: UpdateOptions) -> anyhow::Result<()> {
 
 /// Installs a release archive from disk: run by sudo for a system install,
 /// or by hand for an archive downloaded elsewhere.
-fn install_archive(path: &Path, started: Instant) -> anyhow::Result<()> {
+///
+/// Installing as root refuses an archive whose SHA-256 nobody checked: the file
+/// could have been swapped between the download and the `sudo` that reads it.
+fn install_archive(path: &Path, sha256: Option<&str>, started: Instant) -> anyhow::Result<()> {
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let data = read_regular_file(path)?;
+    match sha256 {
+        Some(expected) => release::verify(&name, &data, expected)?,
+        None if rustix::process::geteuid().as_raw() == 0 => bail!(
+            "installing as root needs the archive's SHA-256: tron update --archive {} --sha256 <hex>",
+            path.display()
+        ),
+        None => {}
+    }
     let unpacked = release::unpack(&name, &data)?;
     let version = unpacked.version().with_context(|| format!("{name} does not name a tron version"))?;
     let install::Target::Script(layout) = install::locate()? else {
@@ -334,23 +360,74 @@ fn install_archive(path: &Path, started: Instant) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reads `path` through a single open handle, so swapping the path afterwards
+/// cannot change what is read, and refuses anything that is not a regular file.
+fn read_regular_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let metadata = file.metadata().with_context(|| format!("cannot stat {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    // The download path caps its own sizes; an archive named on the command
+    // line could be a device or a file that grows while it is read.
+    let limit = u64::try_from(MAX_ARCHIVE).unwrap_or(u64::MAX);
+    if metadata.len() > limit {
+        bail!("{} is larger than {} MB", path.display(), MAX_ARCHIVE >> 20);
+    }
+    let mut data = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(limit)
+        .read_to_end(&mut data)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    Ok(data)
+}
+
+/// A directory only this user can enter, under a name nobody can predict.
+fn private_temp_dir() -> anyhow::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let base = std::env::temp_dir();
+    let uid = rustix::process::getuid().as_raw();
+    for _ in 0..16 {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.subsec_nanos());
+        let dir = base.join(format!("tron-update-{uid}-{}-{nonce}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).with_context(|| format!("cannot create {}", dir.display())),
+        }
+    }
+    bail!("cannot create a private directory in {}", base.display())
+}
+
 /// Hands the verified archive to `sudo tron update --archive`, for an
 /// installation this user cannot write to, such as one in /usr/local.
-fn install_as_root(name: &str, data: &[u8]) -> anyhow::Result<()> {
+///
+/// The directory is private to this user and the archive is created with
+/// `create_new`, so another user of the machine can neither plant the file nor
+/// replace it before `sudo` reads it. `sudo` also re-checks the SHA-256, which
+/// this process took from the release's `SHA256SUMS`.
+fn install_as_root(name: &str, data: &[u8], sha256: &str) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("cannot find the running tron")?;
-    let dir = std::env::temp_dir().join(format!("tron-update-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let dir = private_temp_dir()?;
     let archive = dir.join(name);
     let result = (|| {
-        std::fs::File::create(&archive)
-            .and_then(|mut file| file.write_all(data))
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&archive)
             .with_context(|| format!("cannot write {}", archive.display()))?;
+        file.write_all(data).with_context(|| format!("cannot write {}", archive.display()))?;
+        file.sync_all().with_context(|| format!("cannot flush {}", archive.display()))?;
         info("Installing needs administrator rights; sudo will ask for your password.");
-        let status = Command::new("sudo")
+        let Some(sudo) = crate::tool::system_tool("sudo") else {
+            bail!("sudo is not installed in a system directory");
+        };
+        let status = Command::new(sudo)
             .arg("--")
             .arg(&exe)
             .args(["update", "--archive"])
             .arg(&archive)
+            .args(["--sha256", sha256])
             .status()
             .context("cannot run sudo")?;
         if !status.success() {

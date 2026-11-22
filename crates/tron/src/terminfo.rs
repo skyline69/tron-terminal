@@ -59,7 +59,13 @@ pub fn install(data_dir: &Path) -> Option<PathBuf> {
     }
     let source = dir.join("xterm-tron.terminfo");
     std::fs::write(&source, SOURCE).ok()?;
-    let output = Command::new("tic")
+    // Not through `PATH`: the first shell spawn should not run a program that
+    // happens to sit in the directory tron was started from.
+    let Some(tic) = crate::tool::system_tool("tic") else {
+        log::warn!("tic is not installed in a system directory; no terminfo entry");
+        return None;
+    };
+    let output = Command::new(tic)
         .arg("-x")
         .arg("-o")
         .arg(&dir)

@@ -71,6 +71,16 @@ impl Row {
         self.extras.clear();
     }
 
+    /// Feeds the visible content to a hasher without allocating, so a caller
+    /// can tell whether the row changed before building anything from it.
+    pub fn hash_content<H: std::hash::Hasher>(&self, hasher: &mut H) {
+        use std::hash::Hash;
+        self.cells.hash(hasher);
+        self.wrapped.hash(hasher);
+        self.line_size.hash(hasher);
+        self.extras.hash(hasher);
+    }
+
     /// Records a write to `start..end`: updates the occupied prefix and drops
     /// combining characters of overwritten cells.
     #[inline]

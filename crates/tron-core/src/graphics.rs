@@ -34,6 +34,12 @@ const DEFAULT_GAP_MS: u32 = 40;
 const MAX_GIF_FRAMES: usize = 1000;
 /// Deepest chain of placements positioned relative to each other.
 const MAX_RELATIVE_DEPTH: usize = 8;
+/// Most placements kept at once; each costs memory and a copy per frame.
+const MAX_PLACEMENTS: usize = 4096;
+/// Says once why a file or shared memory transfer was refused.
+static FILE_TRANSFER_NOTICE: std::sync::Once = std::sync::Once::new();
+/// Most images kept at once, however small each one is.
+const MAX_IMAGES: usize = 1024;
 /// Placements below this z-index are drawn under cell backgrounds.
 pub const BELOW_BACKGROUND_Z: i32 = i32::MIN / 2;
 /// Character that marks a cell showing part of an image (placeholder mode).
@@ -81,7 +87,12 @@ impl Image {
     }
 
     fn memory(&self) -> usize {
-        self.frames.iter().map(|f| f.rgba.len()).sum()
+        // Pixels are not the whole cost: the bookkeeping around a tiny image is
+        // larger than its 4-byte payload, so charge a fixed overhead too, or a
+        // stream of 1x1 images fits inside the quota forever.
+        const IMAGE_OVERHEAD: usize = 256;
+        const FRAME_OVERHEAD: usize = 64;
+        self.frames.iter().map(|f| f.rgba.len() + FRAME_OVERHEAD).sum::<usize>() + IMAGE_OVERHEAD
     }
 }
 
@@ -329,7 +340,7 @@ impl Graphics {
             generation: 0,
             memory: 0,
             quota: DEFAULT_QUOTA,
-            allow_files: true,
+            allow_files: false,
         }
     }
 
@@ -398,6 +409,12 @@ impl Graphics {
                 if control.action == b'q' {
                     return respond(&control, Ok(()));
                 }
+                // An image larger than the whole quota can never be kept: the
+                // quota spares the image being written, so it would stay above
+                // the limit for as long as the application wants.
+                if decoded.rgba.len() > self.quota {
+                    return respond(&control, Err("ENOSPC:image exceeds the image memory limit".into()));
+                }
                 let anonymous = control.id == 0;
                 let id = if anonymous { self.internal_id() } else { control.id };
                 self.store(id, decoded, anonymous);
@@ -451,15 +468,22 @@ impl Graphics {
         let raw = match control.medium {
             b'd' => BASE64.decode(data).map_err(|e| format!("EINVAL:bad base64: {e}"))?,
             b'f' | b't' | b's' => {
-                let name = BASE64.decode(data).map_err(|e| format!("EINVAL:bad base64: {e}"))?;
-                let name = String::from_utf8(name).map_err(|_| "EINVAL:path is not UTF-8".to_string())?;
-                if control.medium == b's' {
-                    read_shared_memory(&name, control)?
-                } else if self.allow_files {
-                    read_file(&name, control)?
-                } else {
+                // Shared memory is another way to name bytes outside this
+                // process, so it needs the same permission as a file path.
+                if !self.allow_files {
+                    // Once per process, not once per image: an application that
+                    // sends each frame this way would otherwise fill the log.
+                    FILE_TRANSFER_NOTICE.call_once(|| {
+                        log::info!(
+                            "an application sent an image by file or shared memory; \
+                             set [images] file_transfer = true in the config to allow it"
+                        );
+                    });
                     return Err("EPERM:file transmission is disabled".into());
                 }
+                let name = BASE64.decode(data).map_err(|e| format!("EINVAL:bad base64: {e}"))?;
+                let name = String::from_utf8(name).map_err(|_| "EINVAL:path is not UTF-8".to_string())?;
+                if control.medium == b's' { read_shared_memory(&name, control)? } else { read_file(&name, control)? }
             }
             _ => return Err("EINVAL:unknown transmission medium".into()),
         };
@@ -521,6 +545,10 @@ impl Graphics {
 
     /// Adds a decoded image (Sixel) at the cursor. Returns the cursor advance.
     pub fn add_image(&mut self, width: u32, height: u32, rgba: Vec<u8>, ctx: &Context) -> (u32, u32) {
+        if rgba.len() > self.quota {
+            log::debug!("sixel image of {} bytes exceeds the image memory limit", rgba.len());
+            return (1, 1);
+        }
         let id = self.internal_id();
         self.store(id, Decoded { width, height, rgba, opaque: false }, true);
         let advance = self.place(id, &Control::default(), ctx).ok().flatten();
@@ -539,6 +567,12 @@ impl Graphics {
         ctx: &Context,
     ) -> Result<(u32, u32), String> {
         let file = decode_file(data)?;
+        // One image that cannot fit in the whole budget would be retained above
+        // the limit forever by the keep-exemption in `enforce_quota`.
+        let decoded: usize = file.frames.iter().map(|(rgba, _)| rgba.len()).sum();
+        if decoded > self.quota {
+            return Err("ENOSPC:image exceeds the image memory limit".into());
+        }
         let (cell_w, cell_h) = (ctx.cell_width.max(1), ctx.cell_height.max(1));
         let screen_w = (ctx.cols as u32).saturating_mul(cell_w).max(1);
         let screen_h = (ctx.rows as u32).saturating_mul(cell_h).max(1);
@@ -589,7 +623,7 @@ impl Graphics {
 
     /// Evicts the oldest images, preferring ones without placements.
     fn enforce_quota(&mut self, keep: Option<u32>) {
-        while self.memory > self.quota {
+        while self.memory > self.quota || self.images.len() > MAX_IMAGES {
             let placed = |id: u32| self.placements.iter().any(|p| p.image_id == id);
             let victim = self
                 .images
@@ -671,6 +705,9 @@ impl Graphics {
                 self.remove_image(old);
             }
         }
+        if self.placements.len() >= MAX_PLACEMENTS {
+            return Err("ENOSPC:too many placements".into());
+        }
         self.placements.push(Placement {
             image_id: id,
             placement_id: control.placement,
@@ -694,7 +731,11 @@ impl Graphics {
             self.shift_descendants(key, line - old_line, col as i64 - old_col as i64);
         }
         self.generation += 1;
-        Ok((!control.no_cursor_move && !control.placeholder && parent.is_none()).then_some((cols, rows)))
+        // A client-chosen `r=`/`c=` must not become an unbounded cursor walk:
+        // the caller advances the cursor one linefeed per row.
+        let advance = (!control.no_cursor_move && !control.placeholder && parent.is_none())
+            .then_some((cols.min(ctx.cols.max(1) as u32), rows.min(ctx.rows.max(1) as u32)));
+        Ok(advance)
     }
 
     fn placement(&self, (image, placement): (u32, u32)) -> Option<&Placement> {
@@ -808,6 +849,17 @@ impl Graphics {
         let edit = control.rows as usize;
         let base = control.cols as usize;
         let count = image.frames.len();
+        let append = !(edit > 0 && edit <= count);
+        // A frame costs a full canvas, but a client can send one for ~40 bytes.
+        // Without these two limits a 10000x10000 image can be grown by 400 MB
+        // per command past every quota, since the edited image is exempt from
+        // eviction.
+        if append && image.frames.len() >= MAX_GIF_FRAMES {
+            return Err("ENOSPC:too many frames".into());
+        }
+        if append && self.memory.saturating_add(width * height * 4) > self.quota {
+            return Err("ENOSPC:animation frame exceeds the image memory limit".into());
+        }
         let mut canvas: Vec<u8> = if edit > 0 && edit <= count {
             image.frames[edit - 1].rgba.to_vec()
         } else if base > 0 && base <= count {
@@ -1343,7 +1395,11 @@ fn read_shared_memory(name: &str, control: &Control) -> Result<Vec<u8>, String> 
     }
     let name = format!("/{name}");
     let data = map_shared_memory(&name, control);
-    let _ = rustix::shm::unlink(name.as_str());
+    // Unlink only after the object was actually read, as the protocol requires.
+    // A name that failed to map may belong to somebody else.
+    if data.is_ok() {
+        let _ = rustix::shm::unlink(name.as_str());
+    }
     data
 }
 
@@ -1353,21 +1409,36 @@ fn map_shared_memory(name: &str, control: &Control) -> Result<Vec<u8>, String> {
     use rustix::mm::{MapFlags, ProtFlags};
     let fd = rustix::shm::open(name, rustix::shm::OFlags::RDONLY, rustix::fs::Mode::empty())
         .map_err(|e| format!("EBADF:{e}"))?;
+    let stat = rustix::fs::fstat(&fd).map_err(|e| format!("EBADF:{e}"))?;
+    // Never read, and therefore never remove, an object another user owns.
+    if stat.st_uid != rustix::process::geteuid().as_raw() {
+        return Err("EPERM:shared memory is owned by another user".into());
+    }
     // macOS rounds the object up to whole pages; the `S` key gives the exact size.
-    let len = usize::try_from(rustix::fs::fstat(&fd).map_err(|e| format!("EBADF:{e}"))?.st_size).unwrap_or(0);
-    let start = control.offset.min(len);
+    let mapped = usize::try_from(stat.st_size).unwrap_or(0);
+    let start = control.offset.min(mapped);
     let limit = if control.size > 0 { control.size } else { MAX_TRANSFER };
-    let count = (len - start).min(limit);
+    let count = (mapped - start).min(limit);
     if count == 0 {
         return Ok(Vec::new());
     }
     // SAFETY: a read-only mapping of the whole object, unmapped before returning.
     // Shared, because macOS refuses private mappings of shared memory.
     let data = unsafe {
-        let ptr = rustix::mm::mmap(std::ptr::null_mut(), len, ProtFlags::READ, MapFlags::SHARED, &fd, 0)
+        let ptr = rustix::mm::mmap(std::ptr::null_mut(), mapped, ProtFlags::READ, MapFlags::SHARED, &fd, 0)
             .map_err(|e| format!("EBADF:{e}"))?;
-        let data = std::slice::from_raw_parts(ptr.cast::<u8>().add(start), count).to_vec();
-        let _ = rustix::mm::munmap(ptr, len);
+        // The owner can truncate the object between the fstat and this copy, and
+        // reading a page past the new end raises SIGBUS. Re-check the size now
+        // that the mapping exists and clamp to whichever is smaller.
+        let len = usize::try_from(rustix::fs::fstat(&fd).map(|s| s.st_size).unwrap_or(0)).unwrap_or(0).min(mapped);
+        let start = start.min(len);
+        let count = (len - start).min(limit);
+        let data = if count == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(ptr.cast::<u8>().add(start), count).to_vec()
+        };
+        let _ = rustix::mm::munmap(ptr, mapped);
         data
     };
     Ok(data)
@@ -1377,13 +1448,23 @@ fn decode_png(data: &[u8]) -> Result<Decoded, String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().map_err(|e| format!("EINVAL:bad PNG: {e}"))?;
+    let (width, height) = {
+        let info = reader.info();
+        (info.width, info.height)
+    };
+    // The checks must come before `output_buffer_size` sizes a buffer from the
+    // header: a 60-byte PNG can claim 2^26 x 2^31 pixels and abort the process
+    // on the allocation.
+    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return Err("EINVAL:image too large".into());
+    }
     let size = reader.output_buffer_size().ok_or("EINVAL:PNG too large")?;
+    if size > MAX_TRANSFER {
+        return Err("EINVAL:PNG too large".into());
+    }
     let mut buffer = vec![0; size];
     let info = reader.next_frame(&mut buffer).map_err(|e| format!("EINVAL:bad PNG: {e}"))?;
     let (width, height) = (info.width, info.height);
-    if width > MAX_DIMENSION || height > MAX_DIMENSION {
-        return Err("EINVAL:image too large".into());
-    }
     buffer.truncate(info.line_size * height as usize);
     let (rgba, opaque) = match info.color_type {
         png::ColorType::Rgba => {
@@ -1431,6 +1512,17 @@ mod tests {
         assert_eq!((p.line, p.col, p.cols, p.rows), (5, 2, 3, 2));
         assert_eq!(g.images()[&7].width, 25);
         assert!(g.images()[&7].opaque);
+    }
+
+    #[test]
+    fn a_direct_transfer_larger_than_the_quota_is_refused() {
+        let mut g = Graphics::new();
+        g.set_limits(1024, true);
+        let data = BASE64.encode([0u8; 4 * 64 * 64]);
+        let out = g.handle(format!("a=t,f=32,s=64,v=64,i=4;{data}").as_bytes(), &ctx());
+        let reply = String::from_utf8(out.response.expect("a reply")).unwrap();
+        assert!(reply.contains("ENOSPC"), "{reply}");
+        assert!(g.images().is_empty(), "nothing above the quota is kept");
     }
 
     #[test]
@@ -1491,6 +1583,7 @@ mod tests {
         let name = format!("tron-test-{}", std::process::id());
         create_shared_memory(&name, &[9u8; 3]);
         let mut g = Graphics::new();
+        g.set_limits(DEFAULT_QUOTA, true);
         let encoded = BASE64.encode(&name);
         let out = g.handle(format!("a=t,t=s,f=24,s=1,v=1,i=4;{encoded}").as_bytes(), &ctx());
         assert_eq!(out.response.as_deref(), Some(&b"\x1b_Gi=4;OK\x1b\\"[..]));
@@ -1499,10 +1592,23 @@ mod tests {
     }
 
     #[test]
+    fn file_and_shared_memory_transfer_are_off_by_default() {
+        let name = format!("tron-test-denied-{}", std::process::id());
+        create_shared_memory(&name, &[1u8; 3]);
+        let encoded = BASE64.encode(&name);
+        let out = Graphics::new().handle(format!("a=t,t=s,f=24,s=1,v=1,i=7,q=1;{encoded}").as_bytes(), &ctx());
+        let reply = String::from_utf8(out.response.unwrap()).unwrap();
+        assert!(reply.contains("EPERM"), "{reply}");
+        assert!(shared_memory_exists(&name), "a refused object must not be unlinked");
+        let _ = rustix::shm::unlink(format!("/{name}").as_str());
+    }
+
+    #[test]
     fn shared_memory_with_more_flag_is_not_chunked() {
         let name = format!("tron-test-more-{}", std::process::id());
         create_shared_memory(&name, &[5u8; 3]);
         let mut g = Graphics::new();
+        g.set_limits(DEFAULT_QUOTA, true);
         let encoded = BASE64.encode(&name);
         g.handle(format!("a=T,t=s,f=24,s=1,v=1,C=1,q=2,m=1;{encoded}").as_bytes(), &ctx());
         assert_eq!(g.images().len(), 1);
