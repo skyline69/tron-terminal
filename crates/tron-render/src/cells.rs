@@ -469,6 +469,8 @@ pub struct CellPipeline {
     link_highlight: Option<LinkHighlight>,
     /// Instances of recently built rows, keyed by row content, reused when content scrolls.
     row_cache: HashMap<u64, RowInstances>,
+    /// Row keys built at least once, so only rows that recur are cached.
+    row_cache_seen: HashMap<u64, ()>,
     /// Instances of overlay rows, keyed by their text and colors, reused while they stay.
     overlay_cache: HashMap<u64, RowInstances>,
     clear_row_cache: bool,
@@ -623,6 +625,7 @@ impl CellPipeline {
             cursor_hidden: false,
             link_highlight: None,
             row_cache: HashMap::default(),
+            row_cache_seen: HashMap::default(),
             overlay_cache: HashMap::default(),
             clear_row_cache: false,
             overlays: Vec::new(),
@@ -873,8 +876,12 @@ impl CellPipeline {
             selection: snapshot.selection,
             extended: &snapshot.extended,
         };
-        if self.clear_row_cache || self.row_cache.len() > rows * 4 + 64 {
+        if self.clear_row_cache
+            || self.row_cache.len() > rows * 4 + 64
+            || self.row_cache_seen.len() > rows * 8 + 128
+        {
             self.row_cache.clear();
+            self.row_cache_seen.clear();
             self.overlay_cache.clear();
             self.clear_row_cache = false;
         }
@@ -915,11 +922,16 @@ impl CellPipeline {
                 instances.foreground.clear();
                 self.build_row(row, line, cursor_col, has_rtl, &colors, fonts, queue, &mut instances);
                 if let Some((key, _)) = key {
-                    let copy = RowInstances {
-                        background: instances.background.clone(),
-                        foreground: instances.foreground.clone(),
-                    };
-                    self.row_cache.insert(key, copy);
+                    // A row streaming in is not worth caching; keep rows that came
+                    // with a scroll or that were built before, which tend to recur.
+                    let recurred = self.row_cache_seen.insert(key, ()).is_some();
+                    if snapshot.shift > 0 || recurred {
+                        let copy = RowInstances {
+                            background: instances.background.clone(),
+                            foreground: instances.foreground.clone(),
+                        };
+                        self.row_cache.insert(key, copy);
+                    }
                 }
             }
             if fade {
