@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, bail};
@@ -100,18 +100,45 @@ fn locate_in(exe: &Path, candidates: &[PathBuf]) -> Option<Layout> {
         let manifest = share_dir.join(MANIFEST);
         let text = fs::read_to_string(&manifest).ok()?;
         let entries: Vec<PathBuf> = text.lines().filter(|line| !line.is_empty()).map(PathBuf::from).collect();
+        // A manifest is a plain file that an unprivileged user may have
+        // written, and it decides where a root install puts the binary. Take
+        // only absolute paths without "..", and derive every directory from
+        // where the manifest sits rather than from what it names.
+        if !entries.iter().all(|entry| manifest_entry_ok(entry)) {
+            log::warn!("ignoring {}: it names a path tron never installs", manifest.display());
+            return None;
+        }
+        let prefix = share_dir.parent()?;
+        let bin_dir = prefix.join("bin");
+        let binary = bin_dir.join("tron");
+        if !entries.contains(&binary) {
+            return None;
+        }
         // The binary, or on macOS the PREFIX/bin/tron link into tron.app.
         let lists_exe =
             entries.iter().any(|entry| entry == exe || fs::canonicalize(entry).is_ok_and(|resolved| resolved == exe));
         if !lists_exe {
             return None;
         }
-        let bin = entries.iter().find(|entry| {
-            entry.file_name() == Some(OsStr::new("tron"))
-                && entry.parent().and_then(Path::file_name) == Some(OsStr::new("bin"))
-        })?;
-        let app = entries.iter().find(|entry| entry.file_name() == Some(OsStr::new("tron.app"))).cloned();
-        Some(Layout { bin_dir: bin.parent()?.to_owned(), share_dir: share_dir.clone(), app, manifest, entries })
+        let app = entries
+            .iter()
+            .find(|entry| {
+                entry.file_name() == Some(OsStr::new("tron.app")) && app_dir_ok(entry.parent(), prefix)
+            })
+            .cloned();
+        Some(Layout { bin_dir, share_dir: share_dir.clone(), app, manifest, entries })
+    })
+}
+
+/// Whether a manifest line is a plain absolute path.
+fn manifest_entry_ok(entry: &Path) -> bool {
+    entry.is_absolute() && !entry.components().any(|component| component == Component::ParentDir)
+}
+
+/// An app bundle may sit beside the prefix or in an Applications folder.
+fn app_dir_ok(dir: Option<&Path>, prefix: &Path) -> bool {
+    dir.is_some_and(|dir| {
+        dir == prefix || dir == Path::new("/Applications") || home().is_some_and(|home| dir == home.join("Applications"))
     })
 }
 
@@ -634,7 +661,7 @@ mod tests {
         assert!(layout.writable());
 
         // macOS: the manifest lists tron.app and a link to its binary.
-        let app = dir.join("Applications/tron.app");
+        let app = dir.join("tron.app");
         let app_binary = app.join("Contents/MacOS/tron");
         fs::create_dir_all(app_binary.parent().unwrap()).unwrap();
         fs::write(&app_binary, "").unwrap();
@@ -644,6 +671,22 @@ mod tests {
         let layout = locate_in(&app_binary, &[share]).unwrap();
         assert_eq!(layout.app.as_deref(), Some(app.as_path()));
         assert_eq!(layout.binary(), app_binary);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_manifest_naming_another_bin_directory() {
+        let dir = temp_dir("poison");
+        let share = dir.join("share");
+        fs::create_dir_all(share.join("tron")).unwrap();
+        let evil = dir.join("evil/bin/tron");
+        fs::create_dir_all(evil.parent().unwrap()).unwrap();
+        fs::write(&evil, "").unwrap();
+        let manifest = share.join(MANIFEST);
+        fs::write(&manifest, format!("{}\n{}\n", evil.display(), manifest.display())).unwrap();
+        assert!(locate_in(&evil, std::slice::from_ref(&share)).is_none(), "a foreign bin directory is ignored");
+        fs::write(&manifest, format!("{}/../../bin/tron\n", share.display())).unwrap();
+        assert!(locate_in(&dir.join("bin/tron"), std::slice::from_ref(&share)).is_none(), ".. is refused");
         fs::remove_dir_all(&dir).unwrap();
     }
 
