@@ -18,6 +18,9 @@ const MAX_INTERMEDIATES: usize = 2;
 const MAX_OSC_PARAMS: usize = 16;
 const MAX_OSC_LEN: usize = 64 * 1024;
 const MAX_APC_LEN: usize = 64 * 1024 * 1024;
+/// Capacity an emptied APC buffer may keep: a single large image must not leave
+/// tens of megabytes reserved for the life of the process.
+const MAX_APC_KEEP: usize = 1024 * 1024;
 
 /// Receives parsed actions.
 pub trait Perform {
@@ -279,6 +282,14 @@ impl Parser {
 
     /// Appends to the OSC string. iTerm2 inline images (`OSC 1337`) may be as
     /// long as APC strings; other OSC strings are capped much lower.
+    fn clear_apc(&mut self) {
+        if self.apc.capacity() > MAX_APC_KEEP {
+            self.apc = Vec::new();
+        } else {
+            self.apc.clear();
+        }
+    }
+
     fn push_osc(&mut self, chunk: &[u8]) {
         const IMAGE_PREFIX: &[u8; 5] = b"1337;";
         let mut head = [0u8; 5];
@@ -328,7 +339,7 @@ impl Parser {
                 b'P' => self.enter_params(State::DcsEntry),
                 b'X' | b'^' => self.state = State::SosPmString,
                 b'_' => {
-                    self.apc.clear();
+                    self.clear_apc();
                     self.state = State::ApcString;
                 }
                 0x30..=0x7e => {
@@ -430,7 +441,7 @@ impl Parser {
             State::ApcString => match b {
                 0x07 => {
                     p.apc_dispatch(&self.apc);
-                    self.apc.clear();
+                    self.clear_apc();
                     self.state = State::Ground;
                 }
                 _ => {
@@ -594,7 +605,7 @@ impl Parser {
             State::DcsPassthrough => p.unhook(),
             State::ApcString => {
                 p.apc_dispatch(&self.apc);
-                self.apc.clear();
+                self.clear_apc();
             }
             _ => {}
         }
