@@ -2964,6 +2964,14 @@ impl Session {
             self.mouse.last_cell = Some((row, col));
             return;
         }
+        if !pressed {
+            // The press was reported while a modifier was held that is gone by
+            // the release, so nothing is sent now. Forget the button anyway,
+            // or every later motion report claims it is still down.
+            if let Some(code) = mouse::button_code(button) {
+                self.mouse.buttons &= !(1 << code);
+            }
+        }
 
         // A right click or Control-click opens the context menu, for this window.
         #[cfg(target_os = "macos")]
