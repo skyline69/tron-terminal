@@ -9,7 +9,7 @@ use tron_core::{Image, Snapshot};
 use tron_font::CellMetrics;
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Copy, Clone, PartialEq, Pod, Zeroable)]
 struct ImageInstance {
     pos: [f32; 2],
     size: [f32; 2],
@@ -60,6 +60,9 @@ pub struct ImagePipeline {
     placeholder_key: Option<PlaceholderKey>,
     buffer: wgpu::Buffer,
     capacity: usize,
+    /// Instances and viewport of the last upload, to skip writing them again.
+    uploaded_instances: Vec<ImageInstance>,
+    uploaded_viewport: Option<[f32; 2]>,
     scratch: Vec<u8>,
 }
 
@@ -179,6 +182,8 @@ impl ImagePipeline {
             placeholder_key: None,
             buffer: create_buffer(device, capacity),
             capacity,
+            uploaded_instances: Vec::new(),
+            uploaded_viewport: None,
             scratch: Vec::new(),
         }
     }
@@ -454,15 +459,25 @@ impl ImagePipeline {
     }
 
     pub fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, viewport: [f32; 2]) {
-        if self.instances.is_empty() {
-            return;
-        }
         if self.instances.len() > self.capacity {
             self.capacity = self.instances.len().next_power_of_two();
             self.buffer = create_buffer(device, self.capacity);
+            // A new buffer holds nothing, so every instance is written again.
+            self.uploaded_instances.clear();
         }
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&self.instances));
-        queue.write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&[viewport[0], viewport[1], 0.0, 0.0]));
+        if self.instances.is_empty() {
+            return;
+        }
+        // Images that did not move and videos whose frames only changed their pixels
+        // upload the same quads; leave them in the buffer.
+        if self.uploaded_instances != self.instances {
+            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&self.instances));
+            self.uploaded_instances.clone_from(&self.instances);
+        }
+        if self.uploaded_viewport != Some(viewport) {
+            queue.write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&[viewport[0], viewport[1], 0.0, 0.0]));
+            self.uploaded_viewport = Some(viewport);
+        }
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, layer: Layer) {
