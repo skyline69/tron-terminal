@@ -13,6 +13,12 @@ use winit::event_loop::EventLoopProxy;
 
 /// How often the watcher looks at what runs in the window.
 const POLL: Duration = Duration::from_millis(500);
+/// Poll interval once nothing has changed for a while. A harness started in a
+/// pane is noticed a second later at worst, and an idle terminal stops forking
+/// `tmux display-message` twice a second for the life of the window.
+const IDLE_POLL: Duration = Duration::from_secs(2);
+/// Polls without a change before backing off.
+const SLOW_AFTER: u32 = 20;
 
 /// How long ago a harness may have started to count as starting when the watcher
 /// finds it. Older ones were already running: brought back to the foreground,
@@ -133,8 +139,10 @@ impl Watch {
 pub fn spawn(tty: PathBuf, shell: u32, watch: &Arc<Watch>, proxy: EventLoopProxy) {
     let watch: Weak<Watch> = Arc::downgrade(watch);
     let spawned = thread::Builder::new().name("harness-watch".into()).spawn(move || {
+        let mut interval = POLL;
+        let mut unchanged = 0;
         loop {
-            thread::sleep(POLL);
+            thread::sleep(interval);
             let Some(watch) = watch.upgrade() else { break };
             let names = watch.names.lock().clone();
             let found = find(&tty, shell, &names);
@@ -147,7 +155,14 @@ pub fn spawn(tty: PathBuf, shell: u32, watch: &Arc<Watch>, proxy: EventLoopProxy
                     group,
                 });
                 drop(current);
+                unchanged = 0;
+                interval = POLL;
                 proxy.wake_up();
+            } else {
+                unchanged += 1;
+                if unchanged >= SLOW_AFTER {
+                    interval = IDLE_POLL;
+                }
             }
         }
     });
