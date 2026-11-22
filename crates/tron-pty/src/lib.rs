@@ -664,14 +664,33 @@ mod tests {
     use super::*;
     use std::io::Read;
 
+    /// Whether `pid` is a running process rather than a zombie that was killed
+    /// and only waits to be reaped: `/proc/<pid>` exists for both.
+    #[cfg(target_os = "linux")]
+    fn is_running(pid: u32) -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+        // The state follows the command name, which is in parentheses and may
+        // itself contain spaces and parentheses.
+        let Some((_, rest)) = stat.rsplit_once(')') else { return false };
+        matches!(rest.split_whitespace().next(), Some(state) if state != "Z")
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_hangup_leaves_a_nohup_process_alone() {
         let pid_file = std::env::temp_dir().join(format!("tron-nohup-{}", std::process::id()));
         let _ = std::fs::remove_file(&pid_file);
-        // The background sleep ignores SIGHUP; the shell replaces itself with a
-        // foreground sleep that does not, so the hangup has to end the child.
-        let script = format!("nohup sleep 30 >/dev/null 2>&1 & echo $! > {}; exec sleep 30", pid_file.display());
+        // The background sleep ignores SIGHUP, and so does the shell that replaces
+        // itself with a foreground sleep: the hangup has to end that child with
+        // the hard kill, which used to go to the whole group and take the
+        // background job with it. The background job reports its own pid only
+        // after `nohup` has run: a hangup sent between its fork and the moment it
+        // ignores the signal would kill it, and a loaded machine can schedule the
+        // shell that far ahead.
+        let script = format!(
+            "nohup sh -c 'echo $$ > {}; exec sleep 30' >/dev/null 2>&1 & trap '' HUP; exec sleep 30",
+            pid_file.display()
+        );
         let options =
             SpawnOptions { program: Some("/bin/sh".into()), args: vec!["-c".into(), script], ..Default::default() };
         let mut pty = Pty::spawn(&options, WindowSize { rows: 24, cols: 80, ..WindowSize::default() }).expect("spawn");
@@ -686,7 +705,7 @@ mod tests {
         let pid = pid.expect("the shell reports the background pid");
         pty.hangup();
         assert!(matches!(pty.try_wait(), Ok(Some(_))), "the child is gone");
-        assert!(std::path::Path::new(&format!("/proc/{pid}")).exists(), "a process that ignored the hangup stays");
+        assert!(is_running(pid), "a process that ignored the hangup stays");
         let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
         let _ = std::fs::remove_file(&pid_file);
     }
