@@ -88,6 +88,9 @@ pub enum Command {
         /// Install a downloaded release archive (.tar.zst or .tar.gz)
         #[arg(long, value_name = "FILE", conflicts_with_all = ["check", "to"])]
         archive: Option<PathBuf>,
+        /// SHA-256 the archive must have; required when this runs as root
+        #[arg(long, value_name = "HEX", requires = "archive")]
+        sha256: Option<String>,
     },
     /// Run the startup screen, then the given shell (used inside the terminal)
     #[command(hide = true)]

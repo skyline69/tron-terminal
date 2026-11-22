@@ -9,7 +9,7 @@ mod download;
 mod install;
 mod release;
 
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -168,6 +168,8 @@ pub struct UpdateOptions {
     pub force: bool,
     /// Install this release archive instead of downloading one.
     pub archive: Option<PathBuf>,
+    /// The SHA-256 the archive must have; needed when installing as root.
+    pub sha256: Option<String>,
 }
 
 /// Where releases are downloaded from: `.../latest/download/NAME` and
@@ -206,7 +208,7 @@ fn success(text: &str) {
 pub fn run(options: UpdateOptions) -> anyhow::Result<()> {
     let started = Instant::now();
     if let Some(archive) = &options.archive {
-        return install_archive(archive, started);
+        return install_archive(archive, options.sha256.as_deref(), started);
     }
     let platform = release::platform()?;
     let client = download::Client::new();
@@ -297,7 +299,7 @@ pub fn run(options: UpdateOptions) -> anyhow::Result<()> {
                     outcome.unchanged
                 ));
             } else {
-                install_as_root(&name, &data)?;
+                install_as_root(&name, &data, hash)?;
             }
         }
     }
@@ -313,9 +315,20 @@ pub fn run(options: UpdateOptions) -> anyhow::Result<()> {
 
 /// Installs a release archive from disk: run by sudo for a system install,
 /// or by hand for an archive downloaded elsewhere.
-fn install_archive(path: &Path, started: Instant) -> anyhow::Result<()> {
+///
+/// Installing as root refuses an archive whose SHA-256 nobody checked: the file
+/// could have been swapped between the download and the `sudo` that reads it.
+fn install_archive(path: &Path, sha256: Option<&str>, started: Instant) -> anyhow::Result<()> {
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let data = read_regular_file(path)?;
+    match sha256 {
+        Some(expected) => release::verify(&name, &data, expected)?,
+        None if rustix::process::geteuid().as_raw() == 0 => bail!(
+            "installing as root needs the archive's SHA-256: tron update --archive {} --sha256 <hex>",
+            path.display()
+        ),
+        None => {}
+    }
     let unpacked = release::unpack(&name, &data)?;
     let version = unpacked.version().with_context(|| format!("{name} does not name a tron version"))?;
     let install::Target::Script(layout) = install::locate()? else {
@@ -334,23 +347,62 @@ fn install_archive(path: &Path, started: Instant) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reads `path` through a single open handle, so swapping the path afterwards
+/// cannot change what is read, and refuses anything that is not a regular file.
+fn read_regular_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let metadata = file.metadata().with_context(|| format!("cannot stat {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).with_context(|| format!("cannot read {}", path.display()))?;
+    Ok(data)
+}
+
+/// A directory only this user can enter, under a name nobody can predict.
+fn private_temp_dir() -> anyhow::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let base = std::env::temp_dir();
+    let uid = rustix::process::getuid().as_raw();
+    for _ in 0..16 {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.subsec_nanos());
+        let dir = base.join(format!("tron-update-{uid}-{}-{nonce}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).with_context(|| format!("cannot create {}", dir.display())),
+        }
+    }
+    bail!("cannot create a private directory in {}", base.display())
+}
+
 /// Hands the verified archive to `sudo tron update --archive`, for an
 /// installation this user cannot write to, such as one in /usr/local.
-fn install_as_root(name: &str, data: &[u8]) -> anyhow::Result<()> {
+///
+/// The directory is private to this user and the archive is created with
+/// `create_new`, so another user of the machine can neither plant the file nor
+/// replace it before `sudo` reads it. `sudo` also re-checks the SHA-256, which
+/// this process took from the release's `SHA256SUMS`.
+fn install_as_root(name: &str, data: &[u8], sha256: &str) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("cannot find the running tron")?;
-    let dir = std::env::temp_dir().join(format!("tron-update-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let dir = private_temp_dir()?;
     let archive = dir.join(name);
     let result = (|| {
-        std::fs::File::create(&archive)
-            .and_then(|mut file| file.write_all(data))
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&archive)
             .with_context(|| format!("cannot write {}", archive.display()))?;
+        file.write_all(data).with_context(|| format!("cannot write {}", archive.display()))?;
+        file.sync_all().with_context(|| format!("cannot flush {}", archive.display()))?;
         info("Installing needs administrator rights; sudo will ask for your password.");
         let status = Command::new("sudo")
             .arg("--")
             .arg(&exe)
             .args(["update", "--archive"])
             .arg(&archive)
+            .args(["--sha256", sha256])
             .status()
             .context("cannot run sudo")?;
         if !status.success() {

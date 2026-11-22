@@ -4323,6 +4323,7 @@ dependencies = [
  "png",
  "pollster",
  "ratatui",
+ "rustix",
  "sha2 0.11.1",
  "smithay-clipboard",
  "tar",

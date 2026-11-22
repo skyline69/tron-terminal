@@ -100,12 +100,13 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some(cli::Command::StartupScreen { shell }) => tron_startup::run(shell),
-        Some(cli::Command::Update { check, to, force, archive }) => {
+        Some(cli::Command::Update { check, to, force, archive, sha256 }) => {
             return update::run(update::UpdateOptions {
                 check: *check,
                 to: to.clone(),
                 force: *force,
                 archive: archive.clone(),
+                sha256: sha256.clone(),
             });
         }
         // Tab commands such as `tron settings` open the startup screen below.
