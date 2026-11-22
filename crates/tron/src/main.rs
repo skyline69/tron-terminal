@@ -1175,6 +1175,11 @@ impl ApplicationHandler for App {
             let output = session.shared.wake_pending.swap(false, Ordering::AcqRel);
             session.poll_shaders();
             session.update_harness();
+            // A window that stays open after its shell exited must still reap
+            // it, or the process stays a zombie for the life of the window.
+            if session.exited {
+                let _ = session.pty.try_wait();
+            }
             if session.shared.exited.load(Ordering::Acquire) && !session.exited {
                 if session.settings.close_on_exit {
                     closed.push(id);
