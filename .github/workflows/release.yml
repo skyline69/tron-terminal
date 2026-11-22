@@ -138,8 +138,21 @@ jobs:
             patchelf --set-rpath '$ORIGIN' "$appdir/usr/lib/$lib"
           done
           patchelf --set-rpath '$ORIGIN/../lib' "$appdir/usr/bin/tron"
-          # appimagetool is only published as its rolling "continuous" build.
-          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
+          # appimagetool from the versioned 1.9.1 release, pinned by digest so a
+          # replaced asset fails the build instead of being executed. Bumping the
+          # version means recomputing both hashes deliberately: sha256sum of that
+          # release's appimagetool-$ARCH.AppImage, cross-checked with the digest
+          # GitHub records for the asset.
+          case "$ARCH" in
+            x86_64) appimagetool_sha256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0 ;;
+            aarch64) appimagetool_sha256=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158 ;;
+            *)
+              echo "::error::No pinned appimagetool digest for $ARCH."
+              exit 1
+              ;;
+          esac
+          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-$ARCH.AppImage"
+          echo "$appimagetool_sha256  appimagetool" | sha256sum -c -
           chmod +x appimagetool
           APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool \
             -u "gh-releases-zsync|skyline69|tron-terminal|latest|tron-*-$ARCH.AppImage.zsync" \
