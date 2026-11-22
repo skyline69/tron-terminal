@@ -73,6 +73,23 @@ die() {
 	exit 1
 }
 
+# The URL overrides only serve mirrors and tests. Anything but HTTPS would
+# quietly downgrade an install that claims to verify its downloads.
+require_https() {
+	case $1 in
+	https://*) return 0 ;;
+	esac
+	if [ "$insecure" = 1 ]; then
+		warn "$2 is not HTTPS; continuing because TRON_INSTALL_ALLOW_INSECURE=1"
+	else
+		die "$2 must start with https://, not \"$1\". Set TRON_INSTALL_ALLOW_INSECURE=1 only for a local test."
+	fi
+}
+
+require_https "$API_URL" TRON_INSTALL_API_URL
+require_https "$DOWNLOAD_URL" TRON_INSTALL_DOWNLOAD_URL
+require_https "$RAW_URL" TRON_INSTALL_RAW_URL
+
 # prompt TEXT HINT: shows a question and reads the answer from the terminal into
 # $answer. Reading the terminal also works when the script is piped into bash.
 prompt() {
