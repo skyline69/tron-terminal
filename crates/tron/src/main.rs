@@ -563,6 +563,9 @@ struct Session {
     clipboard: Clipboard,
     clipboard_requests: VecDeque<ClipboardTarget>,
     clipboard_pending: Option<(AsyncRequestSerial, ClipboardTarget)>,
+    /// When to give up on `clipboard_pending`: a clipboard owner may never
+    /// answer, and a read left pending would block every later one.
+    clipboard_deadline: Option<std::time::Instant>,
     accessibility: Option<accessibility::Accessibility>,
     drop: Option<DropState>,
     window: Arc<dyn Window>,
@@ -829,6 +832,7 @@ impl App {
             clipboard: Clipboard::new(window.as_ref()),
             clipboard_requests: VecDeque::new(),
             clipboard_pending: None,
+            clipboard_deadline: None,
             accessibility,
             drop: None,
             frame_interval: frame_interval(window.as_ref(), self.max_fps),
@@ -2529,6 +2533,7 @@ impl Session {
         // A delayed clipboard result belongs to the terminal that requested it.
         self.clipboard_requests.clear();
         self.clipboard_pending = None;
+        self.clipboard_deadline = None;
         self.suspended = Some(Suspended {
             pty: std::mem::replace(&mut self.pty, pty),
             shared: std::mem::replace(&mut self.shared, shared),
@@ -2548,6 +2553,7 @@ impl Session {
         let Some(shell) = self.suspended.take() else { return };
         self.clipboard_requests.clear();
         self.clipboard_pending = None;
+        self.clipboard_deadline = None;
         self.pty = shell.pty;
         self.shared = shell.shared;
         self.input = shell.input;
@@ -2691,10 +2697,22 @@ impl Session {
 
     /// Keep reads ordered, including repeated paste keys and OSC 52 queries.
     fn start_clipboard_read(&mut self, event_loop: &dyn ActiveEventLoop) {
+        // The request may be dropped without ever delivering an event (the
+        // owner closed, the protocol stalled). Reserve the slot only so long.
+        if self.clipboard_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            self.clipboard_deadline = None;
+            if let Some((_, target)) = self.clipboard_pending.take() {
+                log::debug!("clipboard read timed out");
+                self.finish_clipboard_read(target, None);
+            }
+        }
         while self.clipboard_pending.is_none() {
             let Some(target) = self.clipboard_requests.pop_front() else { break };
             match clipboard::request_text(event_loop) {
-                Ok(serial) => self.clipboard_pending = Some((serial, target)),
+                Ok(serial) => {
+                    self.clipboard_pending = Some((serial, target));
+                    self.clipboard_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                }
                 Err(error) => {
                     log::debug!("clipboard read failed: {error}");
                     self.finish_clipboard_read(target, None);
@@ -2709,6 +2727,7 @@ impl Session {
             return false;
         }
         self.clipboard_pending = None;
+        self.clipboard_deadline = None;
         let text = value.try_as_string().map_err(|error| log::debug!("clipboard read failed: {error}")).ok();
         self.finish_clipboard_read(target, text);
         true
