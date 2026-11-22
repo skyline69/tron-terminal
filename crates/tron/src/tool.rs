@@ -9,15 +9,32 @@ use std::path::{Path, PathBuf};
 
 /// Directories that hold system programs, in the order they are preferred.
 /// `PATH` is deliberately absent.
-const SYSTEM_DIRS: [&str; 6] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/run/wrappers/bin", "/opt/homebrew/bin"];
+///
+/// `/usr/local/bin` and `/opt/local/bin` are on the list because Homebrew and
+/// MacPorts put `rsvg-convert` and `magick` there; they are only accepted while
+/// neither they nor the program itself are writable by anyone but their owner.
+const SYSTEM_DIRS: [&str; 9] = [
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+    "/usr/local/bin",
+    "/opt/local/bin",
+    "/run/wrappers/bin",
+    "/run/current-system/sw/bin",
+    "/opt/homebrew/bin",
+];
 
 /// Absolute path of `name` in a system directory, if it is a file that only its
 /// owner may write. `None` when the program is not installed there.
 #[cfg(unix)]
 pub fn system_tool(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
+    let closed = |path: &Path| path.metadata().is_ok_and(|meta| meta.permissions().mode() & 0o022 == 0);
     SYSTEM_DIRS.iter().map(|dir| Path::new(dir).join(name)).find(|path| {
-        path.metadata().is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o022 == 0)
+        path.metadata().is_ok_and(|metadata| metadata.is_file())
+            && closed(path)
+            && path.parent().is_some_and(closed)
     })
 }
 
