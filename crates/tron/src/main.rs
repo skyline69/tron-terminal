@@ -85,6 +85,8 @@ const INBOX_LIMIT: usize = 1 << 20;
 /// Most bytes parsed while holding the terminal lock, so a frame never waits
 /// long for its snapshot.
 const PARSE_SLICE: usize = 64 << 10;
+/// Most messages queued for the pty writer before the parser waits.
+const PTY_INPUT_QUEUE: usize = 1024;
 /// Link schemes opened on Ctrl+click.
 const LINK_SCHEMES: [&str; 9] =
     ["http://", "https://", "file://", "mailto:", "ftp://", "sftp://", "ssh://", "git://", "gemini://"];
@@ -235,7 +237,7 @@ enum AppRequest {
 struct Suspended {
     pty: Pty,
     shared: Arc<Shared>,
-    input: mpsc::Sender<Vec<u8>>,
+    input: mpsc::SyncSender<Vec<u8>>,
 }
 
 /// Where a window's terminal is and how its cells are laid out, for Look Up.
@@ -567,7 +569,7 @@ struct Session {
     font_family: String,
     shared: Arc<Shared>,
     pty: Pty,
-    input: mpsc::Sender<Vec<u8>>,
+    input: mpsc::SyncSender<Vec<u8>>,
     settings: Settings,
     /// Token accepted for startup screen commands, from this window's processes.
     startup_token: Option<String>,
@@ -1531,7 +1533,10 @@ impl App {
 
 impl Session {
     fn send(&self, bytes: Vec<u8>) {
-        let _ = self.input.send(bytes);
+        if let Err(mpsc::TrySendError::Full(bytes)) = self.input.try_send(bytes) {
+            // Only a child that has stopped reading its input can get here.
+            log::warn!("pty input queue is full; dropped {} bytes", bytes.len());
+        }
     }
 
     /// The terminal modes that change how keys are encoded.
@@ -3668,8 +3673,11 @@ impl Session {
     }
 }
 
-fn spawn_writer(mut writer: File, shared: Arc<Shared>) -> io::Result<mpsc::Sender<Vec<u8>>> {
-    let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+fn spawn_writer(mut writer: File, shared: Arc<Shared>) -> io::Result<mpsc::SyncSender<Vec<u8>>> {
+    // Bounded: a reply the parser produces while the child is not reading its
+    // input must not queue without limit. The parser blocks instead, which
+    // throttles the pty and leaves the event loop responsive.
+    let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(PTY_INPUT_QUEUE);
     thread::Builder::new().name("pty-writer".into()).spawn(move || {
         for bytes in receiver {
             shared.written_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -3708,7 +3716,7 @@ fn spawn_reader(
     mut reader: File,
     shared: Arc<Shared>,
     proxy: EventLoopProxy,
-    responses: mpsc::Sender<Vec<u8>>,
+    responses: mpsc::SyncSender<Vec<u8>>,
 ) -> io::Result<()> {
     let pipe = Arc::new(Pipe::default());
     let parser_pipe = pipe.clone();
