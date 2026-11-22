@@ -2,8 +2,8 @@
 //! remembering the release the user chose not to hear about again. And
 //! `tron update`, which installs it.
 //!
-//! GitHub redirects the latest release page to the release's tag, so `curl`
-//! reads the version from the redirect without the API or a JSON parser.
+//! GitHub redirects the latest release page to the release's tag, so the
+//! version comes from the redirect without the API or a JSON parser.
 
 mod download;
 mod install;
@@ -11,10 +11,11 @@ mod release;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
+use ureq::ResponseExt;
 
 /// The version of this tron.
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -112,30 +113,29 @@ pub fn skip(data_dir: &Path, version: &str) {
 
 /// The version of the latest release, from where GitHub redirects its page.
 fn latest_release() -> Option<String> {
-    let output = Command::new("curl")
-        .args(["--silent", "--show-error", "--max-time", "10", "--output", "/dev/null"])
-        .args(["--write-out", "%{redirect_url}"])
-        .arg(format!("{REPOSITORY}/releases/latest"))
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            let version = version_from_url(String::from_utf8_lossy(&output.stdout).trim());
-            if version.is_none() {
-                log::debug!("update check: no release found");
-            }
-            version
-        }
-        Ok(output) => {
-            log::debug!("update check failed: {}", String::from_utf8_lossy(&output.stderr).trim());
-            None
-        }
+    // In-process rather than through `curl`: no PATH lookup, no subprocess
+    // output to parse, and the TLS stack is the same one that verifies the
+    // download.
+    let agent = ureq::Agent::config_builder()
+        .user_agent(concat!("tron/", env!("CARGO_PKG_VERSION")))
+        .timeout_connect(Some(Duration::from_secs(5)))
+        .timeout_recv_response(Some(Duration::from_secs(10)))
+        .timeout_global(Some(Duration::from_secs(15)))
+        .build()
+        .new_agent();
+    let url = format!("{REPOSITORY}/releases/latest");
+    let response = match agent.get(&url).call() {
+        Ok(response) => response,
         Err(error) => {
-            log::debug!("update check: cannot run curl: {error}");
-            None
+            log::debug!("update check failed: {error}");
+            return None;
         }
+    };
+    let version = version_from_url(response.get_uri().to_string().as_str());
+    if version.is_none() {
+        log::debug!("update check: no release found");
     }
+    version
 }
 
 /// `1.2.3` from a release URL ending in `/releases/tag/v1.2.3`.
