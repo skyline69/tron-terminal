@@ -319,22 +319,34 @@ find_release() {
 	target_version=$version
 }
 
+# sha256_of FILE: prints the SHA-256 of FILE, or fails when no tool can compute it.
+sha256_of() {
+	if has sha256sum; then
+		sha256sum "$1" | awk '{ print $1 }'
+	elif has shasum; then
+		shasum -a 256 "$1" | awk '{ print $1 }'
+	elif has openssl; then
+		# OpenSSL 3 prints "SHA2-256(file)= hex", older ones "SHA256(file)= hex".
+		openssl dgst -sha256 "$1" | awk '{ print $NF }'
+	else
+		return 1
+	fi
+}
+
 # Downloads, verifies and unpacks the release archive into the work directory.
 download_release() {
-	local archive=$work/$release_archive expected actual=""
+	local archive=$work/$release_archive expected actual
 	info "Downloading $release_archive"
 	fetch "$DOWNLOAD_URL/$release_tag/$release_archive" "$archive" || die "downloading $release_archive failed"
 	fetch "$DOWNLOAD_URL/$release_tag/$release_archive.sha256" "$archive.sha256" ||
 		die "downloading the checksum of $release_archive failed"
-	expected=$(awk '{ print $1; exit }' "$archive.sha256")
-	if has sha256sum; then
-		actual=$(sha256sum "$archive" | awk '{ print $1 }')
-	elif has shasum; then
-		actual=$(shasum -a 256 "$archive" | awk '{ print $1 }')
+	expected=$(awk '{ print $1; exit }' "$archive.sha256" | tr 'A-F' 'a-f')
+	if ! printf '%s' "$expected" | grep -Eqx '[0-9a-f]{64}'; then
+		die "the checksum file of $release_archive does not hold a SHA-256 digest; the download is not verified"
 	fi
-	if [ -z "$actual" ]; then
-		warn "neither sha256sum nor shasum is installed; the download is not verified"
-	elif [ "$actual" != "$expected" ]; then
+	actual=$(sha256_of "$archive") ||
+		die "verifying $release_archive needs sha256sum, shasum or openssl; install one of them and run again"
+	if [ "$actual" != "$expected" ]; then
 		die "the checksum of $release_archive does not match; the download is damaged or was altered"
 	fi
 	tar -xzf "$archive" -C "$work"
