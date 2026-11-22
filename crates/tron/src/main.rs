@@ -87,9 +87,10 @@ const INBOX_LIMIT: usize = 1 << 20;
 const PARSE_SLICE: usize = 64 << 10;
 /// Most messages queued for the pty writer before the parser waits.
 const PTY_INPUT_QUEUE: usize = 1024;
-/// Link schemes opened on Ctrl+click.
-const LINK_SCHEMES: [&str; 9] =
-    ["http://", "https://", "file://", "mailto:", "ftp://", "sftp://", "ssh://", "git://", "gemini://"];
+/// Link schemes opened on Ctrl+click. `file:` is deliberately absent: a printed
+/// file must not be able to make the terminal open a local path.
+const LINK_SCHEMES: [&str; 8] =
+    ["http://", "https://", "mailto:", "ftp://", "sftp://", "ssh://", "git://", "gemini://"];
 
 use cli::Cli;
 

@@ -7,8 +7,10 @@ use crate::selection::Point;
 /// Most rows a logical line may span. Bounds work on pathological output.
 const MAX_WRAPPED_ROWS: i64 = 256;
 
-const URL_SCHEMES: [&str; 9] =
-    ["https://", "http://", "file://", "ftp://", "sftp://", "ssh://", "git://", "gemini://", "mailto:"];
+/// Schemes underlined as links. `file:` is absent for the same reason as in
+/// `LINK_SCHEMES`.
+const URL_SCHEMES: [&str; 8] =
+    ["https://", "http://", "ftp://", "sftp://", "ssh://", "git://", "gemini://", "mailto:"];
 
 /// Characters of a logical line and the cell each one came from.
 pub struct LogicalLine {
