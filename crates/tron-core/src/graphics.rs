@@ -1369,7 +1369,11 @@ fn read_shared_memory(name: &str, control: &Control) -> Result<Vec<u8>, String> 
     }
     let name = format!("/{name}");
     let data = map_shared_memory(&name, control);
-    let _ = rustix::shm::unlink(name.as_str());
+    // Unlink only after the object was actually read, as the protocol requires.
+    // A name that failed to map may belong to somebody else.
+    if data.is_ok() {
+        let _ = rustix::shm::unlink(name.as_str());
+    }
     data
 }
 
