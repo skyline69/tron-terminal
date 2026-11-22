@@ -1377,13 +1377,23 @@ fn decode_png(data: &[u8]) -> Result<Decoded, String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().map_err(|e| format!("EINVAL:bad PNG: {e}"))?;
+    let (width, height) = {
+        let info = reader.info();
+        (info.width, info.height)
+    };
+    // The checks must come before `output_buffer_size` sizes a buffer from the
+    // header: a 60-byte PNG can claim 2^26 x 2^31 pixels and abort the process
+    // on the allocation.
+    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return Err("EINVAL:image too large".into());
+    }
     let size = reader.output_buffer_size().ok_or("EINVAL:PNG too large")?;
+    if size > MAX_TRANSFER {
+        return Err("EINVAL:PNG too large".into());
+    }
     let mut buffer = vec![0; size];
     let info = reader.next_frame(&mut buffer).map_err(|e| format!("EINVAL:bad PNG: {e}"))?;
     let (width, height) = (info.width, info.height);
-    if width > MAX_DIMENSION || height > MAX_DIMENSION {
-        return Err("EINVAL:image too large".into());
-    }
     buffer.truncate(info.line_size * height as usize);
     let (rgba, opaque) = match info.color_type {
         png::ColorType::Rgba => {
