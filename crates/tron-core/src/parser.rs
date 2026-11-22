@@ -280,8 +280,7 @@ impl Parser {
         }
     }
 
-    /// Appends to the OSC string. iTerm2 inline images (`OSC 1337`) may be as
-    /// long as APC strings; other OSC strings are capped much lower.
+    /// Empties the APC buffer, releasing the reservation a large image made.
     fn clear_apc(&mut self) {
         if self.apc.capacity() > MAX_APC_KEEP {
             self.apc = Vec::new();
@@ -290,6 +289,8 @@ impl Parser {
         }
     }
 
+    /// Appends to the OSC string. iTerm2 inline images (`OSC 1337`) may be as
+    /// long as APC strings; other OSC strings are capped much lower.
     fn push_osc(&mut self, chunk: &[u8]) {
         const IMAGE_PREFIX: &[u8; 5] = b"1337;";
         let mut head = [0u8; 5];
