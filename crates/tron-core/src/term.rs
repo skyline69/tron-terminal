@@ -826,7 +826,7 @@ impl Terminal {
         match self.graphics.add_inline_image(&data, args, &ctx) {
             // Like kitty: the cursor ends on the image's last row, after its right edge.
             Ok((cols, rows)) => {
-                for _ in 1..rows {
+                for _ in 1..rows.min(self.rows() as u32) {
                     self.linefeed();
                 }
                 self.cursor.col = (self.cursor.col + cols as usize).min(self.cols() - 1);
@@ -2695,7 +2695,7 @@ impl Perform for Terminal {
             self.respond(&response);
         }
         if let Some((cols, rows)) = outcome.cursor_advance {
-            for _ in 1..rows {
+            for _ in 1..rows.min(self.rows() as u32) {
                 self.linefeed();
             }
             self.cursor.col = (self.cursor.col + cols as usize).min(self.cols() - 1);

@@ -694,7 +694,11 @@ impl Graphics {
             self.shift_descendants(key, line - old_line, col as i64 - old_col as i64);
         }
         self.generation += 1;
-        Ok((!control.no_cursor_move && !control.placeholder && parent.is_none()).then_some((cols, rows)))
+        // A client-chosen `r=`/`c=` must not become an unbounded cursor walk:
+        // the caller advances the cursor one linefeed per row.
+        let advance = (!control.no_cursor_move && !control.placeholder && parent.is_none())
+            .then_some((cols.min(ctx.cols.max(1) as u32), rows.min(ctx.rows.max(1) as u32)));
+        Ok(advance)
     }
 
     fn placement(&self, (image, placement): (u32, u32)) -> Option<&Placement> {
