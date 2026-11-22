@@ -204,12 +204,18 @@ impl Pty {
         self.child.try_wait()
     }
 
-    /// Hangs the child's session up, then kills what did not go away.
+    /// Hangs the child's session up, then kills the child itself if it stays.
     ///
     /// Closing the master is not enough on its own: the reader and writer
     /// handles are duplicates of it, so the kernel sends no SIGHUP while a
     /// detached thread still holds one. The child runs in its own session, so
     /// its pid also names the process group of everything it started.
+    ///
+    /// The signal goes to the whole group, which is what tells a shell's jobs
+    /// the terminal is gone. The hard kill only targets the child: a program
+    /// that survives a hangup on purpose, like `nohup` or `disown`, keeps the
+    /// meaning of the terminal it outlived, and this runs in `Drop`, on the
+    /// thread that closes the window.
     pub fn hangup(&mut self) {
         let Some(group) = rustix::process::Pid::from_raw(self.child.id() as i32) else { return };
         if !matches!(self.child.try_wait(), Ok(None)) {
@@ -218,14 +224,19 @@ impl Pty {
         if rustix::process::kill_process_group(group, rustix::process::Signal::HUP).is_err() {
             return;
         }
-        for _ in 0..8 {
+        for _ in 0..4 {
             if !matches!(self.child.try_wait(), Ok(None)) {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        let _ = self.child.wait();
+        let _ = rustix::process::kill_process(group, rustix::process::Signal::KILL);
+        for _ in 0..4 {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -652,6 +663,34 @@ pub fn is_closed_error(error: &io::Error) -> bool {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_hangup_leaves_a_nohup_process_alone() {
+        let pid_file = std::env::temp_dir().join(format!("tron-nohup-{}", std::process::id()));
+        let _ = std::fs::remove_file(&pid_file);
+        // The background sleep ignores SIGHUP; the shell replaces itself with a
+        // foreground sleep that does not, so the hangup has to end the child.
+        let script =
+            format!("nohup sleep 30 >/dev/null 2>&1 & echo $! > {}; exec sleep 30", pid_file.display());
+        let options =
+            SpawnOptions { program: Some("/bin/sh".into()), args: vec!["-c".into(), script], ..Default::default() };
+        let mut pty = Pty::spawn(&options, WindowSize { rows: 24, cols: 80, ..WindowSize::default() }).expect("spawn");
+        let mut pid = None;
+        for _ in 0..200 {
+            pid = std::fs::read_to_string(&pid_file).ok().and_then(|text| text.trim().parse::<u32>().ok());
+            if pid.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let pid = pid.expect("the shell reports the background pid");
+        pty.hangup();
+        assert!(matches!(pty.try_wait(), Ok(Some(_))), "the child is gone");
+        assert!(std::path::Path::new(&format!("/proc/{pid}")).exists(), "a process that ignored the hangup stays");
+        let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+        let _ = std::fs::remove_file(&pid_file);
+    }
 
     #[test]
     fn hangup_ends_a_shell_that_ignores_the_closed_master() {
