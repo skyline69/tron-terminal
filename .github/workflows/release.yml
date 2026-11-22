@@ -372,7 +372,10 @@ jobs:
             echo "::error::No checksum for tron-$VERSION-macos.dmg in $TAG."
             exit 1
           fi
-          git clone --depth 1 "https://x-access-token:$TAP_TOKEN@github.com/skyline69/homebrew-tap.git" tap
+          # The credential goes into an HTTPS header rather than the clone URL, so
+          # a failed clone or push cannot print the token in the public log.
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TAP_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$auth" clone --depth 1 https://github.com/skyline69/homebrew-tap.git tap
           sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$sha256/g" dist/homebrew/tron.rb > tap/Casks/tron.rb
           cd tap
           git config user.name "github-actions[bot]"
@@ -383,4 +386,4 @@ jobs:
             exit 0
           fi
           git commit -m "tron $VERSION"
-          git push origin HEAD
+          git -c http.extraheader="$auth" push origin HEAD
