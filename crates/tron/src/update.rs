@@ -397,7 +397,10 @@ fn install_as_root(name: &str, data: &[u8], sha256: &str) -> anyhow::Result<()> 
         file.write_all(data).with_context(|| format!("cannot write {}", archive.display()))?;
         file.sync_all().with_context(|| format!("cannot flush {}", archive.display()))?;
         info("Installing needs administrator rights; sudo will ask for your password.");
-        let status = Command::new("sudo")
+        let Some(sudo) = crate::tool::system_tool("sudo") else {
+            bail!("sudo is not installed in a system directory");
+        };
+        let status = Command::new(sudo)
             .arg("--")
             .arg(&exe)
             .args(["update", "--archive"])

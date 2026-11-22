@@ -12,6 +12,7 @@ mod menu;
 mod mouse;
 mod panel;
 mod terminfo;
+mod tool;
 mod update;
 
 use std::collections::{HashMap, VecDeque};
