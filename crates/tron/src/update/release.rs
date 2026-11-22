@@ -130,6 +130,10 @@ pub fn unpack(name: &str, data: &[u8]) -> anyhow::Result<Unpacked> {
     let mut archive = tar::Archive::new(reader.take(UNPACKED_LIMIT));
     let mut top = None;
     let mut files = HashMap::new();
+    // Reserve nothing from the header: `entry.size()` is an unvalidated 64-bit
+    // field, and `Vec::with_capacity` on it aborts the process (panic = abort)
+    // or asks the allocator for gigabytes before a byte is read.
+    let mut budget = UNPACKED_LIMIT as usize;
     for entry in archive.entries().with_context(|| format!("cannot read {name}"))? {
         let mut entry = entry.with_context(|| format!("cannot read {name}"))?;
         if !entry.header().entry_type().is_file() {
@@ -140,8 +144,18 @@ pub fn unpack(name: &str, data: &[u8]) -> anyhow::Result<Unpacked> {
         if top.get_or_insert_with(|| dir.to_owned()) != dir {
             bail!("{name} has more than one top directory");
         }
-        let mut data = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut data).with_context(|| format!("cannot unpack {path} from {name}"))?;
+        if entry.size() > budget as u64 {
+            bail!("{name} expands to more than {} MB", UNPACKED_LIMIT >> 20);
+        }
+        let mut data = Vec::new();
+        (&mut entry)
+            .take(budget as u64)
+            .read_to_end(&mut data)
+            .with_context(|| format!("cannot unpack {path} from {name}"))?;
+        budget = budget.saturating_sub(data.len());
+        if budget == 0 {
+            bail!("{name} expands to more than {} MB", UNPACKED_LIMIT >> 20);
+        }
         files.insert(rest.to_owned(), data);
     }
     let top = top.with_context(|| format!("{name} is empty"))?;
