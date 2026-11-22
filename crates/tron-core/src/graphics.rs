@@ -36,6 +36,8 @@ const MAX_GIF_FRAMES: usize = 1000;
 const MAX_RELATIVE_DEPTH: usize = 8;
 /// Most placements kept at once; each costs memory and a copy per frame.
 const MAX_PLACEMENTS: usize = 4096;
+/// Says once why a file or shared memory transfer was refused.
+static FILE_TRANSFER_NOTICE: std::sync::Once = std::sync::Once::new();
 /// Most images kept at once, however small each one is.
 const MAX_IMAGES: usize = 1024;
 /// Placements below this z-index are drawn under cell backgrounds.
@@ -469,6 +471,14 @@ impl Graphics {
                 // Shared memory is another way to name bytes outside this
                 // process, so it needs the same permission as a file path.
                 if !self.allow_files {
+                    // Once per process, not once per image: an application that
+                    // sends each frame this way would otherwise fill the log.
+                    FILE_TRANSFER_NOTICE.call_once(|| {
+                        log::info!(
+                            "an application sent an image by file or shared memory; \
+                             set [images] file_transfer = true in the config to allow it"
+                        );
+                    });
                     return Err("EPERM:file transmission is disabled".into());
                 }
                 let name = BASE64.decode(data).map_err(|e| format!("EINVAL:bad base64: {e}"))?;

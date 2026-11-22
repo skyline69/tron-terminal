@@ -184,7 +184,8 @@ fn releases_url() -> String {
         .filter(|url| {
             // A plain-http mirror would make the checksum decorative, since the
             // checksum comes from the same place.
-            if url.starts_with("https://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost") {
+            if url.starts_with("https://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost")
+            {
                 true
             } else {
                 log::warn!("TRON_UPDATE_URL is not HTTPS; using the default");
@@ -374,7 +375,10 @@ fn read_regular_file(path: &Path) -> anyhow::Result<Vec<u8>> {
         bail!("{} is larger than {} MB", path.display(), MAX_ARCHIVE >> 20);
     }
     let mut data = Vec::new();
-    std::io::Read::by_ref(&mut file).take(limit).read_to_end(&mut data).with_context(|| format!("cannot read {}", path.display()))?;
+    std::io::Read::by_ref(&mut file)
+        .take(limit)
+        .read_to_end(&mut data)
+        .with_context(|| format!("cannot read {}", path.display()))?;
     Ok(data)
 }
 
