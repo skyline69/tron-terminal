@@ -463,6 +463,8 @@ pub struct CellPipeline {
     link_highlight: Option<LinkHighlight>,
     /// Instances of recently built rows, keyed by row content, reused when content scrolls.
     row_cache: HashMap<u64, RowInstances>,
+    /// Instances of overlay rows, keyed by their text and colors, reused while they stay.
+    overlay_cache: HashMap<u64, RowInstances>,
     clear_row_cache: bool,
     overlays: Vec<Overlay>,
     scrollbar: Option<Scrollbar>,
@@ -615,6 +617,7 @@ impl CellPipeline {
             cursor_hidden: false,
             link_highlight: None,
             row_cache: HashMap::default(),
+            overlay_cache: HashMap::default(),
             clear_row_cache: false,
             overlays: Vec::new(),
             scrollbar: None,
@@ -650,6 +653,7 @@ impl CellPipeline {
         if padding != self.padding {
             self.padding = padding;
             self.full_rebuild = true;
+            self.overlay_cache.clear();
         }
     }
 
@@ -865,6 +869,7 @@ impl CellPipeline {
         };
         if self.clear_row_cache || self.row_cache.len() > rows * 4 + 64 {
             self.row_cache.clear();
+            self.overlay_cache.clear();
             self.clear_row_cache = false;
         }
         // Text streaming in fades in. Not when everything is drawn again, nor when the
@@ -995,7 +1000,8 @@ impl CellPipeline {
         if fade_bottom > 0.0 && fade_height > 0.0 {
             self.above.push(fade(bottom - fade_height, 0.0, fade_bottom));
         }
-        // Overlays (search bar, IME preedit) are drawn above the terminal text.
+        // Overlays (search bar, IME preedit) are drawn above the terminal text. They
+        // change far less often than the rows below, so their instances are cached.
         if !self.overlays.is_empty() {
             let overlays = std::mem::take(&mut self.overlays);
             let mut instances = std::mem::take(&mut self.overlay_instances);
@@ -1003,12 +1009,28 @@ impl CellPipeline {
                 if overlay.row >= rows {
                     continue;
                 }
+                let offset = row_offset(overlay.row);
+                let key = overlay_key(overlay, snapshot.cols);
+                if let Some(cached) = self.overlay_cache.get(&key) {
+                    self.above
+                        .extend(cached.background.iter().chain(&cached.foreground).map(|i| shifted(i, offset)));
+                    continue;
+                }
                 instances.background.clear();
                 instances.foreground.clear();
                 let row = overlay_row(overlay, snapshot.cols);
                 self.build_row(&row, i64::MIN, None, &colors, fonts, queue, &mut instances);
-                let offset = row_offset(overlay.row);
                 self.above.extend(instances.background.iter().chain(&instances.foreground).map(|i| shifted(i, offset)));
+                if self.overlay_cache.len() > 64 {
+                    self.overlay_cache.clear();
+                }
+                self.overlay_cache.insert(
+                    key,
+                    RowInstances {
+                        background: instances.background.clone(),
+                        foreground: instances.foreground.clone(),
+                    },
+                );
             }
             self.overlay_instances = instances;
             self.overlays = overlays;
@@ -1722,6 +1744,20 @@ fn row_key(row: &Row, cursor_col: Option<usize>) -> u64 {
         }
     }
     cursor_col.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hash of everything an overlay's instances depend on besides the state that
+/// clears the cache: its text, colors and where it starts.
+fn overlay_key(overlay: &Overlay, cols: usize) -> u64 {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let mut hasher = foldhash::fast::FixedState::with_seed(0x6f76_6c79).build_hasher();
+    overlay.col.hash(&mut hasher);
+    overlay.text.hash(&mut hasher);
+    overlay.fg.hash(&mut hasher);
+    overlay.bg.hash(&mut hasher);
+    overlay.underline.hash(&mut hasher);
+    cols.hash(&mut hasher);
     hasher.finish()
 }
 
