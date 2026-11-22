@@ -3793,10 +3793,68 @@ fn spawn_reader(
 
 /// A press of `key` with no modifiers, as winit would report it, for bindings
 /// that send a key.
+/// The function keys winit knows, so `key:f13` and the like map to a real key.
+/// The name the configuration uses is `f1`…`f35`.
+const FUNCTION_KEYS: [(NamedKey, KeyCode); 35] = [
+    (NamedKey::F1, KeyCode::F1),
+    (NamedKey::F2, KeyCode::F2),
+    (NamedKey::F3, KeyCode::F3),
+    (NamedKey::F4, KeyCode::F4),
+    (NamedKey::F5, KeyCode::F5),
+    (NamedKey::F6, KeyCode::F6),
+    (NamedKey::F7, KeyCode::F7),
+    (NamedKey::F8, KeyCode::F8),
+    (NamedKey::F9, KeyCode::F9),
+    (NamedKey::F10, KeyCode::F10),
+    (NamedKey::F11, KeyCode::F11),
+    (NamedKey::F12, KeyCode::F12),
+    (NamedKey::F13, KeyCode::F13),
+    (NamedKey::F14, KeyCode::F14),
+    (NamedKey::F15, KeyCode::F15),
+    (NamedKey::F16, KeyCode::F16),
+    (NamedKey::F17, KeyCode::F17),
+    (NamedKey::F18, KeyCode::F18),
+    (NamedKey::F19, KeyCode::F19),
+    (NamedKey::F20, KeyCode::F20),
+    (NamedKey::F21, KeyCode::F21),
+    (NamedKey::F22, KeyCode::F22),
+    (NamedKey::F23, KeyCode::F23),
+    (NamedKey::F24, KeyCode::F24),
+    (NamedKey::F25, KeyCode::F25),
+    (NamedKey::F26, KeyCode::F26),
+    (NamedKey::F27, KeyCode::F27),
+    (NamedKey::F28, KeyCode::F28),
+    (NamedKey::F29, KeyCode::F29),
+    (NamedKey::F30, KeyCode::F30),
+    (NamedKey::F31, KeyCode::F31),
+    (NamedKey::F32, KeyCode::F32),
+    (NamedKey::F33, KeyCode::F33),
+    (NamedKey::F34, KeyCode::F34),
+    (NamedKey::F35, KeyCode::F35),
+];
+
+/// The function key `name` is, such as `f13`.
+fn function_key(name: &str) -> Option<(NamedKey, KeyCode)> {
+    let number: usize = name.strip_prefix('f')?.parse().ok()?;
+    FUNCTION_KEYS.get(number.checked_sub(1)?).copied()
+}
+
 fn unmodified_key(key: &BindKey) -> Option<KeyEvent> {
     let (logical, physical, text) = match key {
         BindKey::Char(c) => (Key::Character(c.to_string().into()), KeyCode::Space, Some(c.to_string())),
         BindKey::Named(name) => {
+            if let Some((named, code)) = function_key(name) {
+                return Some(KeyEvent {
+                    physical_key: PhysicalKey::Code(code),
+                    logical_key: Key::Named(named),
+                    text: None,
+                    location: KeyLocation::Standard,
+                    state: ElementState::Pressed,
+                    repeat: false,
+                    text_with_all_modifiers: None,
+                    key_without_modifiers: Key::Named(named),
+                });
+            }
             let (named, code) = match name.as_str() {
                 "enter" => (NamedKey::Enter, KeyCode::Enter),
                 "tab" => (NamedKey::Tab, KeyCode::Tab),
@@ -3837,23 +3895,8 @@ fn bind_key(key: &Key) -> Option<BindKey> {
             chars.next().is_none().then(|| BindKey::Char(c.to_lowercase().next().unwrap_or(c)))
         }
         Key::Named(named) => {
-            let function = match named {
-                NamedKey::F1 => Some(1),
-                NamedKey::F2 => Some(2),
-                NamedKey::F3 => Some(3),
-                NamedKey::F4 => Some(4),
-                NamedKey::F5 => Some(5),
-                NamedKey::F6 => Some(6),
-                NamedKey::F7 => Some(7),
-                NamedKey::F8 => Some(8),
-                NamedKey::F9 => Some(9),
-                NamedKey::F10 => Some(10),
-                NamedKey::F11 => Some(11),
-                NamedKey::F12 => Some(12),
-                _ => None,
-            };
-            if let Some(n) = function {
-                return Some(BindKey::Named(format!("f{n}")));
+            if let Some(index) = FUNCTION_KEYS.iter().position(|(function, _)| function == named) {
+                return Some(BindKey::Named(format!("f{}", index + 1)));
             }
             let name = match named {
                 NamedKey::Enter => "enter",
@@ -4293,7 +4336,11 @@ mod tests {
         assert_eq!(encode("end", input::KeyModes::default()).as_deref(), Some(&b"\x1b[F"[..]));
         let app_cursor = input::KeyModes { app_cursor: true, ..input::KeyModes::default() };
         assert_eq!(encode("home", app_cursor).as_deref(), Some(&b"\x1bOH"[..]));
-        assert!(unmodified_key(&BindKey::Named("f13".into())).is_none());
+        assert!(unmodified_key(&BindKey::Named("f1".into())).is_some(), "every function key maps");
+        assert!(unmodified_key(&BindKey::Named("f35".into())).is_some());
+        assert_eq!(encode("f13", input::KeyModes::default()).as_deref(), Some(&b"\x1b[25~"[..]));
+        assert!(unmodified_key(&BindKey::Named("f36".into())).is_none());
+        assert_eq!(bind_key(&Key::Named(NamedKey::F13)), Some(BindKey::Named("f13".into())));
     }
 
     #[test]
