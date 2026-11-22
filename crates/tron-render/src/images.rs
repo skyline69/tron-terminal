@@ -46,9 +46,30 @@ pub struct ImagePipeline {
     textures: HashMap<u32, GpuImage>,
     instances: Vec<ImageInstance>,
     layers: [Vec<(u32, u32)>; 3],
+    /// Indices of the placements, sorted by z, and what they were built for.
+    placement_order: Vec<usize>,
+    placement_order_key: Option<(u64, usize)>,
+    /// Virtual placements by image and placement id, and by image alone, for the
+    /// first virtual placement of an image. Built when the graphics change.
+    placeholder_index: HashMap<(u32, u32), usize>,
+    placeholder_by_image: HashMap<u32, usize>,
+    placeholder_index_key: Option<(u64, usize)>,
+    /// Tiles of the Unicode placeholders, relative to the viewport origin. Kept
+    /// while the rows and the graphics stay the same.
+    placeholder_instances: Vec<(u32, ImageInstance)>,
+    placeholder_key: Option<PlaceholderKey>,
     buffer: wgpu::Buffer,
     capacity: usize,
     scratch: Vec<u8>,
+}
+
+/// What the Unicode placeholder tiles depend on besides the rows themselves.
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct PlaceholderKey {
+    generation: u64,
+    alt_screen: bool,
+    cell_width: u32,
+    cell_height: u32,
 }
 
 impl ImagePipeline {
@@ -149,6 +170,13 @@ impl ImagePipeline {
             textures: HashMap::default(),
             instances: Vec::new(),
             layers: Default::default(),
+            placement_order: Vec::new(),
+            placement_order_key: None,
+            placeholder_index: HashMap::default(),
+            placeholder_by_image: HashMap::default(),
+            placeholder_index_key: None,
+            placeholder_instances: Vec::new(),
+            placeholder_key: None,
             buffer: create_buffer(device, capacity),
             capacity,
             scratch: Vec::new(),
@@ -172,21 +200,33 @@ impl ImagePipeline {
         let images = &snapshot.images;
         self.textures.retain(|id, _| images.contains_key(id));
         if snapshot.placements.is_empty() {
+            // The next frame with placeholders scans the cells again.
+            self.placeholder_key = None;
             return;
         }
         let (cell_w, cell_h) = (metrics.width as f32, metrics.height as f32);
 
-        // Placements drawn at a grid position.
+        // Placements drawn at a grid position. The z-order only changes with the
+        // graphics, so the sorted indices are reused across frames.
         let top = snapshot.top_line;
         let rows = snapshot.rows() as i64;
-        let mut placements: Vec<_> = snapshot
-            .placements
-            .iter()
-            .filter(|p| !p.virtual_placement && p.alt_screen == snapshot.alt_screen)
-            .filter(|p| p.line + i64::from(p.rows) > top && p.line < top + rows)
-            .collect();
-        placements.sort_by_key(|p| p.z);
-        for placement in placements {
+        let order_key = (snapshot.graphics_generation, snapshot.placements.len());
+        if self.placement_order_key != Some(order_key) {
+            self.placement_order.clear();
+            self.placement_order.extend(0..snapshot.placements.len());
+            self.placement_order.sort_by_key(|&index| snapshot.placements[index].z);
+            self.placement_order_key = Some(order_key);
+        }
+        let order = std::mem::take(&mut self.placement_order);
+        for &index in &order {
+            let placement = &snapshot.placements[index];
+            if placement.virtual_placement
+                || placement.alt_screen != snapshot.alt_screen
+                || placement.line + i64::from(placement.rows) <= top
+                || placement.line >= top + rows
+            {
+                continue;
+            }
             let Some(image) = images.get(&placement.image_id) else { continue };
             self.ensure_texture(device, queue, image, srgb);
             let [sx, sy, sw, sh] = placement.source;
@@ -222,11 +262,55 @@ impl ImagePipeline {
                 },
             );
         }
+        self.placement_order = order;
 
         // Unicode placeholders: each cell shows one tile of a virtual placement.
+        // Rows only change when damaged, so the tiles are rescanned then, not every frame.
         if !snapshot.placements.iter().any(|p| p.virtual_placement) {
+            self.placeholder_key = None;
+            self.placeholder_instances.clear();
             return;
         }
+        let key = PlaceholderKey {
+            generation: snapshot.graphics_generation,
+            alt_screen: snapshot.alt_screen,
+            cell_width: metrics.width,
+            cell_height: metrics.height,
+        };
+        let damaged = snapshot.damaged.iter().any(|&damaged| damaged);
+        if self.placeholder_key != Some(key) || damaged {
+            self.scan_placeholders(device, queue, snapshot, cell_w, cell_h, srgb);
+            self.placeholder_key = Some(key);
+        }
+        // Tiles are kept relative to the viewport origin so a smooth scroll does not
+        // rebuild them; only their offset changes.
+        let tiles = std::mem::take(&mut self.placeholder_instances);
+        for &(image, instance) in &tiles {
+            self.push(
+                Layer::AboveText,
+                image,
+                ImageInstance {
+                    pos: [instance.pos[0] + padding[0], instance.pos[1] + padding[1]],
+                    ..instance
+                },
+            );
+        }
+        self.placeholder_instances = tiles;
+    }
+
+    /// Finds the tile of every Unicode placeholder cell, relative to the viewport origin.
+    fn scan_placeholders(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        snapshot: &Snapshot,
+        cell_w: f32,
+        cell_h: f32,
+        srgb: bool,
+    ) {
+        self.placeholder_instances.clear();
+        let images = &snapshot.images;
+        self.ensure_placeholder_index(snapshot);
         for (y, row) in snapshot.rows.iter().enumerate() {
             let mut previous = None;
             for (x, cell) in row.cells.iter().enumerate() {
@@ -237,13 +321,13 @@ impl ImagePipeline {
                 };
                 previous = Some(tile);
                 let Some(image) = images.get(&tile.image_id) else { continue };
-                let Some(placement) = snapshot.placements.iter().find(|p| {
-                    p.virtual_placement
-                        && p.image_id == tile.image_id
-                        && (tile.placement_id == 0 || p.placement_id == tile.placement_id)
-                }) else {
-                    continue;
+                let index = if tile.placement_id == 0 {
+                    self.placeholder_by_image.get(&tile.image_id)
+                } else {
+                    self.placeholder_index.get(&(tile.image_id, tile.placement_id))
                 };
+                let Some(&index) = index else { continue };
+                let placement = &snapshot.placements[index];
                 // Fit the image into the placement's cell box, centered, keeping its aspect ratio.
                 let [sx, sy, sw, sh] = placement.source;
                 let box_w = placement.cols as f32 * cell_w;
@@ -263,20 +347,34 @@ impl ImagePipeline {
                 let (iw, ih) = (image.width.max(1) as f32, image.height.max(1) as f32);
                 let u = |px: f32| (sx as f32 + (px - origin_x) / scale) / iw;
                 let v = |py: f32| (sy as f32 + (py - origin_y) / scale) / ih;
-                self.push(
-                    Layer::AboveText,
+                self.placeholder_instances.push((
                     image.id,
                     ImageInstance {
-                        pos: [
-                            padding[0] + x as f32 * cell_w + (x0 - cell_x),
-                            padding[1] + y as f32 * cell_h + (y0 - cell_y),
-                        ],
+                        pos: [x as f32 * cell_w + (x0 - cell_x), y as f32 * cell_h + (y0 - cell_y)],
                         size: [x1 - x0, y1 - y0],
                         uv: [u(x0), v(y0), u(x1), v(y1)],
                     },
-                );
+                ));
             }
         }
+    }
+
+    /// Indexes the virtual placements, to look up the one a placeholder cell shows.
+    fn ensure_placeholder_index(&mut self, snapshot: &Snapshot) {
+        let key = (snapshot.graphics_generation, snapshot.placements.len());
+        if self.placeholder_index_key == Some(key) {
+            return;
+        }
+        self.placeholder_index.clear();
+        self.placeholder_by_image.clear();
+        for (index, placement) in snapshot.placements.iter().enumerate() {
+            if !placement.virtual_placement {
+                continue;
+            }
+            self.placeholder_index.entry((placement.image_id, placement.placement_id)).or_insert(index);
+            self.placeholder_by_image.entry(placement.image_id).or_insert(index);
+        }
+        self.placeholder_index_key = Some(key);
     }
 
     fn push(&mut self, layer: Layer, image: u32, instance: ImageInstance) {
