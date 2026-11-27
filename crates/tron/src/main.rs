@@ -1749,6 +1749,7 @@ impl Session {
         let variations: Vec<(String, f32)> =
             config.font.variations.iter().map(|(tag, value)| (tag.clone(), *value)).collect();
         self.fonts.set_variations(&variations);
+        self.fonts.set_thicken(config.font.thicken);
         self.fonts.set_hinting(match config.font.hinting {
             tron_config::Hinting::Auto => tron_font::Hinting::Auto,
             tron_config::Hinting::On => tron_font::Hinting::On,

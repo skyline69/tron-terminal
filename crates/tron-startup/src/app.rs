@@ -1882,6 +1882,35 @@ mod tests {
     }
 
     #[test]
+    fn font_thickening_displays_the_current_value_and_previews_changes() {
+        let mut catalog = catalog();
+        catalog.config.font.thicken = 0.75;
+        let mut app = App::new(true, catalog, &[]);
+        app.apply(Command::Select(Tab::Settings), Rect::default());
+        let index = app.settings.iter().position(|s| s.key == "font.thicken").unwrap();
+        app.apply(Command::Move(index as isize), Rect::default());
+        let text = screen(&mut app);
+        assert!(text.contains("Font thickening") && text.contains("‹ 0.75 ›"), "{text}");
+        assert!(app.choices.changes(&app.saved, &app.settings).is_empty());
+        app.apply(app.on_key(key(KeyCode::Right)), Rect::default());
+        let preview = app.take_preview(Instant::now() + PREVIEW_DELAY).unwrap();
+        assert_eq!(tron_config::Config::parse(&preview).unwrap().font.thicken, 0.8);
+        let text = screen(&mut app);
+        assert!(text.contains("Font thickening") && text.contains("‹ 0.8 ›"), "{text}");
+        assert_eq!(
+            app.choices.changes(&app.saved, &app.settings),
+            vec![("Font thickening".into(), "0.75".into(), "0.8".into())]
+        );
+        app.apply(Command::Undo, Rect::default());
+        let preview = app.take_preview(Instant::now() + PREVIEW_DELAY).unwrap();
+        assert_eq!(tron_config::Config::parse(&preview).unwrap().font.thicken, 0.75);
+        assert_eq!(app.choices, app.saved);
+        app.apply(Command::Redo, Rect::default());
+        let preview = app.take_preview(Instant::now() + PREVIEW_DELAY).unwrap();
+        assert_eq!(tron_config::Config::parse(&preview).unwrap().font.thicken, 0.8);
+    }
+
+    #[test]
     fn saving_asks_first_and_writes_the_file() {
         let dir = std::env::temp_dir().join(format!("tron-startup-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

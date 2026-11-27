@@ -162,6 +162,7 @@ pub struct FontSystem {
     style_families: [Option<String>; 4],
     variations: Vec<([u8; 4], f32)>,
     hinting: Hinting,
+    thicken: f32,
     size_pt: f32,
     scale_factor: f64,
     features: Vec<harfrust::Feature>,
@@ -209,6 +210,7 @@ impl FontSystem {
             style_families: [None, None, None, None],
             variations: Vec::new(),
             hinting: Hinting::Auto,
+            thicken: 0.0,
             size_pt,
             scale_factor,
             features: Vec::new(),
@@ -331,6 +333,13 @@ impl FontSystem {
             self.hinting = hinting;
             self.set_size(self.size_pt, self.scale_factor);
         }
+    }
+
+    /// Extra outline weight as a fraction of synthetic bold, clamped to 0..=1.
+    /// Non-finite values disable thickening. Does not change shaping or cell metrics.
+    /// Callers must invalidate cached glyph bitmaps after changing this setting.
+    pub fn set_thicken(&mut self, strength: f32) {
+        self.thicken = if strength.is_finite() { strength.clamp(0.0, 1.0) } else { 0.0 };
     }
 
     /// Families tried before system fallback for characters the main font lacks.
@@ -646,8 +655,12 @@ impl FontSystem {
             Source::Bitmap(StrikeWith::BestFit),
         ]);
         render.format(Format::Alpha);
-        if face.embolden {
-            render.embolden(size_px / 32.0);
+        let bold_strength = size_px / 32.0;
+        let strength = if face.embolden { bold_strength } else { 0.0 } + self.thicken * bold_strength;
+        if strength != 0.0 {
+            // One call: Swash replaces, rather than accumulates, the strength.
+            // Only monochrome outlines are affected; bitmap and color glyphs are not.
+            render.embolden(strength);
         }
         let stretch = scale_x / scale_y;
         let skew = face.skew.map(|degrees| Transform::skew(Angle::from_degrees(degrees), Angle::ZERO));
@@ -812,6 +825,100 @@ mod tests {
         let rtl_face = fonts.face_for('a', Style::Regular);
         fonts.shape_directional(rtl_face, "ab", true, &mut out);
         assert_eq!(out.first().map(|g| g.cluster), Some(1), "right to left glyphs come in visual order");
+    }
+
+    fn assert_same_glyph(actual: &RasterizedGlyph, expected: &RasterizedGlyph) {
+        assert_eq!(actual.format, expected.format);
+        assert_eq!(
+            (actual.width, actual.height, actual.left, actual.top),
+            (expected.width, expected.height, expected.left, expected.top)
+        );
+        assert_eq!(actual.data, expected.data);
+    }
+
+    fn coverage(glyph: &RasterizedGlyph) -> u64 {
+        assert_eq!(glyph.format, GlyphFormat::Mask);
+        glyph.data.iter().map(|&alpha| u64::from(alpha)).sum()
+    }
+
+    #[test]
+    fn thickening_changes_coverage_without_changing_layout() {
+        for density in [1.0, 2.0] {
+            for hinting in [Hinting::On, Hinting::Off] {
+                let mut fonts = FontSystem::new("monospace", 12.0, density).unwrap();
+                fonts.set_hinting(hinting);
+                let metrics = fonts.metrics();
+                let key = fonts.glyph('H', Style::Regular).unwrap();
+                let sprite = fonts.sprite('─').unwrap();
+                let mut before = Vec::new();
+                fonts.shape(key.face, "H amburgefonstiv Il1| 0O8 Жизнь", &mut before);
+                for (x, y) in [(1.0, 1.0), (2.0, 1.0), (2.0, 2.0)] {
+                    fonts.set_thicken(0.0);
+                    let normal = fonts.rasterize_scaled(key, x, y).unwrap();
+                    fonts.set_thicken(0.25);
+                    let thicker = fonts.rasterize_scaled(key, x, y).unwrap();
+                    assert!(coverage(&thicker) > coverage(&normal));
+                    assert_eq!(thicker.data.len(), (thicker.width * thicker.height) as usize);
+                    assert_eq!(fonts.metrics(), metrics);
+                    assert_same_glyph(&fonts.sprite('─').unwrap(), &sprite);
+                    let mut after = Vec::new();
+                    fonts.shape(key.face, "H amburgefonstiv Il1| 0O8 Жизнь", &mut after);
+                    assert_eq!(before, after);
+                    fonts.set_thicken(0.0);
+                    assert_same_glyph(&fonts.rasterize_scaled(key, x, y).unwrap(), &normal);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn thickening_adds_to_synthetic_bold() {
+        let mut fonts = FontSystem::new("monospace", 12.0, 1.0).unwrap();
+        let key = fonts.glyph('H', Style::Regular).unwrap();
+        // Force synthesis on the same face instead of depending on installed bold faces.
+        fonts.faces[key.face as usize].embolden = true;
+        let bold = fonts.rasterize(key).unwrap();
+        fonts.set_thicken(0.25);
+        let thicker_bold = fonts.rasterize(key).unwrap();
+        assert!(coverage(&thicker_bold) > coverage(&bold));
+        fonts.set_thicken(0.0);
+        assert_same_glyph(&fonts.rasterize(key).unwrap(), &bold);
+        fonts.faces[key.face as usize].embolden = false;
+        fonts.set_thicken(1.0);
+        assert_same_glyph(&fonts.rasterize(key).unwrap(), &bold);
+    }
+
+    #[test]
+    fn zero_thickening_preserves_each_style() {
+        let mut fonts = FontSystem::new("monospace", 12.0, 1.0).unwrap();
+        for style in [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic] {
+            let key = fonts.glyph('H', style).unwrap();
+            let original = fonts.rasterize(key).unwrap();
+            fonts.set_thicken(0.25);
+            assert!(coverage(&fonts.rasterize(key).unwrap()) > coverage(&original));
+            fonts.set_thicken(0.0);
+            assert_same_glyph(&fonts.rasterize(key).unwrap(), &original);
+        }
+    }
+
+    #[test]
+    fn thickening_setter_bounds_direct_api_inputs() {
+        let mut fonts = FontSystem::new("monospace", 12.0, 1.0).unwrap();
+        for (input, expected) in [(0.25, 0.25), (-1.0, 0.0), (2.0, 1.0), (f32::NAN, 0.0), (f32::INFINITY, 0.0)] {
+            fonts.set_thicken(input);
+            assert_eq!(fonts.thicken, expected);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn thickening_leaves_color_emoji_unchanged() {
+        let mut fonts = FontSystem::new("Apple Color Emoji", 12.0, 1.0).unwrap();
+        let key = fonts.glyph('😀', Style::Regular).expect("Apple Color Emoji has grinning face");
+        let original = fonts.rasterize(key).unwrap();
+        assert_eq!(original.format, GlyphFormat::Color);
+        fonts.set_thicken(1.0);
+        assert_same_glyph(&fonts.rasterize(key).unwrap(), &original);
     }
 
     #[test]
