@@ -36,6 +36,11 @@ ligatures = true
 # variations = { wght = 450, wdth = 90 }
 # Outline hinting: auto (on below 1.5x scale), on or off.
 hinting = "auto"
+# Extra outline weight: 0.0 (unchanged) to 1.0 (one synthetic-bold increment).
+# Try 0.25 for slightly heavier text. Scales with font size and display density;
+# adds to bold without changing cell spacing. Bitmap/color glyphs and generated
+# box drawing are unchanged. Applies on reload; not an exact Core Text match.
+thicken = 0.0
 # Reorder rows with right-to-left text (Arabic, Hebrew) for display.
 bidi = true
 

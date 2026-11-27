@@ -316,8 +316,19 @@ pub struct FontConfig {
     /// Variable font axes, for example `{ wght = 450, wdth = 90 }`.
     pub variations: BTreeMap<String, f32>,
     pub hinting: Hinting,
+    /// Extra outline weight, from 0 to 1, as a fraction of synthetic bold.
+    #[serde(deserialize_with = "deserialize_thicken")]
+    pub thicken: f32,
     /// Reorder rows with right-to-left text (Arabic, Hebrew) for display.
     pub bidi: bool,
+}
+
+fn deserialize_thicken<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let value = f64::deserialize(deserializer)?;
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(serde::de::Error::custom("font.thicken must be a finite number between 0 and 1"));
+    }
+    Ok(value as f32)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -343,6 +354,7 @@ impl Default for FontConfig {
             bold_italic_family: None,
             variations: BTreeMap::new(),
             hinting: Hinting::Auto,
+            thicken: 0.0,
             bidi: true,
         }
     }
@@ -1095,6 +1107,28 @@ mod tests {
         assert_eq!(config.font.family, "monospace");
         assert!(config.font.ligatures && config.font.bidi);
         assert_eq!(config.notifications.mode, NotifyMode::Unfocused);
+    }
+
+    #[test]
+    fn font_thickening_defaults_to_zero() {
+        assert_eq!(FontConfig::default().thicken, 0.0);
+        assert_eq!(Config::parse("").unwrap().font.thicken, 0.0);
+        assert_eq!(Config::parse("[font]\nsize = 16.0").unwrap().font.thicken, 0.0);
+    }
+
+    #[test]
+    fn font_thickening_accepts_the_supported_range() {
+        for value in ["0", "0.0", "0.25", "1", "1.0"] {
+            let config = Config::parse(&format!("[font]\nthicken = {value}")).unwrap();
+            assert_eq!(config.font.thicken, value.parse::<f32>().unwrap());
+        }
+    }
+
+    #[test]
+    fn font_thickening_rejects_invalid_values() {
+        for value in ["-0.1", "1.1", "1.00000001", "nan", "inf", "-inf", "true", "\"0.25\""] {
+            assert!(Config::parse(&format!("[font]\nthicken = {value}")).is_err(), "accepted {value}");
+        }
     }
 
     #[test]
