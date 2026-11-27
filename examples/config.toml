@@ -40,6 +40,7 @@ hinting = "auto"
 # Try 0.25 for slightly heavier text. Scales with font size and display density;
 # adds to bold without changing cell spacing. Bitmap/color glyphs and generated
 # box drawing are unchanged. Applies on reload; not an exact Core Text match.
+# Also adjustable in tron settings as "Font thickening", with live preview.
 thicken = 0.0
 # Reorder rows with right-to-left text (Arabic, Hebrew) for display.
 bidi = true

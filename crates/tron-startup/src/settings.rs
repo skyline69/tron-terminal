@@ -81,6 +81,13 @@ pub fn list(fonts: &[String], max_fps: Option<u32>) -> Vec<Setting> {
             "Fit glyph outlines to the pixel grid. Auto hints on low density screens.",
             choice(&["auto", "on", "off"]),
         ),
+        setting(
+            "font.thicken",
+            "Font thickening",
+            "Extra outline weight. 0 keeps the original strokes; 1 adds one synthetic-bold increment. \
+             Cell spacing, color glyphs and generated box drawing are unchanged.",
+            Kind::Float { min: 0.0, max: 1.0, step: 0.05 },
+        ),
         setting("font.bidi", "Right-to-left text", "Show Arabic and Hebrew in reading order.", Kind::Bool),
         setting(
             "window.opacity",
@@ -203,11 +210,15 @@ pub fn read(config: &Config) -> BTreeMap<&'static str, toml::Value> {
         Some(true) => EVERY_LAUNCH,
         Some(false) => NEVER,
     };
+    // Preserve custom decimal values without widening f32 noise (e.g. 0.8) into
+    // the UI's f64 values, which would show a false change after saving/reloading.
+    let thicken = config.font.thicken.to_string().parse().expect("a displayed f32 is a valid f64");
     BTreeMap::from([
         ("font.family", String(config.font.family.clone())),
         ("font.size", Float(f64::from(config.font.size))),
         ("font.ligatures", Boolean(config.font.ligatures)),
         ("font.hinting", name(config.font.hinting)),
+        ("font.thicken", Float(thicken)),
         ("font.bidi", Boolean(config.font.bidi)),
         ("window.opacity", Float((f64::from(config.window.opacity) * 100.0).round() / 100.0)),
         ("window.blur", Boolean(config.window.blur)),
@@ -478,6 +489,56 @@ mod tests {
         assert_eq!(fps_choices(Some(100)), choice(&[DISPLAY_RATE, "100", "90", "75", "60", "30", "15"]));
         assert_eq!(display(&toml::Value::Float(0.85)), "0.85");
         assert_eq!(display(&toml::Value::Float(12.0)), "12");
+    }
+
+    #[test]
+    fn font_thickening_steps_and_previews_without_rounding_drift() {
+        let settings = list(&[], None);
+        let index = settings.iter().position(|s| s.key == "font.thicken").unwrap();
+        let setting = &settings[index];
+        assert_eq!(settings[index - 1].key, "font.hinting");
+        assert_eq!(setting.label, "Font thickening");
+        assert_eq!(setting.kind, Kind::Float { min: 0.0, max: 1.0, step: 0.05 });
+        assert_eq!(read(&Config::default())[setting.key], toml::Value::Float(0.0));
+        assert_eq!(step(setting, &toml::Value::Float(0.0), -1), toml::Value::Float(0.0));
+        assert_eq!(step(setting, &toml::Value::Float(1.0), 1), toml::Value::Float(1.0));
+        for i in 0..=20 {
+            let expected = toml::Value::Float(f64::from(i) / 20.0);
+            assert_eq!(step(setting, &toml::Value::Float(0.0), i as isize), expected);
+            let mut choices = Choices::from_config(&Config::default());
+            choices.settings.insert(setting.key, expected.clone());
+            let config = Config::parse(&choices.overlay("tron", &[])).unwrap();
+            assert_eq!(read(&config)[setting.key], expected);
+            assert!(Choices::from_config(&config).changes(&choices, &settings).is_empty());
+        }
+        let custom = Config::parse("[font]\nthicken = 0.1234").unwrap();
+        assert_eq!(read(&custom)[setting.key], toml::Value::Float(0.1234));
+    }
+
+    #[test]
+    fn font_thickening_saves_and_reloads_without_changing_other_settings() {
+        for (name, initial) in [("unset", ""), ("set", "thicken = 0.75\n")] {
+            let paths = temp_paths(&format!("thicken-{name}"));
+            std::fs::create_dir_all(&paths.config_dir).unwrap();
+            std::fs::write(&paths.config_file, format!("# my settings\n[font]\nsize = 12.0 # keep size\n{initial}"))
+                .unwrap();
+            let mut saved = Choices::from_config(&Config::load(&paths).unwrap());
+            for strength in [0.8, 1.0, 0.0] {
+                let mut choices = saved.clone();
+                choices.settings.insert("font.thicken", toml::Value::Float(strength));
+                choices.save(&saved, &paths).unwrap();
+                let text = std::fs::read_to_string(&paths.config_file).unwrap();
+                assert!(text.starts_with("# my settings\n"), "{text}");
+                assert!(text.contains("size = 12.0 # keep size"), "{text}");
+                let written = Config::load(&paths).unwrap();
+                assert_eq!(written.font.thicken, strength as f32);
+                let loaded = Choices::from_config(&written);
+                assert_eq!(loaded, choices);
+                assert!(loaded.changes(&choices, &list(&[], None)).is_empty());
+                saved = loaded;
+            }
+            std::fs::remove_dir_all(&paths.config_dir).unwrap();
+        }
     }
 
     #[test]
